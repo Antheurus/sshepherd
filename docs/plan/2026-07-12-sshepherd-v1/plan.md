@@ -507,12 +507,34 @@ plus `--help` per group and `references/*.md` deep docs.
 - CARRIED-FORWARD (known issue #2→resolved-in-code / db SQL correctness): the introspection SQL (column names like pg_stat_statements total_exec_time vs total_time across PG13/14+) has NOT been driven against a real Postgres — no fixture DB exists. Must be spot-checked in the Phase 6/7 smoke suite alongside the Linux command shapes (build a Postgres container into scripts/sshd-fixture).
 - Auth model documented in targets.example.toml: password never transits sshepherd (container peer/trust or remote .pgpass).
 
+### Phase 5: mutating groups (services/config/deploy/security) — 2026-07-13
+
+**Status:** Complete (audited ✅ mostly, one observability gap found + fixed + re-verified)
+**Files created:** src/recipes.ts (typed steps shell|compose|migrate|healthcheck|http-probe|wait, Bun.TOML loader w/ SSHEPHERD_RECIPE_PATH override mirroring targets.ts, resolveStepOrder topo sort w/ cycle+unknown-dep rejection, planRecipe dry-run planner, buildRunScript/buildMigrateScript/buildRollbackCommand, buildDeployOpContext), src/__tests__/recipes.test.ts, fixtures deploy.demo.toml + deploy.no-rollback.toml
+**Files modified:** src/registry.ts (15 mutating ops appended: services restart+start/stop/restart/reload, config get/validate/put/reload, deploy run/status/rollback/logs/migrate, security harden; executeOp rewired: confirmGate+auditMutating gate), src/types.ts (added CONFIRMATION_REQUIRED to SshErrorCode; added optional OpSpec.shapeError hook), src/transport.ts (CONFIRMATION_REQUIRED static message + exported errorInfo), src/__tests__/registry.test.ts
+**Key decisions:**
+- ONE mutating gate in executeOp: every `mutating:true` op flows confirmGate (unless deps.yes) → refusal audits outcome:'refused' + returns CONFIRMATION_REQUIRED with ssh never touched → proceed runs + audits ok/error. `deploy run --dry-run` is the sole exemption (runLocal, executes nothing). No per-op bespoke gating.
+- Recipe steps are a discriminated union on `kind`; `run` field of shell/compose/migrate is the ONE raw-shell pressure valve (unquoted by design, matches research.md's pyinfra server.shell model — recipe files are author-controlled like a Makefile), reachable ONLY via a loaded named TOML recipe. No ad-hoc `exec` op anywhere.
+- LMS gotcha expressible: `migrate depends_on = "up"` sorts after the compose build/up step (fixture declares them out of order to prove real reordering).
+- config ops gated by a per-alias path allowlist, fail-closed before ssh (get/validate/put). config put writes `.bak-<UTCdate>` before overwrite in one round trip (own cp+base64 script — files upload never existed). config reload takes a unit NAME not a path (no allowlist applicable, mirrors services systemctl verbs).
+- security harden ships the SAFE subset by default (X11Forwarding/PermitEmptyPasswords/MaxAuthTries/ClientAlive*); PermitRootLogin/PasswordAuthentication only with explicit keep-session:false. Never self-locks-out by default.
+- deploy step-failure attribution (audit fix e377540): each step wrapped so a failure echoes `__SSHEPHERD_STEP_FAILED__ <idx> <kind> <name>` on stdout (stderr stays discarded); surfaced via new additive `OpSpec.shapeError` hook → `data.failed_step`. One round trip preserved, executeOp not restructured.
+**Test count:** 85 → 143 pass (executor + audit + fix drives), 0 fail, `just check` clean.
+**Deviations from plan:** compose step shape follows research.md's `run="build app"` (not brief's {service,action}); rollback strategies previous-tag/compose-file (research specifies only the refusal behavior); config put self-contained (no files upload dep).
+**Notes for next phase (LOAD-BEARING):**
+- SCOPE GAP found by audit + being closed in a follow-up executor BEFORE Phase 6: the four READ-ONLY security ops (ssh-audit/listeners/authorized-keys/fail2ban) and standalone `files upload` from research.md's locked 9-group inventory were never assigned a phase — the user locked the FULL 9-group set, so these must exist before SKILL.md documents the set. Being appended to the registry as read-only (security) + mutating-gated (files upload) ops.
+- `buildDeployOpContext` (recipes.ts) is built + unit-tested but UNWIRED (its caller is cli.ts, Phase 6's placeholder) — Phase 6 must wire it, not reinvent it.
+- CARRIED: no live docker/compose/sshd host drive (no fixture container) — Phase 6/7 smoke suite must build scripts/sshd-fixture (sshd + docker-cli + coreutils + postgres) and spot-check the mutating command shapes + db SQL + Linux read-only shapes against it.
+
 ## Review findings
 
 (Filled by auditor subagents.)
 
 ### Phase 4 audit — 2026-07-12
 ✅ All 4 success criteria met + verified live (assertSelectOnly rejects non-SELECT; txn wrapper wraps every op; db activity numeric rollups; db slow graceful degradation). Zero-knowledge, registry pattern, and shq/shellJoin injection safety all held under live adversarial `sh -c` marker-file drives. One genuine security defect found and reproduced (COMMIT-injection bypass of the read-only txn via crafted subquery-boundary escape) → fix-implementer closed it (578cf52, `assertNoMultiStatementSql`), re-verified live. DEFERRED (carried, not ❌): live Postgres drive (no fixture DB — Phase 6/7 smoke suite). Final: 85 tests pass, `just check` clean.
+
+### Phase 5 audit — 2026-07-13
+Mostly ✅: all 5 success criteria met + verified live (deploy run --dry-run plans-only no ssh; migrate depends_on reorders; config put writes .bak before overwrite via real fixture drive; rollback refuses without [rollback]; every mutating op shares one confirm+audit gate). 8/9 cross-phase invariants clean: ONE mutating gate (single confirmGate call site, --dry-run the only exemption), audit hygiene (args_hash never raw), zero-knowledge (no host/user/port in plans/audit/errors), NO raw exec (shell steps only via named recipe), injection safety (14 interpolation points driven with real `sh -c`), config allowlist (fail-closed before ssh), harden no-self-lockout (safe subset default, risky gated behind keep-session:false), recipe validation (cycle/unknown-dep throw). One FAILED invariant → FIXED (e377540): deploy step-failure attribution — buildRunScript joined steps with `&&` giving a bare COMMAND_FAILED with no step identity; fix wraps each step with a stdout `__SSHEPHERD_STEP_FAILED__ <idx> <kind> <name>` marker (stderr stays discarded, one round trip preserved) surfaced via a new additive `OpSpec.shapeError` hook (mirrors runLocal pattern, executeOp not restructured) → `data.failed_step`. Re-verified live incl. injection-safe marker. Auditor added injection + wiring drives (df08a0b). Final: 143 tests pass, `just check` clean.
 
 ## Final status
 
