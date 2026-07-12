@@ -547,6 +547,24 @@ plus `--help` per group and `references/*.md` deep docs.
 ### Phase 5 audit — 2026-07-13
 Mostly ✅: all 5 success criteria met + verified live (deploy run --dry-run plans-only no ssh; migrate depends_on reorders; config put writes .bak before overwrite via real fixture drive; rollback refuses without [rollback]; every mutating op shares one confirm+audit gate). 8/9 cross-phase invariants clean: ONE mutating gate (single confirmGate call site, --dry-run the only exemption), audit hygiene (args_hash never raw), zero-knowledge (no host/user/port in plans/audit/errors), NO raw exec (shell steps only via named recipe), injection safety (14 interpolation points driven with real `sh -c`), config allowlist (fail-closed before ssh), harden no-self-lockout (safe subset default, risky gated behind keep-session:false), recipe validation (cycle/unknown-dep throw). One FAILED invariant → FIXED (e377540): deploy step-failure attribution — buildRunScript joined steps with `&&` giving a bare COMMAND_FAILED with no step identity; fix wraps each step with a stdout `__SSHEPHERD_STEP_FAILED__ <idx> <kind> <name>` marker (stderr stays discarded, one round trip preserved) surfaced via a new additive `OpSpec.shapeError` hook (mirrors runLocal pattern, executeOp not restructured) → `data.failed_step`. Re-verified live incl. injection-safe marker. Auditor added injection + wiring drives (df08a0b). Final: 143 tests pass, `just check` clean.
 
+### Phase 6: SKILL.md + references + CLI polish — 2026-07-13
+
+**Status:** Complete (audited ✅, zero defects)
+**Files created:** SKILL.md (repo root), references/{transport,recipes,db,output-shapes}.md, src/__tests__/skill-doc.test.ts
+**Files modified:** src/cli.ts (rewritten from the 9-line placeholder into the real argv dispatcher), src/output.ts (added printJson/printError/printPretty; --pretty renderer deferred from Phase 2 now implemented)
+**Key decisions:**
+- cli.ts dispatches EVERY op through the single `executeOp(op, ctx, deps)` call — `--yes` → ExecuteDeps.yes; the mutating confirm+audit gate stays in one place, no cli bypass (verified live: services restart / security harden without --yes → CONFIRMATION_REQUIRED, no ssh, audit line 'refused').
+- buildOpContext branches by group: db ops resolve first positional as a pg-target via buildDbOpContext; deploy ops resolve first positional as a recipe via buildDeployOpContext (was UNWIRED — now the only path deploy ops take); every other group's first positional is the ssh alias. mapArgsToCtx walks op.args in declared order — the SAME list --help renders from, which is what makes the drift test meaningful.
+- config put `--from <local path>` reads+base64-encodes locally and injects content-base64 before mapping (the arg is CLI-produced, not hand-typed).
+- Help is generated from the registry (listOps/ArgSpec), not a second hardcoded list → can't drift. Exit codes: 0 ok, 1 op/transport error, 2 usage/local-refusal (no ssh).
+- Zero-knowledge output path VERIFIED LIVE: cli.ts + output.ts never reference .raw/transportStderr; --pretty renders only envelope fields; a failed db op against an unreachable fixture alias surfaced a static SSH_TRANSPORT_ERROR with no host/stderr leak.
+- Drift test (skill-doc.test.ts) is bidirectional (doc→registry via getOp + registry→doc: every op appears in SKILL.md) and proven genuine by the auditor (mutate SKILL.md → test fails → revert to byte-identical).
+**Test count:** 157 → 160 pass, `just check` clean, `just build` compiles + really dispatches.
+**Notes for Phase 7:** closeMaster called after any non-empty-alias op (harmless — piped, discarded, no leak; auditor confirmed). references/db.md + recipes.md are human docs, not covered by the drift test (SHIPPED-UNVERIFIED, acceptable). Binary is now usable end-to-end; Phase 7 adds README/CONTRIBUTING/SECURITY/CI/release/plugin manifests + the sshd+docker+postgres smoke fixture that spot-checks every command shape against a real Linux host.
+
+### Phase 6 audit — 2026-07-13
+✅ All 3 success criteria + all 6 critical invariants VERIFIED-LIVE against the compiled binary, zero defects, no fixes needed. Zero-knowledge output path clean (no .raw/stderr reaches stdout, --pretty envelope-only, error path static-message-only). Single executeOp gate, no bypass. db/deploy ctx wiring correct (buildDbOpContext/buildDeployOpContext driven with fixtures). Drift test genuine (mutate→fail→revert, SHA-256 matches commit). Exit codes 0/1/2 correct. Help registry-generated. closeMaster concern assessed harmless. 160 tests pass.
+
 ## Final status
 
 (One paragraph at the end.)
