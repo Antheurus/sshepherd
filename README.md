@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-bun-fbf0df?logo=bun)](https://bun.sh)
 
+![sshepherd — a zero-knowledge shepherd guiding your servers over SSH](docs/assets/hero.jpeg)
+
 A zero-knowledge SSH ops CLI for Claude Code and any other agent or terminal — server
 health checks, docker/systemd control, log tailing, config edits, read-only Postgres
 introspection, and declarative deploys, without ever letting the agent see a password,
