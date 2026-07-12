@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  assertNoMultiStatementSql,
   assertSelectOnly,
   buildDbSlowCommand,
   buildPsqlCommand,
@@ -193,46 +194,31 @@ describe('multi-statement SQL escape attempt (SELECT 1; COMMIT; DROP TABLE x)', 
   });
 });
 
-describe('KNOWN GAP (Phase 4 audit, 2026-07-12) — wrapAsJsonAgg subquery boundary can be closed early', () => {
-  // Unlike the naive `SELECT 1; COMMIT; DROP TABLE x` case above (blocked twice: the
-  // parser flags the literal `drop`, AND the parenthesized subquery makes the raw
-  // semicolons a syntax error), a payload engineered around wrapAsJsonAgg's exact
-  // template (`SELECT json_agg(t) FROM (<sql>) t`) can close that paren *itself* via a
-  // leading `) t;` and resume with its own fully-formed statements before the
-  // template's trailing `) t` is appended. node-sql-parser throws on this malformed
-  // fragment (it starts with a stray `)`), and `assertSelectOnly`'s catch-and-pass-
-  // through (advisory only, by design — see its docstring) lets it reach
-  // `wrapAsJsonAgg` unblocked. The result is a fully SQL-syntax-valid multi-statement
-  // batch where an injected `COMMIT` ends the READ ONLY transaction before the
-  // attacker's own DDL/DML runs — at that point only the read-only DB role (layer 1,
-  // documented in targets.example.toml, NOT enforced by sshepherd itself) stops the
-  // write. This is a real gap beyond what research.md's "a session can revoke
-  // read-only on itself" caveat anticipated: it is reachable via ordinary parser
-  // advisory-pass-through, not just an explicit `SET TRANSACTION READ WRITE`.
-  //
-  // Recommended fix (not applied here — reporting only, per auditor scope): `db query`
-  // should reject any user-supplied `sql` containing a bare `;` outright, since a
-  // legitimate single ad hoc SELECT never needs one (wrapAsJsonAgg already strips only
-  // a *trailing* semicolon). That closes this exact class without touching the
-  // static, sshepherd-authored queries used by tables/activity/connections/slow/size.
-  test('reproduces: a payload closing the FROM(...) boundary early produces a fully valid multi-statement batch that ends the read-only transaction via COMMIT', () => {
+describe('multi-statement db query is rejected (COMMIT-injection gap closed)', () => {
+  // A payload engineered around wrapAsJsonAgg's exact template
+  // (`SELECT json_agg(t) FROM (<sql>) t`) can close that paren *itself* via a leading
+  // `) t;` and resume with its own fully-formed statements before the template's
+  // trailing `) t` is appended — node-sql-parser throws on the malformed fragment and
+  // `assertSelectOnly`'s advisory catch-and-pass-through (by design — see its
+  // docstring) lets it reach `wrapAsJsonAgg` unblocked, producing a fully SQL-valid
+  // multi-statement batch where an injected `COMMIT` ends the READ ONLY transaction
+  // before the attacker's own DDL/DML runs. `assertNoMultiStatementSql` closes this by
+  // rejecting any bare `;` in the user-supplied `sql` outright, before node-sql-parser
+  // or `wrapAsJsonAgg` ever see it — a legitimate ad hoc single SELECT never needs one.
+  test('rejects a payload that would close the FROM(...) boundary early and inject a COMMIT', () => {
     const payload = 'SELECT 1) t; COMMIT; DROP TABLE foo; SELECT (SELECT 1';
-
-    // The parser layer does NOT block this — it throws internally on the malformed
-    // fragment and assertSelectOnly's advisory catch lets it through unmodified.
-    expect(() => assertSelectOnly(payload)).not.toThrow();
-
-    const wrapped = wrapReadOnlyTxn(wrapAsJsonAgg(payload));
-    expect(wrapped).toBe(
-      'BEGIN TRANSACTION READ ONLY; SELECT json_agg(t) FROM (SELECT 1) t; COMMIT; ' +
-        'DROP TABLE foo; SELECT (SELECT 1) t; ROLLBACK;',
+    expect(() => assertNoMultiStatementSql(payload)).toThrow(
+      /db query rejects multi-statement SQL/,
     );
-    // A bare top-level COMMIT now sits between the wrapper's own BEGIN and ROLLBACK —
-    // this is the txn-readonly wrapper being escaped by the query text it wraps, not
-    // by the shell (shell-injection safety is separately proven above/in registry
-    // tests). Whether DROP TABLE actually succeeds depends entirely on the DB role's
-    // grants (layer 1) — sshepherd provides no further protection past this point for
-    // `db query`. Tracked as a follow-up hardening item, not fixed by this test.
-    expect(wrapped).toMatch(/READ ONLY;.*COMMIT;.*DROP TABLE foo/);
+  });
+
+  test('a plain single SELECT with no semicolon passes', () => {
+    expect(() => assertNoMultiStatementSql('SELECT * FROM users LIMIT 5')).not.toThrow();
+  });
+
+  test('a SELECT with a single trailing semicolon is rejected too', () => {
+    expect(() => assertNoMultiStatementSql('SELECT * FROM users LIMIT 5;')).toThrow(
+      /db query rejects multi-statement SQL/,
+    );
   });
 });

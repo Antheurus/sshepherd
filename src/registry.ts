@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  assertNoMultiStatementSql,
   assertSelectOnly,
   buildDbSlowCommand,
   buildPsqlCommand,
@@ -1353,6 +1354,7 @@ const dbQuery: OpSpec<unknown[]> = {
   output: 'native-json',
   buildRemote: (ctx) => {
     const sql = reqStr(ctx, 'sql');
+    assertNoMultiStatementSql(sql);
     assertSelectOnly(sql);
     return buildPsqlCommand(dbConnectionFromCtx(ctx), wrapReadOnlyTxn(wrapAsJsonAgg(sql)));
   },

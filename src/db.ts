@@ -31,6 +31,23 @@ function readStatementType(statement: unknown): string | null {
 }
 
 /**
+ * Security guard for `db query`'s free-text `sql` arg only — NOT part of `assertSelectOnly`
+ * and never called for the static, sshepherd-authored SQL (tables/activity/connections/
+ * slow/size), which legitimately contains `;`. A payload can close `wrapAsJsonAgg`'s
+ * `FROM (<sql>) t` boundary early and append its own statements (e.g. a bare `COMMIT`
+ * that ends `wrapReadOnlyTxn`'s read-only transaction before injected DDL/DML runs) —
+ * node-sql-parser throws on the malformed fragment and `assertSelectOnly`'s advisory
+ * catch-and-pass-through lets it through unblocked. A legitimate ad hoc single SELECT
+ * never needs a `;`, so this rejects any bare `;` outright, before node-sql-parser and
+ * before `wrapAsJsonAgg` ever see the string.
+ */
+export function assertNoMultiStatementSql(sql: string): void {
+  if (sql.trim().includes(';')) {
+    throw new Error("db query rejects multi-statement SQL: a single SELECT statement, no ';'");
+  }
+}
+
+/**
  * UX guardrail only (research.md §"DB access", layer 3 of 3): a fast, friendly
  * rejection for a statement whose top-level type is unambiguously non-SELECT. This is
  * NOT the security boundary — a writable CTE parses as `select` and passes here on
