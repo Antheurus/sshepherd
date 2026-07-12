@@ -52,9 +52,35 @@ shape in the registry (`docker stats`/`compose ps` field names, `ss -H -tlnp` co
 `systemctl show` properties, the `db` introspection SQL's column names across PG13/14+) was
 authored from docs/man-pages on a macOS dev box, never live-captured — the smoke fixture and
 script built this session are complete and correct on inspection, but Docker was not
-available in this execution environment, so `just smoke` has **not been run**. Those command
-shapes remain doc-derived, not live-verified, until a maintainer runs `just smoke` on a
-machine with Docker.
+available at the time of authoring, so `just smoke` had not yet been run. **That gap was
+closed in the continuation session below — `just smoke` ran 15/15 green against a live Docker
+fixture, so those command shapes are now live-verified, not doc-derived.**
+
+---
+
+## Session — 2026-07-13 (cont) — v0.1.0 (smoke verified live + published)
+
+Closed the one carried verification gap and published. Docker became available, so `just
+smoke` was run for real: it built the `scripts/sshd-fixture/` stack (an sshd container with
+the docker CLI, a sibling Postgres seeded with a read-only `sshepherd_ro` role, and a sibling
+app container), generated an ephemeral ed25519 keypair, temporarily registered a
+`sshepherd-smoke` alias in `~/.ssh/config`, and drove the compiled `dist/sshepherd` binary
+against the live Linux host — **15/15 checks passed**: `hosts test` (reachable), `check
+overview` (dead_end_risk boolean + nproc>0), `services ps` (container list from docker
+inspect), `logs docker` (LogsResult shape with next_since), `files ls`, `security listeners`
+(sshd's own port 22 present), `db list`/`db tables`/`db query` (the seeded fixture row came
+back through the read-only transaction wrapper), and `deploy run --dry-run` (correct plan, no
+execution). The fixture torn down cleanly (`docker compose down --volumes`) and the temporary
+ssh-config block removed by the exit trap — verified no residue. This promotes every registry
+command shape and the db introspection SQL from doc-derived (SHIPPED-UNVERIFIED) to
+VERIFIED-LIVE. The repo was then created on GitHub (`Antheurus/sshepherd`, public, MIT) and
+pushed; the `v0.1.0` tag was cut to trigger `release.yml` (the 4-platform binary build +
+SHA-256 + build-provenance attestation runs on GitHub's runners). Note for a future smoke
+pass: the cross-phase auditor flagged that `docker compose ps --format json` on newer compose
+can emit a single JSON array rather than NDJSON — `services ps` (which uses `docker ps` +
+`docker inspect`, not `compose ps`) passed here, but `deploy status`/`services compose-ps`
+specifically weren't in the smoke matrix, so that one parse path is still worth a targeted
+check.
 
 ---
 
