@@ -22,3 +22,6 @@ dist
 # caches
 *.tsbuildinfo
 .biome-cache/
+
+# smoke fixture — ephemeral keypair generated per `just smoke` run
+scripts/sshd-fixture/.smoke-keys/

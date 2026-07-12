@@ -1,0 +1,30 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "sshepherd",
+  "description": "Zero-knowledge SSH server operations for Claude Code — health checks, docker/systemd control, log tailing, config edits, read-only Postgres introspection, and declarative deploys, without the agent ever seeing a credential.",
+  "owner": {
+    "name": "Antheurus"
+  },
+  "plugins": [
+    {
+      "name": "sshepherd",
+      "source": "./",
+      "description": "Server operations over SSH — health checks, container/service control, log tailing, config edits, Postgres introspection, and declarative deploys — driven through a single compiled CLI that never lets the agent see a password, private key, host, user, or port.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Antheurus"
+      },
+      "license": "MIT",
+      "keywords": [
+        "ssh",
+        "devops",
+        "cli",
+        "security",
+        "zero-knowledge",
+        "postgres",
+        "deploy"
+      ],
+      "category": "development"
+    }
+  ]
+}

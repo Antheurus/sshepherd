@@ -1,0 +1,40 @@
+# Disposable local fixture for `just smoke` (see scripts/smoke.sh). Three sibling
+# containers under the same docker daemon:
+#   sshd     - the ssh target sshepherd connects to; docker CLI mounted against the HOST
+#              daemon so it can exec into the postgres/app containers below.
+#   postgres - a real Postgres, seeded with a read-only role (postgres-init/01-fixture.sql)
+#              so `db` ops have something real to introspect.
+#   app      - a minimal long-running container standing in for a deployed app, so
+#              `services`/`logs docker` ops have a non-database container to target.
+#
+# scripts/smoke.sh sets SSHEPHERD_SMOKE_KEYDIR (an ephemeral generated keypair) and
+# SSHEPHERD_SMOKE_SSH_PORT before invoking `docker compose up`. Running `docker compose up`
+# directly (without smoke.sh) requires exporting SSHEPHERD_SMOKE_KEYDIR yourself, pointing
+# at a directory containing an `authorized_keys` file.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sshepherd-fixture-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: fixture
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+
+  app:
+    image: nginx:alpine
+    container_name: sshepherd-fixture-app
+
+  sshd:
+    build: .
+    container_name: sshepherd-fixture-sshd
+    ports:
+      - '${SSHEPHERD_SMOKE_SSH_PORT:-2222}:22'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SSHEPHERD_SMOKE_KEYDIR:-./.smoke-keys}/authorized_keys:/root/.ssh/authorized_keys:ro
+    depends_on:
+      - postgres
+      - app

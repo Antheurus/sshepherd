@@ -1,0 +1,21 @@
+{
+  "name": "sshepherd",
+  "description": "Server operations over SSH — health checks, container/service control, log tailing, config edits, Postgres introspection, and declarative deploys — driven through a single compiled CLI that never lets the agent see a password, private key, host, user, or port.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Antheurus"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/Antheurus/sshepherd",
+  "homepage": "https://github.com/Antheurus/sshepherd#readme",
+  "keywords": [
+    "ssh",
+    "devops",
+    "cli",
+    "security",
+    "zero-knowledge",
+    "postgres",
+    "deploy"
+  ],
+  "skills": ["./"]
+}

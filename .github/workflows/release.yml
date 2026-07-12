@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: cross-compile binaries + publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Verify before releasing
+        run: |
+          bun run typecheck
+          bun run lint
+          bun run test
+
+      # bun build --compile cross-compiles from a single host — no per-OS runners needed.
+      - name: Cross-compile binaries
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          declare -A TARGETS=(
+            [darwin-arm64]=bun-darwin-arm64
+            [darwin-x64]=bun-darwin-x64
+            [linux-x64]=bun-linux-x64
+            [linux-arm64]=bun-linux-arm64
+          )
+          for name in "${!TARGETS[@]}"; do
+            target="${TARGETS[$name]}"
+            outfile="release/sshepherd-${name}"
+            bun build ./src/cli.ts --compile --target="$target" --outfile="$outfile"
+          done
+          ls -la release
+
+      - name: Generate SHA-256 checksums
+        working-directory: release
+        run: |
+          set -euo pipefail
+          for f in sshepherd-*; do
+            sha256sum "$f" > "${f}.sha256"
+          done
+          ls -la
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release/sshepherd-*
+            !release/*.sha256
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" release/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes
