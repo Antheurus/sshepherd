@@ -55,11 +55,28 @@ export interface OpContext {
   args: Record<string, string | boolean>;
 }
 
-/** Stub shape — Phase 3 owns the real registry. Enough here for transport/output to compile. */
-export interface OpSpec {
+export interface ArgSpec {
+  name: string;
+  kind: 'positional' | 'flag';
+  required: boolean;
+  description: string;
+}
+
+/**
+ * One registry row per op (registry-dispatch pattern — coding-standard.md rule 5/17).
+ * `buildRemote` returns `null` for the handful of host-local ops (e.g. `hosts list`)
+ * that never open an ssh connection; those ops must supply `runLocal` instead.
+ * `shape` maps the parsed stdout (per `output`) into the envelope's `data` payload.
+ */
+export interface OpSpec<T = unknown> {
   group: string;
   name: string;
+  summary: string;
+  args: ArgSpec[];
   mutating: boolean;
+  timeoutSec: number;
   output: OutputMode;
-  buildRemote: (ctx: OpContext) => string;
+  buildRemote: (ctx: OpContext) => string | null;
+  shape: (parsed: unknown, ctx: OpContext) => T;
+  runLocal?: (ctx: OpContext, sshConfigPath: string) => T;
 }

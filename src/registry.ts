@@ -1,0 +1,1178 @@
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { buildEnvelope, splitNdjson } from './output.ts';
+import { parseHumanBytes, parseHumanBytesPair, parsePercent } from './parsers/bytes.ts';
+import { parseDf, parseDfInodes } from './parsers/df.ts';
+import { parseDmesgOom } from './parsers/dmesg-oom.ts';
+import { parseDockerLogLines } from './parsers/docker-log.ts';
+import { type PortMapping, parseInspectPorts } from './parsers/docker-ports.ts';
+import { parseDu } from './parsers/du.ts';
+import { parseFree } from './parsers/free.ts';
+import { shapeJournalEntry } from './parsers/journal.ts';
+import { buildLogsResult } from './parsers/logs-shape.ts';
+import { parseLs } from './parsers/ls.ts';
+import { parseOsRelease } from './parsers/os-release.ts';
+import { parsePs } from './parsers/ps.ts';
+import { parsePsi } from './parsers/psi.ts';
+import { splitSections } from './parsers/sections.ts';
+import { parseSs } from './parsers/ss.ts';
+import { listHostAliases } from './parsers/ssh-config.ts';
+import { parseSysctl } from './parsers/sysctl.ts';
+import { parseSystemctlShow } from './parsers/systemctl-show.ts';
+import { parseUptime } from './parsers/uptime.ts';
+import { computeDeadEndRisk } from './parsers/verdict.ts';
+import { shellJoin, shq } from './quote.ts';
+import { run, type TransportDeps } from './transport.ts';
+import type { ArgSpec, Envelope, OpContext, OpSpec, OutputMode } from './types.ts';
+
+const DEFAULT_TIMEOUT_SEC = 12;
+const LOG_TIMEOUT_SEC = 20;
+const FILE_TIMEOUT_SEC = 25;
+const DOWNLOAD_TIMEOUT_SEC = 30;
+const DEFAULT_LOG_TAIL = 200;
+const FILE_CAT_MAX_BYTES = 1_048_576; // 1 MiB
+const DOWNLOAD_MAX_BYTES = 10_485_760; // 10 MiB
+
+// ---------------------------------------------------------------------------
+// Arg helpers — every buildRemote/shape reads args through these so a missing
+// required arg fails the same way everywhere.
+// ---------------------------------------------------------------------------
+
+function reqStr(ctx: OpContext, key: string): string {
+  const value = ctx.args[key];
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error(`missing required arg '${key}'`);
+  }
+  return value;
+}
+
+function optStr(ctx: OpContext, key: string, fallback: string): string {
+  const value = ctx.args[key];
+  return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+function optStrOrNull(ctx: OpContext, key: string): string | null {
+  const value = ctx.args[key];
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function arg(name: string, kind: ArgSpec['kind'], required: boolean, description: string): ArgSpec {
+  return { name, kind, required, description };
+}
+
+// ---------------------------------------------------------------------------
+// hosts
+// ---------------------------------------------------------------------------
+
+interface HostsListResult {
+  aliases: string[];
+}
+
+interface HostsTestResult {
+  reachable: boolean;
+}
+
+interface HostInfoResult {
+  hostname: string;
+  kernel: string;
+  nproc: number;
+  uptime: ReturnType<typeof parseUptime>;
+  os: Record<string, string>;
+}
+
+const hostsList: OpSpec<HostsListResult> = {
+  group: 'hosts',
+  name: 'list',
+  summary: 'List configured ssh aliases (alias names only — never HostName/User/Port).',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () => null,
+  shape: (parsed) => parsed as HostsListResult,
+  runLocal: (_ctx, sshConfigPath) => ({ aliases: listHostAliases(sshConfigPath) }),
+};
+
+const hostsTest: OpSpec<HostsTestResult> = {
+  group: 'hosts',
+  name: 'test',
+  summary: 'Confirm the alias connects (latency is the envelope duration_ms).',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () => shellJoin(['echo', 'sshepherd-ok']),
+  shape: (parsed) => ({ reachable: (parsed as string).trim() === 'sshepherd-ok' }),
+};
+
+function buildHostsInfoScript(): string {
+  return [
+    'echo __HOSTNAME__',
+    'hostname',
+    'echo __UNAME__',
+    'uname -a',
+    'echo __NPROC__',
+    'nproc',
+    'echo __UPTIME__',
+    'uptime',
+    'echo __OS__',
+    'cat /etc/os-release 2>/dev/null || true',
+  ].join('; ');
+}
+
+const hostsInfo: OpSpec<HostInfoResult> = {
+  group: 'hosts',
+  name: 'info',
+  summary: 'Bundled hostname/kernel/nproc/uptime/os-release for the alias.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: { parse: splitSections },
+  buildRemote: () => shellJoin(['sh', '-c', buildHostsInfoScript()]),
+  shape: (parsed) => {
+    const sections = parsed as Record<string, string>;
+    const nproc = Number.parseInt((sections.NPROC ?? '').trim(), 10);
+    return {
+      hostname: (sections.HOSTNAME ?? '').trim(),
+      kernel: (sections.UNAME ?? '').trim(),
+      nproc: Number.isNaN(nproc) ? 0 : nproc,
+      uptime: parseUptime(sections.UPTIME ?? ''),
+      os: parseOsRelease(sections.OS ?? ''),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// check
+// ---------------------------------------------------------------------------
+
+interface CheckOverviewResult {
+  nproc: number;
+  mem: ReturnType<typeof parseFree>;
+  disk: ReturnType<typeof parseDf>;
+  uptime: ReturnType<typeof parseUptime>;
+  psi_mem: ReturnType<typeof parsePsi>;
+  dead_end_risk: boolean;
+}
+
+const checkOverview: OpSpec<CheckOverviewResult> = {
+  group: 'check',
+  name: 'overview',
+  summary: 'Bundled survival denominators: nproc/mem/disk/uptime/PSI + a dead_end_risk verdict.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: { parse: splitSections },
+  buildRemote: () =>
+    shellJoin([
+      'sh',
+      '-c',
+      [
+        'echo __NPROC__',
+        'nproc',
+        'echo __FREE__',
+        'free -b',
+        'echo __DF__',
+        'df -B1 -P',
+        'echo __UPTIME__',
+        'uptime',
+        'echo __PSI__',
+        'cat /proc/pressure/memory 2>/dev/null || true',
+      ].join('; '),
+    ]),
+  shape: (parsed) => {
+    const sections = parsed as Record<string, string>;
+    const nproc = Number.parseInt((sections.NPROC ?? '').trim(), 10);
+    const disk = parseDf(sections.DF ?? '');
+    const psi = parsePsi(sections.PSI ?? '');
+    return {
+      nproc: Number.isNaN(nproc) ? 0 : nproc,
+      mem: parseFree(sections.FREE ?? ''),
+      disk,
+      uptime: parseUptime(sections.UPTIME ?? ''),
+      psi_mem: psi,
+      dead_end_risk: computeDeadEndRisk({
+        diskUsePercents: disk.map((entry) => entry.use_percent),
+        memSomeAvg10: psi ? psi.some_avg10 : null,
+      }),
+    };
+  },
+};
+
+interface CheckMemResult {
+  mem: ReturnType<typeof parseFree>;
+  psi_mem: ReturnType<typeof parsePsi>;
+  dead_end_risk: boolean;
+}
+
+const checkMem: OpSpec<CheckMemResult> = {
+  group: 'check',
+  name: 'mem',
+  summary: 'Memory usage + PSI pressure with a dead_end_risk verdict.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: { parse: splitSections },
+  buildRemote: () =>
+    shellJoin([
+      'sh',
+      '-c',
+      [
+        'echo __FREE__',
+        'free -b',
+        'echo __PSI__',
+        'cat /proc/pressure/memory 2>/dev/null || true',
+      ].join('; '),
+    ]),
+  shape: (parsed) => {
+    const sections = parsed as Record<string, string>;
+    const psi = parsePsi(sections.PSI ?? '');
+    return {
+      mem: parseFree(sections.FREE ?? ''),
+      psi_mem: psi,
+      dead_end_risk: computeDeadEndRisk({
+        diskUsePercents: [],
+        memSomeAvg10: psi ? psi.some_avg10 : null,
+      }),
+    };
+  },
+};
+
+interface CheckDiskResult {
+  disk: ReturnType<typeof parseDf>;
+  inodes: ReturnType<typeof parseDfInodes>;
+  top_du: ReturnType<typeof parseDu>;
+  dead_end_risk: boolean;
+}
+
+const checkDisk: OpSpec<CheckDiskResult> = {
+  group: 'check',
+  name: 'disk',
+  summary: 'Disk usage + inodes + top space consumers with a dead_end_risk verdict.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: { parse: splitSections },
+  buildRemote: () =>
+    shellJoin([
+      'sh',
+      '-c',
+      [
+        'echo __DF__',
+        'df -B1 -P',
+        'echo __DFI__',
+        'df -i -P',
+        'echo __DU__',
+        'du -sb /var/log /var/lib/docker 2>/dev/null || true',
+      ].join('; '),
+    ]),
+  shape: (parsed) => {
+    const sections = parsed as Record<string, string>;
+    const disk = parseDf(sections.DF ?? '');
+    return {
+      disk,
+      inodes: parseDfInodes(sections.DFI ?? ''),
+      top_du: parseDu(sections.DU ?? ''),
+      dead_end_risk: computeDeadEndRisk({
+        diskUsePercents: disk.map((entry) => entry.use_percent),
+        memSomeAvg10: null,
+      }),
+    };
+  },
+};
+
+interface CheckCpuResult {
+  uptime: ReturnType<typeof parseUptime>;
+  nproc: number;
+  top_processes: ReturnType<typeof parsePs>;
+}
+
+const checkCpu: OpSpec<CheckCpuResult> = {
+  group: 'check',
+  name: 'cpu',
+  summary: 'Load average vs core count + top CPU processes.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: { parse: splitSections },
+  buildRemote: () =>
+    shellJoin([
+      'sh',
+      '-c',
+      [
+        'echo __UPTIME__',
+        'uptime',
+        'echo __NPROC__',
+        'nproc',
+        'echo __PS__',
+        'ps aux --sort=-%cpu | head -n 15',
+      ].join('; '),
+    ]),
+  shape: (parsed) => {
+    const sections = parsed as Record<string, string>;
+    const nproc = Number.parseInt((sections.NPROC ?? '').trim(), 10);
+    return {
+      uptime: parseUptime(sections.UPTIME ?? ''),
+      nproc: Number.isNaN(nproc) ? 0 : nproc,
+      top_processes: parsePs(sections.PS ?? ''),
+    };
+  },
+};
+
+interface CheckPortsResult {
+  listening: ReturnType<typeof parseSs>;
+}
+
+const checkPorts: OpSpec<CheckPortsResult> = {
+  group: 'check',
+  name: 'ports',
+  summary: 'Listening TCP ports (ss -tlnp), structured — never a raw address string.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () => shellJoin(['ss', '-H', '-tlnp']),
+  shape: (parsed) => ({ listening: parseSs(parsed as string) }),
+};
+
+interface CheckOomHistoryResult {
+  events: ReturnType<typeof parseDmesgOom>;
+}
+
+const checkOomHistory: OpSpec<CheckOomHistoryResult> = {
+  group: 'check',
+  name: 'oom-history',
+  summary: 'Kernel OOM-killer events from dmesg (per-container OOM lives in services ps).',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () =>
+    shellJoin(['sh', '-c', 'dmesg -T 2>/dev/null | grep -i "killed process" || true']),
+  shape: (parsed) => ({ events: parseDmesgOom(parsed as string) }),
+};
+
+interface CheckKernelResult {
+  swappiness: number | null;
+  overcommit_memory: number | null;
+  file_max: number | null;
+  swapaccount_enabled: boolean;
+}
+
+const checkKernel: OpSpec<CheckKernelResult> = {
+  group: 'check',
+  name: 'kernel',
+  summary: 'swappiness/overcommit_memory/file-max + cgroup swapaccount cmdline flag.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: { parse: splitSections },
+  buildRemote: () =>
+    shellJoin([
+      'sh',
+      '-c',
+      [
+        'echo __SYSCTL__',
+        'sysctl vm.swappiness vm.overcommit_memory fs.file-max 2>/dev/null',
+        'echo __CMDLINE__',
+        'cat /proc/cmdline 2>/dev/null || true',
+      ].join('; '),
+    ]),
+  shape: (parsed) => {
+    const sections = parsed as Record<string, string>;
+    const sysctl = parseSysctl(sections.SYSCTL ?? '');
+    const swappiness =
+      sysctl['vm.swappiness'] !== undefined
+        ? Number.parseInt(sysctl['vm.swappiness'], 10)
+        : Number.NaN;
+    const overcommit =
+      sysctl['vm.overcommit_memory'] !== undefined
+        ? Number.parseInt(sysctl['vm.overcommit_memory'], 10)
+        : Number.NaN;
+    const fileMax =
+      sysctl['fs.file-max'] !== undefined ? Number.parseInt(sysctl['fs.file-max'], 10) : Number.NaN;
+    return {
+      swappiness: Number.isNaN(swappiness) ? null : swappiness,
+      overcommit_memory: Number.isNaN(overcommit) ? null : overcommit,
+      file_max: Number.isNaN(fileMax) ? null : fileMax,
+      swapaccount_enabled: /swapaccount=1/.test(sections.CMDLINE ?? ''),
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// logs
+// ---------------------------------------------------------------------------
+
+function buildLogsDocker(ctx: OpContext): string {
+  const container = reqStr(ctx, 'container');
+  const tail = optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL));
+  const since = optStrOrNull(ctx, 'since');
+  const parts = ['docker', 'logs', '--timestamps', '--tail', tail];
+  if (since !== null) {
+    parts.push('--since', since);
+  }
+  parts.push(container);
+  return shellJoin(parts);
+}
+
+const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
+  group: 'logs',
+  name: 'docker',
+  summary: 'Tail a container log as {ts, stream, text} line objects + next_since.',
+  args: [
+    arg('container', 'positional', true, 'Container name or ID.'),
+    arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
+    arg('since', 'flag', false, 'Only lines newer than this timestamp/duration.'),
+  ],
+  mutating: false,
+  timeoutSec: LOG_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: buildLogsDocker,
+  shape: (parsed, ctx) => {
+    const lines = parseDockerLogLines(parsed as string);
+    const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
+    return buildLogsResult(
+      `docker:${reqStr(ctx, 'container')}`,
+      lines,
+      Number.isNaN(limit) ? DEFAULT_LOG_TAIL : limit,
+    );
+  },
+};
+
+function buildJournalCommand(unit: string, tail: string): string {
+  return shellJoin(['journalctl', '-u', unit, '-n', tail, '-o', 'json', '--no-pager']);
+}
+
+function shapeJournalLines(parsed: unknown): ReturnType<typeof shapeJournalEntry>[] {
+  const entries = parsed as unknown[];
+  return entries.map(shapeJournalEntry).filter((line) => line !== null);
+}
+
+const logsService: OpSpec<ReturnType<typeof buildLogsResult>> = {
+  group: 'logs',
+  name: 'service',
+  summary: 'Tail a systemd unit journal as {ts, stream, text} line objects + next_since.',
+  args: [
+    arg('unit', 'positional', true, 'systemd unit name.'),
+    arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
+  ],
+  mutating: false,
+  timeoutSec: LOG_TIMEOUT_SEC,
+  output: 'ndjson',
+  buildRemote: (ctx) =>
+    buildJournalCommand(reqStr(ctx, 'unit'), optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL))),
+  shape: (parsed, ctx) => {
+    const lines = shapeJournalLines(parsed).filter(
+      (line): line is NonNullable<typeof line> => line !== null,
+    );
+    const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
+    return buildLogsResult(
+      `service:${reqStr(ctx, 'unit')}`,
+      lines,
+      Number.isNaN(limit) ? DEFAULT_LOG_TAIL : limit,
+    );
+  },
+};
+
+const logsDockerDaemon: OpSpec<ReturnType<typeof buildLogsResult>> = {
+  group: 'logs',
+  name: 'docker-daemon',
+  summary: 'Tail the docker daemon journal (feeds the exit-137 differential).',
+  args: [arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`)],
+  mutating: false,
+  timeoutSec: LOG_TIMEOUT_SEC,
+  output: 'ndjson',
+  buildRemote: (ctx) =>
+    buildJournalCommand('docker', optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL))),
+  shape: (parsed, ctx) => {
+    const lines = shapeJournalLines(parsed).filter(
+      (line): line is NonNullable<typeof line> => line !== null,
+    );
+    const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
+    return buildLogsResult('docker-daemon', lines, Number.isNaN(limit) ? DEFAULT_LOG_TAIL : limit);
+  },
+};
+
+const NGINX_LOG_PATHS: Record<string, string> = {
+  error: '/var/log/nginx/error.log',
+  access: '/var/log/nginx/access.log',
+};
+
+const logsNginx: OpSpec<ReturnType<typeof buildLogsResult>> = {
+  group: 'logs',
+  name: 'nginx',
+  summary: 'Tail the nginx error or access log.',
+  args: [
+    arg('stream', 'positional', true, '"error" or "access".'),
+    arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
+  ],
+  mutating: false,
+  timeoutSec: LOG_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const stream = reqStr(ctx, 'stream');
+    const path = NGINX_LOG_PATHS[stream];
+    if (path === undefined) {
+      throw new Error(`unknown nginx log stream '${stream}' — expected "error" or "access"`);
+    }
+    return shellJoin(['tail', '-n', optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), path]);
+  },
+  shape: (parsed, ctx) => {
+    const stream = reqStr(ctx, 'stream');
+    const lines = (parsed as string)
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0)
+      .map((text) => ({ ts: null, stream: 'stdout' as const, text }));
+    const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
+    return buildLogsResult(
+      `nginx:${stream}`,
+      lines,
+      Number.isNaN(limit) ? DEFAULT_LOG_TAIL : limit,
+    );
+  },
+};
+
+// ---------------------------------------------------------------------------
+// services
+// ---------------------------------------------------------------------------
+
+interface ServiceEntry {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  health: string | null;
+  restart_count: number;
+  oom_killed: boolean;
+  exit_code: number | null;
+  mem_limit_bytes: number | null;
+  nano_cpus: number | null;
+  oom_score_adj: number | null;
+  restart_policy: string | null;
+  ports: PortMapping[];
+  compose_project: string | null;
+  compose_service: string | null;
+}
+
+function readRecord(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function shapeServiceEntry(raw: unknown): ServiceEntry | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const state = readRecord(record.State);
+  const hostConfig = readRecord(record.HostConfig);
+  const networkSettings = readRecord(record.NetworkSettings);
+  const config = readRecord(record.Config);
+  const labels = readRecord(config.Labels);
+  const health = readRecord(state.Health);
+  const restartPolicy = readRecord(hostConfig.RestartPolicy);
+
+  const memLimit =
+    typeof hostConfig.Memory === 'number' && hostConfig.Memory > 0 ? hostConfig.Memory : null;
+  const nanoCpus =
+    typeof hostConfig.NanoCpus === 'number' && hostConfig.NanoCpus > 0 ? hostConfig.NanoCpus : null;
+
+  return {
+    id: typeof record.Id === 'string' ? record.Id.slice(0, 12) : '',
+    name: typeof record.Name === 'string' ? record.Name.replace(/^\//, '') : '',
+    image: typeof config.Image === 'string' ? config.Image : '',
+    state: typeof state.Status === 'string' ? state.Status : 'unknown',
+    health: typeof health.Status === 'string' ? health.Status : null,
+    restart_count: typeof record.RestartCount === 'number' ? record.RestartCount : 0,
+    oom_killed: state.OOMKilled === true,
+    exit_code: typeof state.ExitCode === 'number' ? state.ExitCode : null,
+    mem_limit_bytes: memLimit,
+    nano_cpus: nanoCpus,
+    oom_score_adj: typeof hostConfig.OomScoreAdj === 'number' ? hostConfig.OomScoreAdj : null,
+    restart_policy: typeof restartPolicy.Name === 'string' ? restartPolicy.Name : null,
+    ports: parseInspectPorts(networkSettings.Ports),
+    compose_project:
+      typeof labels['com.docker.compose.project'] === 'string'
+        ? (labels['com.docker.compose.project'] as string)
+        : null,
+    compose_service:
+      typeof labels['com.docker.compose.service'] === 'string'
+        ? (labels['com.docker.compose.service'] as string)
+        : null,
+  };
+}
+
+const servicesPs: OpSpec<ServiceEntry[]> = {
+  group: 'services',
+  name: 'ps',
+  summary:
+    'All containers (running + stopped), each entry merged from docker inspect (health/restarts/oom/limits).',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'native-json',
+  buildRemote: () =>
+    shellJoin([
+      'sh',
+      '-c',
+      // A missing `docker` binary must surface as COMMAND_FAILED, not a silently empty
+      // list — `command -v` guard runs first so the "no containers" and "no docker"
+      // cases stay distinguishable (see phase brief §Concerns).
+      'command -v docker >/dev/null 2>&1 || exit 127; c=$(docker ps -aq); if [ -z "$c" ]; then echo "[]"; else docker inspect $c; fi',
+    ]),
+  shape: (parsed) => {
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed.map(shapeServiceEntry).filter((entry): entry is ServiceEntry => entry !== null);
+  },
+};
+
+interface ServiceStatsEntry {
+  container: string;
+  name: string;
+  cpu_percent: number | null;
+  mem_used_bytes: number | null;
+  mem_limit_bytes: number | null;
+  mem_percent: number | null;
+  net_rx_bytes: number | null;
+  net_tx_bytes: number | null;
+  block_read_bytes: number | null;
+  block_write_bytes: number | null;
+  pids: number | null;
+}
+
+function shapeStatsEntry(raw: unknown): ServiceStatsEntry | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const memPair =
+    typeof record.MemUsage === 'string'
+      ? parseHumanBytesPair(record.MemUsage)
+      : { used_bytes: null, limit_bytes: null };
+  const netPair =
+    typeof record.NetIO === 'string'
+      ? parseHumanBytesPair(record.NetIO)
+      : { used_bytes: null, limit_bytes: null };
+  const blockPair =
+    typeof record.BlockIO === 'string'
+      ? parseHumanBytesPair(record.BlockIO)
+      : { used_bytes: null, limit_bytes: null };
+  const pids = typeof record.PIDs === 'string' ? Number.parseInt(record.PIDs, 10) : Number.NaN;
+
+  return {
+    container: typeof record.Container === 'string' ? record.Container : '',
+    name: typeof record.Name === 'string' ? record.Name : '',
+    cpu_percent: typeof record.CPUPerc === 'string' ? parsePercent(record.CPUPerc) : null,
+    mem_used_bytes: memPair.used_bytes,
+    mem_limit_bytes: memPair.limit_bytes,
+    mem_percent: typeof record.MemPerc === 'string' ? parsePercent(record.MemPerc) : null,
+    net_rx_bytes: netPair.used_bytes,
+    net_tx_bytes: netPair.limit_bytes,
+    block_read_bytes: blockPair.used_bytes,
+    block_write_bytes: blockPair.limit_bytes,
+    pids: Number.isNaN(pids) ? null : pids,
+  };
+}
+
+const servicesStats: OpSpec<ServiceStatsEntry[]> = {
+  group: 'services',
+  name: 'stats',
+  summary: 'One-shot resource usage snapshot per container, sizes converted to bytes.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'ndjson',
+  buildRemote: () => shellJoin(['docker', 'stats', '--no-stream', '--format', 'json']),
+  shape: (parsed) =>
+    (parsed as unknown[])
+      .map(shapeStatsEntry)
+      .filter((entry): entry is ServiceStatsEntry => entry !== null),
+};
+
+interface ServiceInspectDetail extends ServiceEntry {
+  started_at: string | null;
+  finished_at: string | null;
+  cap_add: string[];
+  cap_drop: string[];
+  privileged: boolean;
+}
+
+function shapeInspectDetail(raw: unknown): ServiceInspectDetail | null {
+  const base = shapeServiceEntry(raw);
+  if (!base || typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const state = readRecord(record.State);
+  const hostConfig = readRecord(record.HostConfig);
+  return {
+    ...base,
+    started_at: typeof state.StartedAt === 'string' ? state.StartedAt : null,
+    finished_at: typeof state.FinishedAt === 'string' ? state.FinishedAt : null,
+    cap_add: Array.isArray(hostConfig.CapAdd) ? (hostConfig.CapAdd as string[]) : [],
+    cap_drop: Array.isArray(hostConfig.CapDrop) ? (hostConfig.CapDrop as string[]) : [],
+    privileged: hostConfig.Privileged === true,
+  };
+}
+
+const servicesInspect: OpSpec<ServiceInspectDetail[]> = {
+  group: 'services',
+  name: 'inspect',
+  summary: 'Full inspect detail for one container — cap audit + exit-137 evidence in one call.',
+  args: [arg('container', 'positional', true, 'Container name or ID.')],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'native-json',
+  buildRemote: (ctx) => shellJoin(['docker', 'inspect', reqStr(ctx, 'container')]),
+  shape: (parsed) => {
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map(shapeInspectDetail)
+      .filter((entry): entry is ServiceInspectDetail => entry !== null);
+  },
+};
+
+interface ComposePsEntry {
+  id: string;
+  name: string;
+  service: string;
+  image: string;
+  state: string;
+  health: string | null;
+  exit_code: number | null;
+  ports: PortMapping[];
+}
+
+function shapeComposePsEntry(raw: unknown): ComposePsEntry | null {
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const publishers = Array.isArray(record.Publishers) ? (record.Publishers as unknown[]) : [];
+  const ports: PortMapping[] = publishers
+    .map((publisher): PortMapping | null => {
+      const p = readRecord(publisher);
+      const containerPort = typeof p.TargetPort === 'number' ? p.TargetPort : null;
+      if (containerPort === null) {
+        return null;
+      }
+      return {
+        host_ip: typeof p.URL === 'string' && p.URL.length > 0 ? p.URL : null,
+        host_port: typeof p.PublishedPort === 'number' ? p.PublishedPort : null,
+        container_port: containerPort,
+        proto: typeof p.Protocol === 'string' ? p.Protocol : 'tcp',
+      };
+    })
+    .filter((mapping): mapping is PortMapping => mapping !== null);
+
+  return {
+    id: typeof record.ID === 'string' ? record.ID.slice(0, 12) : '',
+    name: typeof record.Name === 'string' ? record.Name : '',
+    service: typeof record.Service === 'string' ? record.Service : '',
+    image: typeof record.Image === 'string' ? record.Image : '',
+    state: typeof record.State === 'string' ? record.State : 'unknown',
+    health: typeof record.Health === 'string' && record.Health.length > 0 ? record.Health : null,
+    exit_code: typeof record.ExitCode === 'number' ? record.ExitCode : null,
+    ports,
+  };
+}
+
+const servicesComposePs: OpSpec<ComposePsEntry[]> = {
+  group: 'services',
+  name: 'compose-ps',
+  summary: 'docker compose ps for a given compose file, ports parsed into structured objects.',
+  args: [arg('file', 'positional', true, 'Path to the docker-compose file on the remote.')],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'ndjson',
+  buildRemote: (ctx) =>
+    shellJoin(['docker', 'compose', '-f', reqStr(ctx, 'file'), 'ps', '--format', 'json']),
+  shape: (parsed) =>
+    (parsed as unknown[])
+      .map(shapeComposePsEntry)
+      .filter((entry): entry is ComposePsEntry => entry !== null),
+};
+
+interface HealthcheckLogEntry {
+  start: string | null;
+  end: string | null;
+  exit_code: number | null;
+  output: string | null;
+}
+
+interface HealthcheckResult {
+  status: string;
+  failing_streak: number;
+  log: HealthcheckLogEntry[];
+}
+
+const servicesHealthcheck: OpSpec<HealthcheckResult> = {
+  group: 'services',
+  name: 'healthcheck',
+  summary: 'Container .State.Health status + failing streak + last probe log.',
+  args: [arg('container', 'positional', true, 'Container name or ID.')],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'native-json',
+  buildRemote: (ctx) =>
+    shellJoin([
+      'docker',
+      'inspect',
+      '--format',
+      '{{json .State.Health}}',
+      reqStr(ctx, 'container'),
+    ]),
+  shape: (parsed) => {
+    if (parsed === null || typeof parsed !== 'object') {
+      return { status: 'none', failing_streak: 0, log: [] };
+    }
+    const record = parsed as Record<string, unknown>;
+    const log = Array.isArray(record.Log) ? (record.Log as unknown[]) : [];
+    return {
+      status: typeof record.Status === 'string' ? record.Status : 'unknown',
+      failing_streak: typeof record.FailingStreak === 'number' ? record.FailingStreak : 0,
+      log: log.map((entry) => {
+        const e = readRecord(entry);
+        return {
+          start: typeof e.Start === 'string' ? e.Start : null,
+          end: typeof e.End === 'string' ? e.End : null,
+          exit_code: typeof e.ExitCode === 'number' ? e.ExitCode : null,
+          output: typeof e.Output === 'string' ? e.Output : null,
+        };
+      }),
+    };
+  },
+};
+
+const servicesSystemctlStatus: OpSpec<ReturnType<typeof parseSystemctlShow>> = {
+  group: 'services',
+  name: 'systemctl-status',
+  summary:
+    'systemd unit status via `systemctl show --property=` (portable across systemd versions).',
+  args: [arg('unit', 'positional', true, 'systemd unit name.')],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) =>
+    shellJoin([
+      'systemctl',
+      'show',
+      reqStr(ctx, 'unit'),
+      '--property=ActiveState,SubState,LoadState,UnitFileState,MainPID,NRestarts,Result',
+    ]),
+  shape: (parsed) => parseSystemctlShow(parsed as string),
+};
+
+// ---------------------------------------------------------------------------
+// files
+// ---------------------------------------------------------------------------
+
+const filesLs: OpSpec<ReturnType<typeof parseLs>> = {
+  group: 'files',
+  name: 'ls',
+  summary: 'Directory listing (structured, byte sizes).',
+  args: [arg('path', 'positional', true, 'Remote directory path.')],
+  mutating: false,
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => shellJoin(['ls', '-la', '--time-style=long-iso', reqStr(ctx, 'path')]),
+  shape: (parsed) => parseLs(parsed as string),
+};
+
+const ENV_FILE_PATTERN = /(^|\/)\.env(\.|$)/;
+
+function isEnvFile(path: string): boolean {
+  return ENV_FILE_PATTERN.test(path);
+}
+
+function maskEnvContent(content: string, revealedKeys: Set<string>): string {
+  return content
+    .split('\n')
+    .map((line) => {
+      const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
+      if (!match) {
+        return line;
+      }
+      const key = match[1];
+      if (key === undefined || revealedKeys.has(key)) {
+        return line;
+      }
+      return `${key}=***MASKED***`;
+    })
+    .join('\n');
+}
+
+interface FilesCatResult {
+  found: boolean;
+  truncated: boolean;
+  size_bytes: number | null;
+  masked: boolean;
+  content: string | null;
+}
+
+const filesCat: OpSpec<FilesCatResult> = {
+  group: 'files',
+  name: 'cat',
+  summary: `Read a file (size-guarded at ${FILE_CAT_MAX_BYTES} bytes); .env-shaped files are masked unless --reveal names the key.`,
+  args: [
+    arg('path', 'positional', true, 'Remote file path.'),
+    arg('reveal', 'flag', false, 'Comma-separated key names to unmask (env files only).'),
+  ],
+  mutating: false,
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const path = reqStr(ctx, 'path');
+    const script = [
+      `p=${shq(path)}`,
+      'if [ ! -f "$p" ]; then echo __NOT_FOUND__; exit 0; fi',
+      'sz=$(wc -c < "$p")',
+      `if [ "$sz" -gt ${FILE_CAT_MAX_BYTES} ]; then echo "__TOO_LARGE__:$sz"; else cat "$p"; fi`,
+    ].join('; ');
+    return shellJoin(['sh', '-c', script]);
+  },
+  shape: (parsed, ctx) => {
+    const text = parsed as string;
+    const trimmed = text.trim();
+    if (trimmed === '__NOT_FOUND__') {
+      return { found: false, truncated: false, size_bytes: null, masked: false, content: null };
+    }
+    const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(trimmed);
+    if (tooLarge) {
+      const size = tooLarge[1];
+      return {
+        found: true,
+        truncated: true,
+        size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
+        masked: false,
+        content: null,
+      };
+    }
+    const path = reqStr(ctx, 'path');
+    const shouldMask = isEnvFile(path);
+    const revealedKeys = new Set(
+      optStr(ctx, 'reveal', '')
+        .split(',')
+        .map((key) => key.trim())
+        .filter((key) => key.length > 0),
+    );
+    return {
+      found: true,
+      truncated: false,
+      size_bytes: Buffer.byteLength(text, 'utf8'),
+      masked: shouldMask,
+      content: shouldMask ? maskEnvContent(text, revealedKeys) : text,
+    };
+  },
+};
+
+interface FilesTailResult {
+  lines: string[];
+  lines_returned: number;
+}
+
+const filesTail: OpSpec<FilesTailResult> = {
+  group: 'files',
+  name: 'tail',
+  summary: 'Tail N lines of a file.',
+  args: [
+    arg('path', 'positional', true, 'Remote file path.'),
+    arg('n', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
+  ],
+  mutating: false,
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) =>
+    shellJoin(['tail', '-n', optStr(ctx, 'n', String(DEFAULT_LOG_TAIL)), reqStr(ctx, 'path')]),
+  shape: (parsed) => {
+    const lines = (parsed as string)
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0);
+    return { lines, lines_returned: lines.length };
+  },
+};
+
+interface FilesDownloadResult {
+  found: boolean;
+  truncated: boolean;
+  size_bytes: number | null;
+  content_base64: string | null;
+}
+
+const filesDownload: OpSpec<FilesDownloadResult> = {
+  group: 'files',
+  name: 'download',
+  summary: `Read a file as base64 over the existing ssh channel (size-guarded at ${DOWNLOAD_MAX_BYTES} bytes) — no separate scp/sftp process.`,
+  args: [arg('path', 'positional', true, 'Remote file path.')],
+  mutating: false,
+  timeoutSec: DOWNLOAD_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const path = reqStr(ctx, 'path');
+    const script = [
+      `p=${shq(path)}`,
+      'if [ ! -f "$p" ]; then echo __NOT_FOUND__; exit 0; fi',
+      'sz=$(wc -c < "$p")',
+      `if [ "$sz" -gt ${DOWNLOAD_MAX_BYTES} ]; then echo "__TOO_LARGE__:$sz"; else echo "__OK__:$sz"; base64 "$p" | tr -d '\\n'; fi`,
+    ].join('; ');
+    return shellJoin(['sh', '-c', script]);
+  },
+  shape: (parsed) => {
+    const text = parsed as string;
+    const newlineIndex = text.indexOf('\n');
+    const firstLine = (newlineIndex === -1 ? text : text.slice(0, newlineIndex)).trim();
+
+    if (firstLine === '__NOT_FOUND__') {
+      return { found: false, truncated: false, size_bytes: null, content_base64: null };
+    }
+    const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(firstLine);
+    if (tooLarge) {
+      const size = tooLarge[1];
+      return {
+        found: true,
+        truncated: true,
+        size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
+        content_base64: null,
+      };
+    }
+    const ok = /^__OK__:(\d+)/.exec(firstLine);
+    const size = ok?.[1];
+    return {
+      found: true,
+      truncated: false,
+      size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
+      content_base64: newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim(),
+    };
+  },
+};
+
+interface FilesDiskUsageResult {
+  path: string;
+  size_bytes: number | null;
+}
+
+const filesDiskUsage: OpSpec<FilesDiskUsageResult> = {
+  group: 'files',
+  name: 'disk-usage',
+  summary: 'Total size in bytes of a remote path (du -sb).',
+  args: [arg('path', 'positional', true, 'Remote path.')],
+  mutating: false,
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => shellJoin(['du', '-sb', reqStr(ctx, 'path')]),
+  shape: (parsed, ctx) => {
+    const entries = parseDu(parsed as string);
+    const first = entries[0];
+    return { path: reqStr(ctx, 'path'), size_bytes: first ? first.size_bytes : null };
+  },
+};
+
+// ---------------------------------------------------------------------------
+// registry + executor
+// ---------------------------------------------------------------------------
+
+const REGISTRY: OpSpec[] = [
+  hostsList,
+  hostsTest,
+  hostsInfo,
+  checkOverview,
+  checkMem,
+  checkDisk,
+  checkCpu,
+  checkPorts,
+  checkOomHistory,
+  checkKernel,
+  logsDocker,
+  logsService,
+  logsDockerDaemon,
+  logsNginx,
+  servicesPs,
+  servicesStats,
+  servicesInspect,
+  servicesComposePs,
+  servicesHealthcheck,
+  servicesSystemctlStatus,
+  filesLs,
+  filesCat,
+  filesTail,
+  filesDownload,
+  filesDiskUsage,
+] as OpSpec[];
+
+export function getOp(group: string, name: string): OpSpec | undefined {
+  return REGISTRY.find((op) => op.group === group && op.name === name);
+}
+
+export function listOps(): OpSpec[] {
+  return REGISTRY;
+}
+
+export interface ExecuteDeps {
+  transport?: TransportDeps;
+  sshConfigPath?: string;
+}
+
+function parseByMode(mode: OutputMode, stdout: string): unknown {
+  if (mode === 'native-json') {
+    return stdout.trim().length > 0 ? JSON.parse(stdout) : null;
+  }
+  if (mode === 'ndjson') {
+    return splitNdjson(stdout);
+  }
+  if (mode === 'raw') {
+    return stdout;
+  }
+  return mode.parse(stdout);
+}
+
+/**
+ * The one place an `OpSpec` is turned into an `Envelope`: resolve the remote command (or
+ * run the host-local fallback), execute it through `transport.run` (the single execution
+ * path), parse per `output`, then `shape` into the final payload. The CLI (Phase 6) is
+ * the only intended caller in production; tests call this directly with a scripted
+ * transport so no real ssh/network is ever touched.
+ */
+export async function executeOp(
+  op: OpSpec,
+  ctx: OpContext,
+  deps: ExecuteDeps = {},
+): Promise<Envelope<unknown>> {
+  const startedAtMs = Date.now();
+  const command = `${op.group} ${op.name}`;
+  const remoteCmd = op.buildRemote(ctx);
+
+  if (remoteCmd === null) {
+    if (!op.runLocal) {
+      throw new Error(
+        `registry: op '${command}' has no buildRemote output and no runLocal fallback`,
+      );
+    }
+    const sshConfigPath = deps.sshConfigPath ?? join(homedir(), '.ssh', 'config');
+    const data = op.runLocal(ctx, sshConfigPath);
+    return buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
+  }
+
+  const result = await run(ctx.alias, remoteCmd, op.timeoutSec, deps.transport);
+  if (result.error) {
+    return buildEnvelope({
+      alias: ctx.alias,
+      command,
+      startedAtMs,
+      data: null,
+      error: result.error,
+    });
+  }
+
+  const parsed = parseByMode(op.output, result.raw.stdout);
+  const data = op.shape(parsed, ctx);
+  return buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
+}
+
+// Re-exported for parser unit tests and future CLI --help rendering.
+export { parseHumanBytes };
