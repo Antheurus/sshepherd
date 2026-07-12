@@ -12,12 +12,14 @@ import {
   wrapReadOnlyTxn,
 } from './db.ts';
 import { buildEnvelope, splitNdjson } from './output.ts';
+import { parseAuthorizedKeysLine, parseFingerprintLine } from './parsers/authorized-keys.ts';
 import { parseHumanBytes, parseHumanBytesPair, parsePercent } from './parsers/bytes.ts';
 import { parseDf, parseDfInodes } from './parsers/df.ts';
 import { parseDmesgOom } from './parsers/dmesg-oom.ts';
 import { parseDockerLogLines } from './parsers/docker-log.ts';
 import { type PortMapping, parseInspectPorts } from './parsers/docker-ports.ts';
 import { parseDu } from './parsers/du.ts';
+import { parseFail2banStatus } from './parsers/fail2ban.ts';
 import { parseFree } from './parsers/free.ts';
 import { shapeJournalEntry } from './parsers/journal.ts';
 import { buildLogsResult } from './parsers/logs-shape.ts';
@@ -28,6 +30,7 @@ import { parsePsi } from './parsers/psi.ts';
 import { splitSections } from './parsers/sections.ts';
 import { parseSs } from './parsers/ss.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
+import { parseSshdDirectives } from './parsers/sshd-directives.ts';
 import { parseSysctl } from './parsers/sysctl.ts';
 import { parseSystemctlShow } from './parsers/systemctl-show.ts';
 import { parseUptime } from './parsers/uptime.ts';
@@ -1136,6 +1139,48 @@ const filesDiskUsage: OpSpec<FilesDiskUsageResult> = {
   },
 };
 
+// files (mutating)
+
+/** No `.bak` (this is a general upload, not an in-place config overwrite — unlike `config put`). */
+function buildFilesUploadScript(remotePath: string, contentBase64: string): string {
+  const script = [
+    `p=${shq(remotePath)}`,
+    `printf '%s' ${shq(contentBase64)} | base64 -d > "$p"`,
+  ].join('; ');
+  return shellJoin(['sh', '-c', script]);
+}
+
+interface FilesUploadResult {
+  written: boolean;
+  remote_path: string;
+}
+
+const filesUpload: OpSpec<FilesUploadResult> = {
+  group: 'files',
+  name: 'upload',
+  summary:
+    'Upload a local file to a remote path over the existing ssh channel (base64, no scp/sftp) — no allowlist, no backup, gated by --yes like every other mutating op.',
+  args: [
+    arg('local_path', 'positional', true, 'Local file path to read and upload.'),
+    arg('remote_path', 'positional', true, 'Destination path on the remote.'),
+  ],
+  mutating: true,
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const localPath = reqStr(ctx, 'local_path');
+    const remotePath = reqStr(ctx, 'remote_path');
+    let contentBase64: string;
+    try {
+      contentBase64 = readFileSync(localPath).toString('base64');
+    } catch {
+      throw new Error(`files upload: local file '${localPath}' not found or unreadable`);
+    }
+    return buildFilesUploadScript(remotePath, contentBase64);
+  },
+  shape: (_parsed, ctx) => ({ written: true, remote_path: reqStr(ctx, 'remote_path') }),
+};
+
 // ---------------------------------------------------------------------------
 // config
 // ---------------------------------------------------------------------------
@@ -1776,6 +1821,179 @@ const securityHarden: OpSpec<{ applied: string[]; keep_session: boolean }> = {
   },
 };
 
+// security (read-only)
+
+/** Every directive `security harden` can apply IS the posture this reports on — one
+ *  source of truth for "recommended", so harden and its read-only counterpart can never
+ *  silently disagree on what "hardened" means. */
+const SSH_AUDIT_DIRECTIVES: Array<[string, string]> = [
+  ...HARDEN_SAFE_DIRECTIVES,
+  ...HARDEN_RISKY_DIRECTIVES,
+];
+
+function isDirectiveOk(value: string | null, recommended: string): boolean {
+  if (value === null) {
+    return false;
+  }
+  const recommendedNumber = Number.parseInt(recommended, 10);
+  if (!Number.isNaN(recommendedNumber)) {
+    const valueNumber = Number.parseInt(value, 10);
+    return !Number.isNaN(valueNumber) && valueNumber > 0 && valueNumber <= recommendedNumber;
+  }
+  return value.toLowerCase() === recommended.toLowerCase();
+}
+
+/** `sshd -T` (effective config, requires root) with a same-round-trip fallback to reading
+ *  `/etc/ssh/sshd_config` directly when that fails — only when BOTH sources fail does the
+ *  script exit non-zero, which `transport.run` classifies as a clean `COMMAND_FAILED`. */
+function buildSshAuditScript(): string {
+  return [
+    'if command -v sshd >/dev/null 2>&1 && out=$(sshd -T 2>/dev/null); then printf \'%s\' "$out";',
+    'elif out=$(cat /etc/ssh/sshd_config 2>/dev/null); then printf \'%s\' "$out";',
+    'else exit 1; fi',
+  ].join(' ');
+}
+
+interface SshAuditDirectiveResult {
+  directive: string;
+  value: string | null;
+  recommended: string;
+  ok: boolean;
+}
+
+const securitySshAudit: OpSpec<{ directives: SshAuditDirectiveResult[] }> = {
+  group: 'security',
+  name: 'ssh-audit',
+  summary:
+    'Effective sshd hardening posture per directive (sshd -T, degrades to reading sshd_config) — ' +
+    'the read-only counterpart to security harden, sharing its recommended values.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () => shellJoin(['sh', '-c', buildSshAuditScript()]),
+  shape: (parsed) => {
+    const effective = parseSshdDirectives(parsed as string);
+    return {
+      directives: SSH_AUDIT_DIRECTIVES.map(([directive, recommended]) => {
+        const value = effective[directive.toLowerCase()] ?? null;
+        return { directive, value, recommended, ok: isDirectiveOk(value, recommended) };
+      }),
+    };
+  },
+};
+
+interface SecurityListenerEntry {
+  proto: 'tcp';
+  local_addr: string;
+  port: number;
+  process: string | null;
+  pid: number | null;
+}
+
+const securityListeners: OpSpec<{ listening: SecurityListenerEntry[] }> = {
+  group: 'security',
+  name: 'listeners',
+  summary:
+    'Listening TCP sockets + owning process — the attack surface (same ss -H -tlnp data as check ports, security-group framing, same parser).',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () => shellJoin(['ss', '-H', '-tlnp']),
+  shape: (parsed) => ({
+    listening: parseSs(parsed as string).map((entry) => ({
+      proto: entry.proto,
+      local_addr: entry.local_address,
+      port: entry.local_port,
+      process: entry.process,
+      pid: entry.pid,
+    })),
+  }),
+};
+
+/** Bundles the raw `authorized_keys` file with a remote `ssh-keygen -lf` fingerprint pass
+ *  over that same file, in one round trip — the two outputs are line-order-aligned (both
+ *  skip blank/comment lines the same way) so `shape` never needs the key blob itself to
+ *  correlate a fingerprint with its options/comment. */
+function buildAuthorizedKeysScript(): string {
+  return [
+    'p="$HOME/.ssh/authorized_keys"',
+    'if [ ! -f "$p" ]; then exit 0; fi',
+    'echo __RAW__',
+    'cat "$p"',
+    'echo __FP__',
+    'ssh-keygen -lf "$p" 2>/dev/null || true',
+  ].join('; ');
+}
+
+interface AuthorizedKeyResult {
+  type: string;
+  fingerprint: string | null;
+  comment: string | null;
+  options: string | null;
+}
+
+const securityAuthorizedKeys: OpSpec<{ found: boolean; keys: AuthorizedKeyResult[] }> = {
+  group: 'security',
+  name: 'authorized-keys',
+  summary:
+    "Enumerates the connecting user's authorized_keys entries as {type, fingerprint, comment, options} — " +
+    'fingerprints only, never the raw key blob.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: { parse: splitSections },
+  buildRemote: () => shellJoin(['sh', '-c', buildAuthorizedKeysScript()]),
+  shape: (parsed) => {
+    const sections = parsed as Record<string, string>;
+    if (sections.RAW === undefined) {
+      return { found: false, keys: [] };
+    }
+    const rawLines = sections.RAW.split('\n').filter(
+      (line) => line.trim().length > 0 && !line.trim().startsWith('#'),
+    );
+    const fingerprintLines = (sections.FP ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const keys = rawLines.map((line, index) => {
+      const parsedLine = parseAuthorizedKeysLine(line);
+      const fingerprintLine = fingerprintLines[index];
+      return {
+        type: parsedLine?.type ?? 'unknown',
+        fingerprint: fingerprintLine !== undefined ? parseFingerprintLine(fingerprintLine) : null,
+        comment: parsedLine?.comment ?? null,
+        options: parsedLine?.options ?? null,
+      };
+    });
+    return { found: true, keys };
+  },
+};
+
+/** No native JSON flag for fail2ban-client — bundles the jail list with each jail's
+ *  status in one round trip, marker-delimited like `check overview`'s sections. */
+function buildFail2banScript(): string {
+  return [
+    'if ! command -v fail2ban-client >/dev/null 2>&1; then echo __UNAVAILABLE__; exit 0; fi',
+    "jails=$(fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p' | tr ',' ' ')",
+    'for j in $jails; do echo "__JAIL__:$j"; fail2ban-client status "$j" 2>/dev/null; done',
+  ].join('; ');
+}
+
+const securityFail2ban: OpSpec<ReturnType<typeof parseFail2banStatus>> = {
+  group: 'security',
+  name: 'fail2ban',
+  summary:
+    'fail2ban jail status + banned IP counts per jail — degrades to {available:false} when fail2ban-client is absent.',
+  args: [],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () => shellJoin(['sh', '-c', buildFail2banScript()]),
+  shape: (parsed) => parseFail2banStatus(parsed as string),
+};
+
 // ---------------------------------------------------------------------------
 // registry + executor
 // ---------------------------------------------------------------------------
@@ -1811,6 +2029,7 @@ const REGISTRY: OpSpec[] = [
   filesTail,
   filesDownload,
   filesDiskUsage,
+  filesUpload,
   configGet,
   configValidate,
   configPut,
@@ -1828,6 +2047,10 @@ const REGISTRY: OpSpec[] = [
   deployLogs,
   deployMigrate,
   securityHarden,
+  securitySshAudit,
+  securityListeners,
+  securityAuthorizedKeys,
+  securityFail2ban,
 ] as OpSpec[];
 
 export function getOp(group: string, name: string): OpSpec | undefined {

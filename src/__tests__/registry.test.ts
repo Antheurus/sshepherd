@@ -70,6 +70,10 @@ describe('registry — getOp/listOps', () => {
     ['db', 'query'],
     ['deploy', 'status'],
     ['deploy', 'logs'],
+    ['security', 'ssh-audit'],
+    ['security', 'listeners'],
+    ['security', 'authorized-keys'],
+    ['security', 'fail2ban'],
   ];
 
   const MUTATING: Array<[string, string]> = [
@@ -84,6 +88,7 @@ describe('registry — getOp/listOps', () => {
     ['deploy', 'rollback'],
     ['deploy', 'migrate'],
     ['security', 'harden'],
+    ['files', 'upload'],
   ];
 
   test('every read-only op declared through Phases 3-5 is registered and flagged mutating:false', () => {
@@ -1403,5 +1408,353 @@ describe('quoting — Phase 5 mutating ops are injection-safe (real sh -c drive)
     } finally {
       delete process.env.SSHEPHERD_RECIPE_PATH;
     }
+  });
+});
+
+describe("security ssh-audit — posture assessment shares harden's recommended values", () => {
+  test('shapes each directive into {directive, value, recommended, ok}', async () => {
+    const op = getOp('security', 'ssh-audit');
+    if (!op) {
+      throw new Error('security ssh-audit op missing');
+    }
+    const stdout = [
+      'permitrootlogin yes',
+      'passwordauthentication no',
+      'permitemptypasswords no',
+      'x11forwarding no',
+      'maxauthtries 6',
+      'clientaliveinterval 300',
+      'clientalivecountmax 2',
+    ].join('\n');
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+
+    expect(envelope.ok).toBe(true);
+    const data = envelope.data as { directives: Array<Record<string, unknown>> };
+    const byDirective = Object.fromEntries(data.directives.map((d) => [d.directive, d]));
+
+    expect(byDirective.PermitRootLogin).toEqual({
+      directive: 'PermitRootLogin',
+      value: 'yes',
+      recommended: 'no',
+      ok: false,
+    });
+    expect(byDirective.PasswordAuthentication).toEqual({
+      directive: 'PasswordAuthentication',
+      value: 'no',
+      recommended: 'no',
+      ok: true,
+    });
+    // MaxAuthTries recommends <= 4 — an effective 6 is worse than recommended.
+    expect(byDirective.MaxAuthTries).toEqual({
+      directive: 'MaxAuthTries',
+      value: '6',
+      recommended: '4',
+      ok: false,
+    });
+  });
+
+  test('a directive missing from the effective config reports value:null, ok:false (no crash)', async () => {
+    const op = getOp('security', 'ssh-audit');
+    if (!op) {
+      throw new Error('security ssh-audit op missing');
+    }
+    const runner = scriptedRunner(connectedRunOutcomes('permitrootlogin no'));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+    expect(envelope.ok).toBe(true);
+    const data = envelope.data as { directives: Array<Record<string, unknown>> };
+    const x11 = data.directives.find((d) => d.directive === 'X11Forwarding');
+    expect(x11).toEqual({ directive: 'X11Forwarding', value: null, recommended: 'no', ok: false });
+  });
+
+  test('when both sshd -T and sshd_config fail, the envelope carries a clean COMMAND_FAILED (no crash)', async () => {
+    const op = getOp('security', 'ssh-audit');
+    if (!op) {
+      throw new Error('security ssh-audit op missing');
+    }
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false },
+      { code: 0, stdout: '', stderr: '', timedOut: false },
+      { code: 1, stdout: '', stderr: '', timedOut: false },
+    ]);
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('COMMAND_FAILED');
+    expect(envelope.data).toBeNull();
+  });
+});
+
+describe('security listeners — same parser and command as check ports, security-group framing', () => {
+  test('buildRemote is exactly the same ss -H -tlnp command as check ports', () => {
+    const listenersOp = getOp('security', 'listeners');
+    const portsOp = getOp('check', 'ports');
+    if (!listenersOp || !portsOp) {
+      throw new Error('security listeners or check ports op missing');
+    }
+    expect(listenersOp.buildRemote({ alias: 'lms-server', args: {} })).toBe(
+      portsOp.buildRemote({ alias: 'lms-server', args: {} }),
+    );
+  });
+
+  test('shapes ss -H -tlnp output into {proto, local_addr, port, process, pid} entries', async () => {
+    const op = getOp('security', 'listeners');
+    if (!op) {
+      throw new Error('security listeners op missing');
+    }
+    const stdout = 'LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:(("sshd",pid=1234,fd=3))';
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({
+      listening: [{ proto: 'tcp', local_addr: '0.0.0.0', port: 22, process: 'sshd', pid: 1234 }],
+    });
+  });
+});
+
+describe('security authorized-keys — fingerprint + comment + options, never the raw key blob', () => {
+  test('correlates RAW lines with FP lines by index, extracts options/type/comment', async () => {
+    const op = getOp('security', 'authorized-keys');
+    if (!op) {
+      throw new Error('security authorized-keys op missing');
+    }
+    const rawKeyBlob = 'AAAAB3NzaC1yc2EAAAADAQABAAABgQDsecretkeymaterial';
+    const stdout = [
+      '__RAW__',
+      `no-port-forwarding ssh-rsa ${rawKeyBlob} deploy@ci`,
+      `ssh-ed25519 ${rawKeyBlob} alice@laptop`,
+      '__FP__',
+      '2048 SHA256:aaaaBBBBccccDDDDeeeeFFFFgggg1111 deploy@ci (RSA)',
+      '256 SHA256:zzzzYYYYxxxxWWWWvvvvUUUUtttt2222 alice@laptop (ED25519)',
+    ].join('\n');
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+
+    expect(envelope.ok).toBe(true);
+    const data = envelope.data as { found: boolean; keys: Array<Record<string, unknown>> };
+    expect(data.found).toBe(true);
+    expect(data.keys).toEqual([
+      {
+        type: 'ssh-rsa',
+        fingerprint: 'SHA256:aaaaBBBBccccDDDDeeeeFFFFgggg1111',
+        comment: 'deploy@ci',
+        options: 'no-port-forwarding',
+      },
+      {
+        type: 'ssh-ed25519',
+        fingerprint: 'SHA256:zzzzYYYYxxxxWWWWvvvvUUUUtttt2222',
+        comment: 'alice@laptop',
+        options: null,
+      },
+    ]);
+
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain(rawKeyBlob);
+  });
+
+  test('no authorized_keys file yields found:false, keys:[] (no crash)', async () => {
+    const op = getOp('security', 'authorized-keys');
+    if (!op) {
+      throw new Error('security authorized-keys op missing');
+    }
+    const runner = scriptedRunner(connectedRunOutcomes(''));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({ found: false, keys: [] });
+  });
+});
+
+describe('security fail2ban — degrades to {available:false} when fail2ban-client is absent', () => {
+  test('fail2ban-client not installed', async () => {
+    const op = getOp('security', 'fail2ban');
+    if (!op) {
+      throw new Error('security fail2ban op missing');
+    }
+    const runner = scriptedRunner(connectedRunOutcomes('__UNAVAILABLE__'));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({
+      available: false,
+      reason: 'fail2ban-client not installed',
+      jails: [],
+    });
+  });
+
+  test('jail status with banned IPs is shaped per jail', async () => {
+    const op = getOp('security', 'fail2ban');
+    if (!op) {
+      throw new Error('security fail2ban op missing');
+    }
+    const stdout = [
+      '__JAIL__:sshd',
+      'Status for the jail: sshd',
+      '|- Filter',
+      '|  |- Currently failed: 0',
+      '|  `- Total failed:     10',
+      '`- Actions',
+      '   |- Currently banned: 2',
+      '   |- Total banned:     5',
+      '   `- Banned IP list:   1.2.3.4 5.6.7.8',
+    ].join('\n');
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({
+      available: true,
+      reason: null,
+      jails: [
+        {
+          jail: 'sshd',
+          currently_banned: 2,
+          total_banned: 5,
+          banned_ips: ['1.2.3.4', '5.6.7.8'],
+        },
+      ],
+    });
+  });
+});
+
+describe('files upload — base64-over-ssh, no scp/sftp, no backup, gated like every mutating op', () => {
+  test('a missing local file fails locally with a clear error before any transport', () => {
+    const op = getOp('files', 'upload');
+    if (!op) {
+      throw new Error('files upload op missing');
+    }
+    expect(() =>
+      op.buildRemote({
+        alias: 'lms-server',
+        args: {
+          local_path: join(tmpdir(), 'sshepherd-upload-does-not-exist-anywhere.txt'),
+          remote_path: '/opt/app/config.yml',
+        },
+      }),
+    ).toThrow(/not found or unreadable/);
+  });
+
+  test('the built script base64-decodes the local file content onto the remote path (real sh -c drive)', () => {
+    const op = getOp('files', 'upload');
+    if (!op) {
+      throw new Error('files upload op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-upload-test-'));
+    const localPath = join(dir, 'source.txt');
+    const remotePath = join(dir, 'destination.txt');
+    writeFileSync(localPath, 'UPLOADED CONTENT\n');
+
+    const remoteCmd = op.buildRemote({
+      alias: 'lms-server',
+      args: { local_path: localPath, remote_path: remotePath },
+    });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    expect(remoteCmd).toContain('base64 -d');
+    expect(remoteCmd).not.toContain('.bak-');
+
+    const result = Bun.spawnSync(['sh', '-c', remoteCmd]);
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(remotePath, 'utf8')).toBe('UPLOADED CONTENT\n');
+    expect(readdirSync(dir).filter((f) => f.includes('.bak-'))).toHaveLength(0);
+  });
+
+  test('mutating gate: no --yes refuses, never touches ssh, and writes a refused audit line', async () => {
+    const op = getOp('files', 'upload');
+    if (!op) {
+      throw new Error('files upload op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-upload-gate-test-'));
+    const localPath = join(dir, 'source.txt');
+    writeFileSync(localPath, 'content\n');
+    const auditLogPath = tempAuditLogPath();
+    const runner: SshRunner = async () => {
+      throw new Error('ssh must never be called for a refused mutating op');
+    };
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { local_path: localPath, remote_path: '/opt/app/config.yml' } },
+      { transport: { runner }, auditLogPath },
+    );
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('CONFIRMATION_REQUIRED');
+    const lines = readAuditLines(auditLogPath);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.outcome).toBe('refused');
+    expect(lines[0]?.command).toBe('files upload');
+  });
+
+  test('mutating gate: --yes proceeds and writes an ok audit line on success', async () => {
+    const op = getOp('files', 'upload');
+    if (!op) {
+      throw new Error('files upload op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-upload-gate-ok-test-'));
+    const localPath = join(dir, 'source.txt');
+    writeFileSync(localPath, 'content\n');
+    const auditLogPath = tempAuditLogPath();
+    const runner = scriptedRunner(connectedRunOutcomes(''));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { local_path: localPath, remote_path: '/opt/app/config.yml' } },
+      { transport: { runner }, yes: true, auditLogPath },
+    );
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({ written: true, remote_path: '/opt/app/config.yml' });
+    const lines = readAuditLines(auditLogPath);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.outcome).toBe('ok');
+  });
+
+  test('a remote_path shaped like a shell injection cannot splice a second command', () => {
+    const op = getOp('files', 'upload');
+    if (!op) {
+      throw new Error('files upload op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-upload-inj-test-'));
+    const localPath = join(dir, 'source.txt');
+    writeFileSync(localPath, 'content\n');
+    const marker = freshMarkerPath();
+    const malicious = `${join(dir, 'dest.txt')}'; touch ${marker}; echo '`;
+
+    const remoteCmd = op.buildRemote({
+      alias: 'lms-server',
+      args: { local_path: localPath, remote_path: malicious },
+    });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    assertShellParsesRemoteCmdSafely(remoteCmd, marker);
   });
 });
