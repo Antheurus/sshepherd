@@ -1,0 +1,11 @@
+# Fixture recipe with no [rollback] block — used to prove `deploy rollback` refuses
+# rather than guessing.
+name = "no-rollback"
+alias = "lms-server"
+workdir = "/opt/lms"
+description = "Recipe with no rollback block"
+
+[[step]]
+name = "up"
+kind = "compose"
+run = "up -d"

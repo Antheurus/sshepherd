@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { auditMutating, confirmGate } from './audit.ts';
 import {
   assertNoMultiStatementSql,
   assertSelectOnly,
@@ -31,8 +33,16 @@ import { parseSystemctlShow } from './parsers/systemctl-show.ts';
 import { parseUptime } from './parsers/uptime.ts';
 import { computeDeadEndRisk } from './parsers/verdict.ts';
 import { shellJoin, shq } from './quote.ts';
+import {
+  buildMigrateScript,
+  buildRollbackCommand,
+  buildRunScript,
+  type DeployPlan,
+  loadRecipe,
+  planRecipe,
+} from './recipes.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
-import { run, type TransportDeps } from './transport.ts';
+import { errorInfo, run, type TransportDeps } from './transport.ts';
 import type { ArgSpec, Envelope, OpContext, OpSpec, OutputMode } from './types.ts';
 
 const DEFAULT_TIMEOUT_SEC = 12;
@@ -40,6 +50,7 @@ const LOG_TIMEOUT_SEC = 20;
 const FILE_TIMEOUT_SEC = 25;
 const DOWNLOAD_TIMEOUT_SEC = 30;
 const DB_TIMEOUT_SEC = 20;
+const DEPLOY_TIMEOUT_SEC = 300;
 const DEFAULT_LOG_TAIL = 200;
 const FILE_CAT_MAX_BYTES = 1_048_576; // 1 MiB
 const DOWNLOAD_MAX_BYTES = 10_485_760; // 10 MiB
@@ -65,6 +76,11 @@ function optStr(ctx: OpContext, key: string, fallback: string): string {
 function optStrOrNull(ctx: OpContext, key: string): string | null {
   const value = ctx.args[key];
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function optBool(ctx: OpContext, key: string, fallback: boolean): boolean {
+  const value = ctx.args[key];
+  return typeof value === 'boolean' ? value : fallback;
 }
 
 function arg(name: string, kind: ArgSpec['kind'], required: boolean, description: string): ArgSpec {
@@ -879,6 +895,41 @@ const servicesSystemctlStatus: OpSpec<ReturnType<typeof parseSystemctlShow>> = {
   shape: (parsed) => parseSystemctlShow(parsed as string),
 };
 
+const servicesRestart: OpSpec<{ container: string; restarted: boolean }> = {
+  group: 'services',
+  name: 'restart',
+  summary: 'docker restart a container.',
+  args: [arg('container', 'positional', true, 'Container name or ID.')],
+  mutating: true,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => shellJoin(['docker', 'restart', reqStr(ctx, 'container')]),
+  shape: (_parsed, ctx) => ({ container: reqStr(ctx, 'container'), restarted: true }),
+};
+
+/** One factory for all four systemctl verbs — variation (the verb) is data, not four near-identical OpSpecs. */
+function systemctlVerbOp(
+  name: string,
+  verb: 'start' | 'stop' | 'restart' | 'reload',
+): OpSpec<{ unit: string; action: string }> {
+  return {
+    group: 'services',
+    name,
+    summary: `systemctl ${verb} a unit.`,
+    args: [arg('unit', 'positional', true, 'systemd unit name.')],
+    mutating: true,
+    timeoutSec: DEFAULT_TIMEOUT_SEC,
+    output: 'raw',
+    buildRemote: (ctx) => shellJoin(['systemctl', verb, reqStr(ctx, 'unit')]),
+    shape: (_parsed, ctx) => ({ unit: reqStr(ctx, 'unit'), action: verb }),
+  };
+}
+
+const servicesSystemctlStart = systemctlVerbOp('systemctl-start', 'start');
+const servicesSystemctlStop = systemctlVerbOp('systemctl-stop', 'stop');
+const servicesSystemctlRestart = systemctlVerbOp('systemctl-restart', 'restart');
+const servicesSystemctlReload = systemctlVerbOp('systemctl-reload', 'reload');
+
 // ---------------------------------------------------------------------------
 // files
 // ---------------------------------------------------------------------------
@@ -1082,6 +1133,192 @@ const filesDiskUsage: OpSpec<FilesDiskUsageResult> = {
     const first = entries[0];
     return { path: reqStr(ctx, 'path'), size_bytes: first ? first.size_bytes : null };
   },
+};
+
+// ---------------------------------------------------------------------------
+// config
+// ---------------------------------------------------------------------------
+
+interface ConfigAllowlist {
+  [alias: string]: string[];
+}
+
+function defaultConfigAllowlistPath(): string {
+  const override = process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+  if (override && override.length > 0) {
+    return override;
+  }
+  return join(homedir(), '.config', 'sshepherd', 'config-allowlist.toml');
+}
+
+/** Missing file yields an empty allowlist (mirrors targets.ts's missing-config behavior) — every path refused until declared. */
+function loadConfigAllowlist(path: string = defaultConfigAllowlistPath()): ConfigAllowlist {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return {};
+  }
+  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  const allowlist: ConfigAllowlist = {};
+  for (const [alias, raw] of Object.entries(parsed)) {
+    const record = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+    const paths = Array.isArray(record.paths) ? record.paths : [];
+    allowlist[alias] = paths.filter((p): p is string => typeof p === 'string');
+  }
+  return allowlist;
+}
+
+/** Local refusal, before ssh — a path not declared for this alias never reaches the remote. */
+function assertConfigPathAllowed(ctx: OpContext, path: string): void {
+  const allowlist = loadConfigAllowlist();
+  const allowed = allowlist[ctx.alias] ?? [];
+  if (!allowed.includes(path)) {
+    throw new Error(`config path '${path}' is not on the allowlist for alias '${ctx.alias}'`);
+  }
+}
+
+interface ConfigGetResult {
+  found: boolean;
+  truncated: boolean;
+  size_bytes: number | null;
+  content: string | null;
+}
+
+const configGet: OpSpec<ConfigGetResult> = {
+  group: 'config',
+  name: 'get',
+  summary: 'Read an allowlisted remote config file (size-guarded).',
+  args: [
+    arg('path', 'positional', true, 'Remote file path — must be declared in the alias allowlist.'),
+  ],
+  mutating: false,
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const path = reqStr(ctx, 'path');
+    assertConfigPathAllowed(ctx, path);
+    const script = [
+      `p=${shq(path)}`,
+      'if [ ! -f "$p" ]; then echo __NOT_FOUND__; exit 0; fi',
+      'sz=$(wc -c < "$p")',
+      `if [ "$sz" -gt ${FILE_CAT_MAX_BYTES} ]; then echo "__TOO_LARGE__:$sz"; else cat "$p"; fi`,
+    ].join('; ');
+    return shellJoin(['sh', '-c', script]);
+  },
+  shape: (parsed) => {
+    const text = parsed as string;
+    const trimmed = text.trim();
+    if (trimmed === '__NOT_FOUND__') {
+      return { found: false, truncated: false, size_bytes: null, content: null };
+    }
+    const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(trimmed);
+    if (tooLarge) {
+      const size = tooLarge[1];
+      return {
+        found: true,
+        truncated: true,
+        size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
+        content: null,
+      };
+    }
+    return {
+      found: true,
+      truncated: false,
+      size_bytes: Buffer.byteLength(text, 'utf8'),
+      content: text,
+    };
+  },
+};
+
+function buildConfigValidateCommand(path: string): string {
+  if (/nginx/i.test(path)) {
+    return shellJoin(['nginx', '-t']);
+  }
+  if (/sshd_config/i.test(path)) {
+    return shellJoin(['sshd', '-t']);
+  }
+  if (/caddy/i.test(path)) {
+    return shellJoin(['caddy', 'validate', '--config', path]);
+  }
+  if (/(docker-)?compose\.ya?ml$/i.test(path)) {
+    return shellJoin(['docker', 'compose', '-f', path, 'config', '-q']);
+  }
+  throw new Error(`config validate: no known validator for path '${path}'`);
+}
+
+const configValidate: OpSpec<{ valid: boolean }> = {
+  group: 'config',
+  name: 'validate',
+  summary:
+    'Syntax-check an allowlisted config file (nginx -t / sshd -t / caddy validate / compose config -q).',
+  args: [
+    arg('path', 'positional', true, 'Remote file path — must be declared in the alias allowlist.'),
+  ],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const path = reqStr(ctx, 'path');
+    assertConfigPathAllowed(ctx, path);
+    return buildConfigValidateCommand(path);
+  },
+  shape: () => ({ valid: true }),
+};
+
+/** Backs up the existing file to `<path>.bak-<UTCdate>` BEFORE the write, in the same remote script. */
+function buildConfigPutScript(path: string, contentBase64: string): string {
+  const script = [
+    `p=${shq(path)}`,
+    'if [ -f "$p" ]; then cp "$p" "$p.bak-$(date -u +%Y%m%dT%H%M%SZ)"; fi',
+    `printf '%s' ${shq(contentBase64)} | base64 -d > "$p"`,
+  ].join('; ');
+  return shellJoin(['sh', '-c', script]);
+}
+
+const configPut: OpSpec<{ written: boolean }> = {
+  group: 'config',
+  name: 'put',
+  summary:
+    'Write an allowlisted remote config file — backs up the existing file (.bak-<UTCdate>) before overwriting.',
+  args: [
+    arg('path', 'positional', true, 'Remote file path — must be declared in the alias allowlist.'),
+    arg(
+      'content-base64',
+      'flag',
+      true,
+      'Base64-encoded content to write (CLI reads the local --from file and encodes it).',
+    ),
+  ],
+  mutating: true,
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const path = reqStr(ctx, 'path');
+    assertConfigPathAllowed(ctx, path);
+    const contentBase64 = reqStr(ctx, 'content-base64');
+    return buildConfigPutScript(path, contentBase64);
+  },
+  shape: () => ({ written: true }),
+};
+
+function buildConfigReloadCommand(service: string): string {
+  if (service === 'nginx') {
+    return shellJoin(['nginx', '-s', 'reload']);
+  }
+  return shellJoin(['systemctl', 'reload', service]);
+}
+
+const configReload: OpSpec<{ reloaded: boolean }> = {
+  group: 'config',
+  name: 'reload',
+  summary: 'Reload a service after a config change (systemctl reload / nginx -s reload).',
+  args: [arg('service', 'positional', true, 'Service name (e.g. nginx, sshd).')],
+  mutating: true,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => buildConfigReloadCommand(reqStr(ctx, 'service')),
+  shape: () => ({ reloaded: true }),
 };
 
 // ---------------------------------------------------------------------------
@@ -1362,6 +1599,174 @@ const dbQuery: OpSpec<unknown[]> = {
 };
 
 // ---------------------------------------------------------------------------
+// deploy
+// ---------------------------------------------------------------------------
+
+function loadRecipeFromCtx(ctx: OpContext): ReturnType<typeof loadRecipe> {
+  return loadRecipe(reqStr(ctx, 'recipe'));
+}
+
+const deployRun: OpSpec<DeployPlan | { output: string }> = {
+  group: 'deploy',
+  name: 'run',
+  summary: 'Execute (or --dry-run plan) a deploy recipe in resolved dependency order.',
+  args: [
+    arg('recipe', 'positional', true, 'Recipe name.'),
+    arg(
+      'dry-run',
+      'flag',
+      false,
+      'Print the resolved plan; execute nothing, no confirmation needed.',
+    ),
+  ],
+  mutating: true,
+  timeoutSec: DEPLOY_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    if (optBool(ctx, 'dry-run', false)) {
+      return null;
+    }
+    const recipe = loadRecipeFromCtx(ctx);
+    return buildRunScript(recipe.steps, recipe.workdir);
+  },
+  shape: (parsed) => ({ output: (parsed as string).trim() }),
+  runLocal: (ctx) => planRecipe(loadRecipeFromCtx(ctx)),
+};
+
+const deployStatus: OpSpec<ComposePsEntry[]> = {
+  group: 'deploy',
+  name: 'status',
+  summary: 'docker compose ps for the recipe workdir — live image tag/health per service.',
+  args: [arg('recipe', 'positional', true, 'Recipe name.')],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'ndjson',
+  buildRemote: (ctx) => {
+    const recipe = loadRecipeFromCtx(ctx);
+    return shellJoin(['sh', '-c', `cd ${shq(recipe.workdir)} && docker compose ps --format json`]);
+  },
+  shape: (parsed) =>
+    (parsed as unknown[])
+      .map(shapeComposePsEntry)
+      .filter((entry): entry is ComposePsEntry => entry !== null),
+};
+
+const deployRollback: OpSpec<{ output: string }> = {
+  group: 'deploy',
+  name: 'rollback',
+  summary: 'Roll back using the recipe [rollback] block — refuses when the recipe declares none.',
+  args: [arg('recipe', 'positional', true, 'Recipe name.')],
+  mutating: true,
+  timeoutSec: DEPLOY_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => buildRollbackCommand(loadRecipeFromCtx(ctx)),
+  shape: (parsed) => ({ output: (parsed as string).trim() }),
+};
+
+const deployLogs: OpSpec<{ output: string }> = {
+  group: 'deploy',
+  name: 'logs',
+  summary: 'docker compose logs (tail) for the recipe workdir.',
+  args: [
+    arg('recipe', 'positional', true, 'Recipe name.'),
+    arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
+  ],
+  mutating: false,
+  timeoutSec: LOG_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const recipe = loadRecipeFromCtx(ctx);
+    const tail = optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL));
+    return shellJoin([
+      'sh',
+      '-c',
+      `cd ${shq(recipe.workdir)} && docker compose logs --tail=${shq(tail)} --timestamps`,
+    ]);
+  },
+  shape: (parsed) => ({ output: parsed as string }),
+};
+
+const deployMigrate: OpSpec<{ output: string }> = {
+  group: 'deploy',
+  name: 'migrate',
+  summary: 'Run only the migrate-kind steps of a recipe, in resolved order.',
+  args: [arg('recipe', 'positional', true, 'Recipe name.')],
+  mutating: true,
+  timeoutSec: DEPLOY_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => {
+    const recipe = loadRecipeFromCtx(ctx);
+    return buildMigrateScript(recipe.steps, recipe.workdir);
+  },
+  shape: (parsed) => ({ output: (parsed as string).trim() }),
+};
+
+// ---------------------------------------------------------------------------
+// security
+// ---------------------------------------------------------------------------
+
+/** Directives that cannot self-lockout an already-authenticated session — applied unconditionally. */
+const HARDEN_SAFE_DIRECTIVES: Array<[string, string]> = [
+  ['X11Forwarding', 'no'],
+  ['PermitEmptyPasswords', 'no'],
+  ['MaxAuthTries', '4'],
+  ['ClientAliveInterval', '300'],
+  ['ClientAliveCountMax', '2'],
+];
+
+/** Directives that CAN self-lockout (disabling the current session's own auth method) — refused
+ *  unless `--keep-session` is explicitly turned off (server-pattern.md §D no-self-lockout rule). */
+const HARDEN_RISKY_DIRECTIVES: Array<[string, string]> = [
+  ['PermitRootLogin', 'no'],
+  ['PasswordAuthentication', 'no'],
+];
+
+function buildHardenScript(keepSession: boolean): string {
+  const cfg = '/etc/ssh/sshd_config';
+  const directives = keepSession
+    ? HARDEN_SAFE_DIRECTIVES
+    : [...HARDEN_SAFE_DIRECTIVES, ...HARDEN_RISKY_DIRECTIVES];
+  const steps = [`cp ${cfg} ${cfg}.bak-$(date -u +%Y%m%dT%H%M%SZ)`];
+  for (const [key, value] of directives) {
+    steps.push(`sed -i '/^${key} /d' ${cfg}`);
+    steps.push(`echo ${shq(`${key} ${value}`)} >> ${cfg}`);
+  }
+  steps.push('sshd -t');
+  steps.push('systemctl reload sshd || service ssh reload');
+  return shellJoin(['sh', '-c', steps.join(' && ')]);
+}
+
+const securityHarden: OpSpec<{ applied: string[]; keep_session: boolean }> = {
+  group: 'security',
+  name: 'harden',
+  summary:
+    'Backs up sshd_config, applies lockout-safe hardening directives, validates (sshd -t), reloads. ' +
+    '--keep-session defaults true and refuses PermitRootLogin/PasswordAuthentication changes unless explicitly turned off.',
+  args: [
+    arg(
+      'keep-session',
+      'flag',
+      false,
+      'Default true. Pass false to also apply lockout-risky directives (PermitRootLogin no, PasswordAuthentication no).',
+    ),
+  ],
+  mutating: true,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: (ctx) => buildHardenScript(optBool(ctx, 'keep-session', true)),
+  shape: (_parsed, ctx) => {
+    const keepSession = optBool(ctx, 'keep-session', true);
+    const directives = keepSession
+      ? HARDEN_SAFE_DIRECTIVES
+      : [...HARDEN_SAFE_DIRECTIVES, ...HARDEN_RISKY_DIRECTIVES];
+    return {
+      applied: directives.map(([key, value]) => `${key} ${value}`),
+      keep_session: keepSession,
+    };
+  },
+};
+
+// ---------------------------------------------------------------------------
 // registry + executor
 // ---------------------------------------------------------------------------
 
@@ -1386,11 +1791,20 @@ const REGISTRY: OpSpec[] = [
   servicesComposePs,
   servicesHealthcheck,
   servicesSystemctlStatus,
+  servicesRestart,
+  servicesSystemctlStart,
+  servicesSystemctlStop,
+  servicesSystemctlRestart,
+  servicesSystemctlReload,
   filesLs,
   filesCat,
   filesTail,
   filesDownload,
   filesDiskUsage,
+  configGet,
+  configValidate,
+  configPut,
+  configReload,
   dbList,
   dbTables,
   dbActivity,
@@ -1398,6 +1812,12 @@ const REGISTRY: OpSpec[] = [
   dbSlow,
   dbSize,
   dbQuery,
+  deployRun,
+  deployStatus,
+  deployRollback,
+  deployLogs,
+  deployMigrate,
+  securityHarden,
 ] as OpSpec[];
 
 export function getOp(group: string, name: string): OpSpec | undefined {
@@ -1411,6 +1831,10 @@ export function listOps(): OpSpec[] {
 export interface ExecuteDeps {
   transport?: TransportDeps;
   sshConfigPath?: string;
+  /** Confirms a mutating op — the CLI (Phase 6) sets this after `--yes` or an interactive prompt. */
+  yes?: boolean;
+  /** Overrides `auditMutating`'s log path — tests point this at a temp file. */
+  auditLogPath?: string;
 }
 
 function parseByMode(mode: OutputMode, stdout: string): unknown {
@@ -1426,12 +1850,29 @@ function parseByMode(mode: OutputMode, stdout: string): unknown {
   return mode.parse(stdout);
 }
 
+function auditFor(
+  deps: ExecuteDeps,
+  alias: string,
+  command: string,
+  ctx: OpContext,
+  outcome: 'ok' | 'error' | 'refused',
+): void {
+  auditMutating(
+    { alias, command, argsSummary: ctx.args, outcome },
+    deps.auditLogPath ? { logPath: deps.auditLogPath } : undefined,
+  );
+}
+
 /**
- * The one place an `OpSpec` is turned into an `Envelope`: resolve the remote command (or
- * run the host-local fallback), execute it through `transport.run` (the single execution
- * path), parse per `output`, then `shape` into the final payload. The CLI (Phase 6) is
- * the only intended caller in production; tests call this directly with a scripted
- * transport so no real ssh/network is ever touched.
+ * The one place an `OpSpec` is turned into an `Envelope`: gate mutating ops through
+ * `confirmGate`/`auditMutating` (the ONE mutating path, no per-op bespoke gating), resolve
+ * the remote command (or run the host-local fallback), execute it through `transport.run`
+ * (the single execution path), parse per `output`, then `shape` into the final payload.
+ * `deploy run --dry-run` executes nothing and mutates nothing, so it is exempt from the
+ * gate/audit — every other mutating op requires `--yes` (or an interactive confirm the CLI
+ * resolves into `deps.yes`) and always writes an audit line, success or failure. The CLI
+ * (Phase 6) is the only intended caller in production; tests call this directly with a
+ * scripted transport so no real ssh/network is ever touched.
  */
 export async function executeOp(
   op: OpSpec,
@@ -1440,6 +1881,20 @@ export async function executeOp(
 ): Promise<Envelope<unknown>> {
   const startedAtMs = Date.now();
   const command = `${op.group} ${op.name}`;
+  const isDryRun = optBool(ctx, 'dry-run', false);
+  const requiresConfirm = op.mutating && !isDryRun;
+
+  if (!confirmGate({ mutating: requiresConfirm, yes: deps.yes ?? false })) {
+    auditFor(deps, ctx.alias, command, ctx, 'refused');
+    return buildEnvelope({
+      alias: ctx.alias,
+      command,
+      startedAtMs,
+      data: null,
+      error: errorInfo('CONFIRMATION_REQUIRED'),
+    });
+  }
+
   const remoteCmd = op.buildRemote(ctx);
 
   if (remoteCmd === null) {
@@ -1450,11 +1905,18 @@ export async function executeOp(
     }
     const sshConfigPath = deps.sshConfigPath ?? join(homedir(), '.ssh', 'config');
     const data = op.runLocal(ctx, sshConfigPath);
-    return buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
+    const envelope = buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
+    if (requiresConfirm) {
+      auditFor(deps, ctx.alias, command, ctx, 'ok');
+    }
+    return envelope;
   }
 
   const result = await run(ctx.alias, remoteCmd, op.timeoutSec, deps.transport);
   if (result.error) {
+    if (requiresConfirm) {
+      auditFor(deps, ctx.alias, command, ctx, 'error');
+    }
     return buildEnvelope({
       alias: ctx.alias,
       command,
@@ -1466,6 +1928,9 @@ export async function executeOp(
 
   const parsed = parseByMode(op.output, result.raw.stdout);
   const data = op.shape(parsed, ctx);
+  if (requiresConfirm) {
+    auditFor(deps, ctx.alias, command, ctx, 'ok');
+  }
   return buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
 }
 

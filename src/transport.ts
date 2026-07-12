@@ -44,9 +44,12 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   SSH_TRANSPORT_ERROR: 'SSH transport failed before the command could run',
   COMMAND_FAILED: 'Remote command exited with a non-zero status',
   COMMAND_TIMEOUT: 'Remote command timed out',
+  CONFIRMATION_REQUIRED: 'Mutating op refused: pass --yes (or confirm interactively) to proceed',
 };
 
-function errorInfo(code: SshErrorCode, remoteExit?: number): ErrorInfo {
+/** Exported for the registry's mutating-op confirm gate — a `CONFIRMATION_REQUIRED`
+ *  refusal never touches ssh, but still wants the same static-message ErrorInfo shape. */
+export function errorInfo(code: SshErrorCode, remoteExit?: number): ErrorInfo {
   const info: ErrorInfo = { code, message: ERROR_MESSAGES[code] };
   if (remoteExit !== undefined) {
     info.remote_exit = remoteExit;

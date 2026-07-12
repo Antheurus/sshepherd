@@ -1,10 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeOp, getOp, listOps } from '../registry.ts';
 import { buildDbOpContext } from '../targets.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
+
+const DEMO_RECIPE_PATH = join(import.meta.dir, 'fixtures', 'deploy.demo.toml');
+const NO_ROLLBACK_RECIPE_PATH = join(import.meta.dir, 'fixtures', 'deploy.no-rollback.toml');
 
 /** Scripted runner: returns queued outcomes in call order, last one repeats if exhausted. */
 function scriptedRunner(outcomes: SpawnOutcome[]): SshRunner {
@@ -29,46 +32,77 @@ function connectedRunOutcomes(stdout: string): SpawnOutcome[] {
 }
 
 describe('registry — getOp/listOps', () => {
-  test('every read-only op declared in the phase brief is registered (Phases 3-4)', () => {
-    const expected: Array<[string, string]> = [
-      ['hosts', 'list'],
-      ['hosts', 'test'],
-      ['hosts', 'info'],
-      ['check', 'overview'],
-      ['check', 'mem'],
-      ['check', 'disk'],
-      ['check', 'cpu'],
-      ['check', 'ports'],
-      ['check', 'oom-history'],
-      ['check', 'kernel'],
-      ['logs', 'docker'],
-      ['logs', 'service'],
-      ['logs', 'nginx'],
-      ['logs', 'docker-daemon'],
-      ['services', 'ps'],
-      ['services', 'stats'],
-      ['services', 'inspect'],
-      ['services', 'compose-ps'],
-      ['services', 'healthcheck'],
-      ['services', 'systemctl-status'],
-      ['files', 'ls'],
-      ['files', 'cat'],
-      ['files', 'tail'],
-      ['files', 'download'],
-      ['files', 'disk-usage'],
-      ['db', 'list'],
-      ['db', 'tables'],
-      ['db', 'activity'],
-      ['db', 'connections'],
-      ['db', 'slow'],
-      ['db', 'size'],
-      ['db', 'query'],
-    ];
-    for (const [group, name] of expected) {
-      expect(getOp(group, name)).toBeDefined();
+  const READ_ONLY: Array<[string, string]> = [
+    ['hosts', 'list'],
+    ['hosts', 'test'],
+    ['hosts', 'info'],
+    ['check', 'overview'],
+    ['check', 'mem'],
+    ['check', 'disk'],
+    ['check', 'cpu'],
+    ['check', 'ports'],
+    ['check', 'oom-history'],
+    ['check', 'kernel'],
+    ['logs', 'docker'],
+    ['logs', 'service'],
+    ['logs', 'nginx'],
+    ['logs', 'docker-daemon'],
+    ['services', 'ps'],
+    ['services', 'stats'],
+    ['services', 'inspect'],
+    ['services', 'compose-ps'],
+    ['services', 'healthcheck'],
+    ['services', 'systemctl-status'],
+    ['files', 'ls'],
+    ['files', 'cat'],
+    ['files', 'tail'],
+    ['files', 'download'],
+    ['files', 'disk-usage'],
+    ['config', 'get'],
+    ['config', 'validate'],
+    ['db', 'list'],
+    ['db', 'tables'],
+    ['db', 'activity'],
+    ['db', 'connections'],
+    ['db', 'slow'],
+    ['db', 'size'],
+    ['db', 'query'],
+    ['deploy', 'status'],
+    ['deploy', 'logs'],
+  ];
+
+  const MUTATING: Array<[string, string]> = [
+    ['services', 'restart'],
+    ['services', 'systemctl-start'],
+    ['services', 'systemctl-stop'],
+    ['services', 'systemctl-restart'],
+    ['services', 'systemctl-reload'],
+    ['config', 'put'],
+    ['config', 'reload'],
+    ['deploy', 'run'],
+    ['deploy', 'rollback'],
+    ['deploy', 'migrate'],
+    ['security', 'harden'],
+  ];
+
+  test('every read-only op declared through Phases 3-5 is registered and flagged mutating:false', () => {
+    for (const [group, name] of READ_ONLY) {
+      const op = getOp(group, name);
+      expect(op).toBeDefined();
+      expect(op?.mutating).toBe(false);
     }
-    expect(listOps()).toHaveLength(expected.length);
-    expect(listOps().every((op) => op.mutating === false)).toBe(true);
+  });
+
+  test('every mutating op declared in Phase 5 is registered and flagged mutating:true', () => {
+    for (const [group, name] of MUTATING) {
+      const op = getOp(group, name);
+      expect(op).toBeDefined();
+      expect(op?.mutating).toBe(true);
+    }
+  });
+
+  test('listOps returns exactly the read-only + mutating sets, no extras and no drops', () => {
+    expect(listOps()).toHaveLength(READ_ONLY.length + MUTATING.length);
   });
 });
 
@@ -712,5 +746,402 @@ describe('db group — layered read-only enforcement', () => {
     expect(serialized).not.toContain('SECRET_USER');
     expect(serialized).not.toContain('SECRET_DATABASE_NAME');
     expect(serialized).not.toContain('does not exist');
+  });
+});
+
+function tempAuditLogPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'sshepherd-audit-registry-test-'));
+  return join(dir, 'audit.jsonl');
+}
+
+function readAuditLines(path: string): Array<Record<string, unknown>> {
+  if (!existsSync(path)) {
+    return [];
+  }
+  return readFileSync(path, 'utf8')
+    .trim()
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+describe('executeOp — mutating gate: the ONE path every mutating op goes through (confirm + audit)', () => {
+  test('a mutating op without --yes is refused, never touches ssh, and writes a refused audit line', async () => {
+    const op = getOp('services', 'restart');
+    if (!op) {
+      throw new Error('services restart op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    const runner: SshRunner = async () => {
+      throw new Error('ssh must never be called for a refused mutating op');
+    };
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { container: 'web' } },
+      { transport: { runner }, auditLogPath },
+    );
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('CONFIRMATION_REQUIRED');
+    expect(envelope.data).toBeNull();
+
+    const lines = readAuditLines(auditLogPath);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.outcome).toBe('refused');
+    expect(lines[0]?.command).toBe('services restart');
+    expect(lines[0]?.alias).toBe('lms-server');
+  });
+
+  test('a mutating op with --yes proceeds and writes an ok audit line on success', async () => {
+    const op = getOp('services', 'restart');
+    if (!op) {
+      throw new Error('services restart op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    const runner = scriptedRunner(connectedRunOutcomes(''));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { container: 'web' } },
+      { transport: { runner }, yes: true, auditLogPath },
+    );
+
+    expect(envelope.ok).toBe(true);
+    const data = envelope.data as { container: string; restarted: boolean };
+    expect(data.restarted).toBe(true);
+
+    const lines = readAuditLines(auditLogPath);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.outcome).toBe('ok');
+  });
+
+  test('a mutating op with --yes that fails remotely still writes an error audit line', async () => {
+    const op = getOp('services', 'restart');
+    if (!op) {
+      throw new Error('services restart op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false },
+      { code: 0, stdout: '', stderr: '', timedOut: false },
+      { code: 1, stdout: '', stderr: 'no such container', timedOut: false },
+    ]);
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { container: 'ghost' } },
+      { transport: { runner }, yes: true, auditLogPath },
+    );
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('COMMAND_FAILED');
+
+    const lines = readAuditLines(auditLogPath);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.outcome).toBe('error');
+  });
+
+  test('a non-mutating op never requires --yes and never writes an audit line', async () => {
+    const op = getOp('services', 'ps');
+    if (!op) {
+      throw new Error('services ps op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    const runner = scriptedRunner(connectedRunOutcomes('[]'));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner }, auditLogPath },
+    );
+
+    expect(envelope.ok).toBe(true);
+    expect(readAuditLines(auditLogPath)).toHaveLength(0);
+  });
+
+  test('deploy run --dry-run needs no --yes, executes nothing, and writes no audit line', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const runner: SshRunner = async () => {
+        throw new Error('dry-run must never touch ssh');
+      };
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo', 'dry-run': true } },
+        { transport: { runner }, auditLogPath },
+      );
+
+      expect(envelope.ok).toBe(true);
+      const data = envelope.data as { steps: Array<{ name: string; mutates: boolean }> };
+      expect(data.steps.map((s) => s.name)).toEqual([
+        'pull-code',
+        'build-image',
+        'up',
+        'migrate',
+        'verify',
+      ]);
+      expect(data.steps.find((s) => s.name === 'migrate')?.mutates).toBe(true);
+      expect(data.steps.find((s) => s.name === 'verify')?.mutates).toBe(false);
+      expect(readAuditLines(auditLogPath)).toHaveLength(0);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+});
+
+describe('deploy run — non-dry-run executes the combined resolved script (LMS gotcha: migrate after up)', () => {
+  test('buildRemote joins every step in resolved order, migrate strictly after up', () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { recipe: 'demo' } });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+      expect(remoteCmd).toContain('git pull --ff-only');
+      expect(remoteCmd).toContain('docker compose build app');
+      expect(remoteCmd).toContain('docker compose up -d');
+      expect(remoteCmd).toContain('artisan migrate --force');
+      const upIndex = remoteCmd.indexOf('docker compose up -d');
+      const migrateIndex = remoteCmd.indexOf('artisan migrate --force');
+      expect(migrateIndex).toBeGreaterThan(upIndex);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('deploy migrate runs only the migrate-kind step', () => {
+    const op = getOp('deploy', 'migrate');
+    if (!op) {
+      throw new Error('deploy migrate op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { recipe: 'demo' } });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+      expect(remoteCmd).toContain('artisan migrate --force');
+      expect(remoteCmd).not.toContain('git pull');
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+});
+
+describe('deploy rollback — refuses without a [rollback] block, never guesses', () => {
+  test('buildRemote throws a clear error for a recipe with no [rollback] block', () => {
+    const op = getOp('deploy', 'rollback');
+    if (!op) {
+      throw new Error('deploy rollback op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = NO_ROLLBACK_RECIPE_PATH;
+    try {
+      expect(() =>
+        op.buildRemote({ alias: 'lms-server', args: { recipe: 'no-rollback' } }),
+      ).toThrow(/declares no \[rollback\] block/);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('buildRemote succeeds for a recipe that declares [rollback]', () => {
+    const op = getOp('deploy', 'rollback');
+    if (!op) {
+      throw new Error('deploy rollback op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { recipe: 'demo' } });
+      expect(remoteCmd).toContain('IMAGE_TAG');
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+});
+
+describe('config put — writes .bak-<date> before overwriting (real sh -c drive on a fixture file)', () => {
+  test('the built command backs up the existing file before writing new content, in that order', () => {
+    const op = getOp('config', 'put');
+    if (!op) {
+      throw new Error('config put op missing');
+    }
+
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-config-put-test-'));
+    const targetPath = join(dir, 'nginx.conf');
+    writeFileSync(targetPath, 'OLD CONTENT\n');
+
+    const allowlistPath = join(dir, 'config-allowlist.toml');
+    writeFileSync(allowlistPath, `[lms-server]\npaths = [${JSON.stringify(targetPath)}]\n`);
+
+    process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const contentBase64 = Buffer.from('NEW CONTENT\n', 'utf8').toString('base64');
+      const remoteCmd = op.buildRemote({
+        alias: 'lms-server',
+        args: { path: targetPath, 'content-base64': contentBase64 },
+      });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+
+      const backupIndex = remoteCmd.indexOf('.bak-');
+      const writeIndex = remoteCmd.indexOf('base64 -d');
+      expect(backupIndex).toBeGreaterThan(-1);
+      expect(writeIndex).toBeGreaterThan(backupIndex);
+
+      const result = Bun.spawnSync(['sh', '-c', remoteCmd]);
+      expect(result.exitCode).toBe(0);
+
+      expect(readFileSync(targetPath, 'utf8')).toBe('NEW CONTENT\n');
+
+      const backupFiles = readdirSync(dir).filter((f) => f.startsWith('nginx.conf.bak-'));
+      expect(backupFiles).toHaveLength(1);
+      const backupName = backupFiles[0];
+      if (backupName === undefined) {
+        throw new Error('expected a backup file');
+      }
+      expect(readFileSync(join(dir, backupName), 'utf8')).toBe('OLD CONTENT\n');
+    } finally {
+      delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+    }
+  });
+});
+
+describe('config get/put — allowlist refuses an undeclared path before ssh', () => {
+  test('a path not declared for this alias is refused', () => {
+    const op = getOp('config', 'get');
+    if (!op) {
+      throw new Error('config get op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-config-allow-test-'));
+    const allowlistPath = join(dir, 'config-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/etc/nginx/nginx.conf"]\n');
+    process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = allowlistPath;
+    try {
+      expect(() => op.buildRemote({ alias: 'lms-server', args: { path: '/etc/shadow' } })).toThrow(
+        /not on the allowlist/,
+      );
+      expect(() =>
+        op.buildRemote({ alias: 'lms-server', args: { path: '/etc/nginx/nginx.conf' } }),
+      ).not.toThrow();
+    } finally {
+      delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+    }
+  });
+
+  test('a missing allowlist file refuses every path (fail closed)', () => {
+    const op = getOp('config', 'get');
+    if (!op) {
+      throw new Error('config get op missing');
+    }
+    process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = join(
+      tmpdir(),
+      'sshepherd-does-not-exist',
+      'config-allowlist.toml',
+    );
+    try {
+      expect(() =>
+        op.buildRemote({ alias: 'lms-server', args: { path: '/etc/nginx/nginx.conf' } }),
+      ).toThrow(/not on the allowlist/);
+    } finally {
+      delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+    }
+  });
+});
+
+describe('security harden — --keep-session defaults true and refuses lockout-risky directives', () => {
+  test('default (no keep-session arg) never touches PermitRootLogin/PasswordAuthentication', () => {
+    const op = getOp('security', 'harden');
+    if (!op) {
+      throw new Error('security harden op missing');
+    }
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: {} });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    expect(remoteCmd).not.toContain('PermitRootLogin');
+    expect(remoteCmd).not.toContain('PasswordAuthentication');
+    expect(remoteCmd).toContain('X11Forwarding');
+    expect(remoteCmd).toContain('sshd -t');
+  });
+
+  test('explicit keep-session:false also applies the lockout-risky directives', () => {
+    const op = getOp('security', 'harden');
+    if (!op) {
+      throw new Error('security harden op missing');
+    }
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { 'keep-session': false } });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    expect(remoteCmd).toContain('PermitRootLogin');
+    expect(remoteCmd).toContain('PasswordAuthentication');
+  });
+
+  test('backs up sshd_config before validating, and validates before reloading (command sequence)', () => {
+    const op = getOp('security', 'harden');
+    if (!op) {
+      throw new Error('security harden op missing');
+    }
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: {} });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    const backupIndex = remoteCmd.indexOf('.bak-');
+    const validateIndex = remoteCmd.indexOf('sshd -t');
+    const reloadIndex = remoteCmd.indexOf('systemctl reload sshd');
+    expect(backupIndex).toBeGreaterThan(-1);
+    expect(validateIndex).toBeGreaterThan(backupIndex);
+    expect(reloadIndex).toBeGreaterThan(validateIndex);
+  });
+});
+
+describe('quoting — Phase 5 mutating ops are injection-safe (real sh -c drive)', () => {
+  test('services restart: a container arg shaped like a shell injection cannot splice a second command', () => {
+    const op = getOp('services', 'restart');
+    if (!op) {
+      throw new Error('services restart op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `web'; touch ${marker}; echo '`;
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { container: malicious } });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+  });
+
+  test('services systemctl-restart: a unit arg shaped like a shell injection cannot splice a second command', () => {
+    const op = getOp('services', 'systemctl-restart');
+    if (!op) {
+      throw new Error('services systemctl-restart op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `nginx'; touch ${marker}; echo '`;
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { unit: malicious } });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+  });
+
+  test('config reload: a service arg shaped like a shell injection cannot splice a second command', () => {
+    const op = getOp('config', 'reload');
+    if (!op) {
+      throw new Error('config reload op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `nginx'; touch ${marker}; echo '`;
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { service: malicious } });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    assertShellParsesRemoteCmdSafely(remoteCmd, marker);
   });
 });

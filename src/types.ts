@@ -23,7 +23,8 @@ export type SshErrorCode =
   | 'HOST_KEY_MISMATCH'
   | 'SSH_TRANSPORT_ERROR'
   | 'COMMAND_FAILED'
-  | 'COMMAND_TIMEOUT';
+  | 'COMMAND_TIMEOUT'
+  | 'CONFIRMATION_REQUIRED';
 
 /**
  * `message` is always a static human string looked up by `code`, never raw ssh

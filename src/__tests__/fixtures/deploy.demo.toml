@@ -1,0 +1,39 @@
+# Fixture recipe for registry/recipes tests — deliberately declares `migrate` BEFORE
+# `up` in file order to prove `depends_on` reordering is real, not accidental file order
+# (the LMS gotcha: migrations need a rebuild+up first, never a bare `artisan migrate`).
+name = "demo"
+alias = "lms-server"
+workdir = "/opt/lms"
+description = "Demo recipe — compose build, migrate (depends_on up), up, healthcheck"
+
+[[step]]
+name = "pull-code"
+kind = "shell"
+run = "git pull --ff-only"
+mutates = true
+
+[[step]]
+name = "build-image"
+kind = "compose"
+run = "build app"
+
+[[step]]
+name = "migrate"
+kind = "migrate"
+run = "docker compose run --rm app php artisan migrate --force"
+depends_on = "up"
+
+[[step]]
+name = "up"
+kind = "compose"
+run = "up -d"
+
+[[step]]
+name = "verify"
+kind = "healthcheck"
+target = "app"
+timeout = "60s"
+
+[rollback]
+strategy = "previous-tag"
+tag = "v1.2.2"
