@@ -487,9 +487,32 @@ plus `--help` per group and `references/*.md` deep docs.
 - Phase 4 (db) and Phase 5 (mutating) both APPEND ops to the same `src/registry.ts` REGISTRY array — they cannot run in parallel (file contention), stay sequential. Follow the exact OpSpec shape; add entries, don't restructure.
 - `services stats` parses docker's human byte strings via `parseHumanBytes` (the one place a human size is parsed) — fine, documented.
 
+### Phase 4: db group (read-only enforcement) + targets — 2026-07-12
+
+**Status:** Complete (audited ✅, one security gap found + fixed + re-verified)
+**Files created:** src/targets.ts (PgTarget, loadTargets/resolveTarget via Bun.TOML, SSHEPHERD_TARGETS_PATH override, buildDbOpContext), src/db.ts (assertSelectOnly, assertNoMultiStatementSql, wrapReadOnlyTxn, wrapAsJsonAgg, buildPsqlCommand, buildDbSlowCommand), src/__tests__/{db,targets}.test.ts, targets.example.toml
+**Files modified:** src/registry.ts (7 db ops appended: list/tables/activity/connections/slow/size/query), src/__tests__/registry.test.ts, package.json/bun.lock (added node-sql-parser — first + only runtime dep)
+**Key decisions:**
+- `node-sql-parser` is the only runtime dep; confirmed it bundles + runs under `bun build --compile` (independent registry.ts compile test, exit 0).
+- Three-layer read-only enforcement: (1) read-only ROLE recommended in targets.example.toml (engine-side, the real boundary — documented); (2) txn-readonly wrapper `wrapReadOnlyTxn` (BEGIN TRANSACTION READ ONLY; ...; ROLLBACK) wraps EVERY db op's SQL — the enforced gate; (3) node-sql-parser `assertSelectOnly` rejects positively-identified INSERT/UPDATE/DELETE/DDL locally before ssh (advisory; exotic-valid syntax passes through).
+- Zero-knowledge holds for db: pg-target NAME is the only identity echoed; container name / compose dir / db user / db name / connection details from targets.toml never reach any envelope or error (psql's own stderr is discarded like all transportStderr). Verified live on success + COMMAND_FAILED paths.
+- Fixed introspection SQL (list/tables/activity/connections/slow/size) authored to emit JSON via json_agg/json_build_object, wrapped in wrapReadOnlyTxn uniformly. `db list` reads declared target names LOCALLY (runLocal, mirrors `hosts list`), no psql round trip.
+- `db slow` degrades gracefully: presence-checks pg_stat_statements first, returns `{available:false, reason}` (ok:true) when absent, never errors.
+- psql invoked via `docker compose exec -T db psql` (or plain `docker exec`) with ON_ERROR_STOP=1; all values interpolated via shq/shellJoin (injection-verified with real `sh -c` marker-file drives).
+**Issues:** Audit found a REAL security gap — a crafted `db query` payload (`SELECT 1) t; COMMIT; DROP TABLE foo; SELECT (SELECT 1`) closed wrapAsJsonAgg's `FROM (...) t` boundary early and injected a COMMIT that ended the read-only txn before a write ran; parser threw on the fragment and the advisory catch let it pass. FIXED (578cf52): `assertNoMultiStatementSql` rejects any `db query` sql containing a bare `;` locally, before ssh, scoped ONLY to the free-text query op (static introspection SQL untouched). Re-verified live: payload rejected, plain SELECT passes, trailing-semicolon SELECT rejected.
+**Test count:** 50 → 85 pass (audit + fix added drives), 0 fail, `just check` clean.
+**Deviations from plan:** added `db query` op (success criteria demand it; introspection-only "Provides" line was incomplete).
+**Notes for next phase (LOAD-BEARING):**
+- Phase 5 (mutating) APPENDS ops to the same src/registry.ts REGISTRY array — sequential, no parallel. Follow the OpSpec shape; add entries, don't restructure. db ops occupy the tail of the array now.
+- CARRIED-FORWARD (known issue #2→resolved-in-code / db SQL correctness): the introspection SQL (column names like pg_stat_statements total_exec_time vs total_time across PG13/14+) has NOT been driven against a real Postgres — no fixture DB exists. Must be spot-checked in the Phase 6/7 smoke suite alongside the Linux command shapes (build a Postgres container into scripts/sshd-fixture).
+- Auth model documented in targets.example.toml: password never transits sshepherd (container peer/trust or remote .pgpass).
+
 ## Review findings
 
 (Filled by auditor subagents.)
+
+### Phase 4 audit — 2026-07-12
+✅ All 4 success criteria met + verified live (assertSelectOnly rejects non-SELECT; txn wrapper wraps every op; db activity numeric rollups; db slow graceful degradation). Zero-knowledge, registry pattern, and shq/shellJoin injection safety all held under live adversarial `sh -c` marker-file drives. One genuine security defect found and reproduced (COMMIT-injection bypass of the read-only txn via crafted subquery-boundary escape) → fix-implementer closed it (578cf52, `assertNoMultiStatementSql`), re-verified live. DEFERRED (carried, not ❌): live Postgres drive (no fixture DB — Phase 6/7 smoke suite). Final: 85 tests pass, `just check` clean.
 
 ## Final status
 
