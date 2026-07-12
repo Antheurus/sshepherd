@@ -1,0 +1,24 @@
+{
+  "name": "sshepherd",
+  "version": "0.1.0",
+  "module": "src/cli.ts",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "repository": { "type": "git", "url": "https://github.com/Antheurus/sshepherd.git" },
+  "bin": { "sshepherd": "./dist/sshepherd" },
+  "scripts": {
+    "build": "bun build ./src/cli.ts --compile --outfile ./dist/sshepherd",
+    "dev": "bun --hot ./src/cli.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "check": "bun run typecheck && bun run lint"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.3",
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.9.3"
+  }
+}
