@@ -448,6 +448,45 @@ plus `--help` per group and `references/*.md` deep docs.
 **Deviations from plan:** none
 **Notes for next phase:** Build works: `just build` → `dist/sshepherd`, `--version` prints `sshepherd 0.1.0`. `just check` (tsc + biome) green. cli.ts is a throwaway placeholder — Phase 6 rewrites it as the real argv dispatcher. tsconfig has `noUncheckedIndexedAccess` + `verbatimModuleSyntax` on, so transport/parser code must use explicit `type` imports and guard array access.
 
+### Phase 2: Types + transport core + output — 2026-07-12
+
+**Status:** Complete (audited ✅)
+**Files created:** src/types.ts, src/quote.ts, src/transport.ts, src/output.ts, src/audit.ts, src/__tests__/{quote,transport,output,audit}.test.ts
+**Files modified:** none
+**Key decisions:**
+- `Envelope<T>` has `alias` as the ONLY identity field — no host/user/port/ip field exists in the type, so the zero-knowledge guarantee is structural (compiler-enforced), not test-enforced.
+- `ErrorInfo.message` is a static per-code constant (`ERROR_MESSAGES` lookup), never interpolated from ssh stderr. Classifier reads `transportStderr` to pick the code, then discards it.
+- Transport is unit-testable via an injectable `SshRunner` (`deps.runner`, defaults to a `Bun.spawn` wrapper). Tests use a `scriptedRunner` fake — zero real ssh invoked.
+- Socket path: opaque `crc32(alias)` base36 name (no %h/%r/%p tokens), 0700 dir, length-guarded <100 chars. Flags: BatchMode=yes + LogLevel=ERROR on every call; never -t; never StrictHostKeyChecking=no.
+- Audit log (`~/.local/state/sshepherd/audit.jsonl`, 0600) stores `args_hash` (crc32), never raw arg values.
+**Issues:** none. Audit added 2 adversarial tests (remote-stderr-non-255 routing, remote-stdout passthrough) → 28 tests pass.
+**Deviations from plan:** humanToBytes + --pretty renderer deferred (YAGNI, to Phases 3/6).
+**Notes for next phase (LOAD-BEARING for auditors):**
+- `RawResult` (`transport.run().raw`) is INTERNAL — it holds `transportStderr`/`commandStderr`. The CLI/registry must NEVER serialize `raw` directly into output; only `error`/`data` may reach `buildEnvelope`. A future phase serializing `raw` would reintroduce a leak. Phase 3+ auditors must check this.
+- ssh's exit-code protocol can't distinguish a remote command that legitimately exits 255 from ssh's own transport 255 — a rare misclassification, never a leak (message stays static).
+- Phase 3 ops build remote command strings ONLY via `shq`/`shellJoin` from src/quote.ts — never string-concat a value into a remote command. `run(alias, remoteCmd, timeoutSec, deps)` is the single execution path; ops must go through it, never spawn ssh directly.
+
+### Phase 3: Ops registry + read-only groups — 2026-07-12
+
+**Status:** Complete (audited ✅)
+**Files created:** src/registry.ts (25 read-only ops + getOp/listOps/executeOp), src/parsers/*.ts (bytes/df/free/uptime/ps/du/ls/sysctl/dmesg-oom/ss/journal/docker-log/docker-ports/logs-shape/os-release/sections/verdict/psi/systemctl-show/ssh-config), src/__tests__/{parsers,registry}.test.ts
+**Files modified:** src/types.ts (OpSpec expanded: buildRemote→string|null, added runLocal, shape takes (parsed, ctx); added ArgSpec)
+**Key decisions:**
+- `executeOp` is the registry↔transport glue: resolves buildRemote/runLocal → `transport.run` (single path) → parse per output mode → shape → buildEnvelope. Only `data`/`error` reach the envelope; `raw` never serialized (Phase 2 rule held, audit-verified live).
+- `hosts list` reads ~/.ssh/config LOCALLY (runLocal, no ssh), returns alias names ONLY, skips `Host *` wildcards.
+- Native JSON where it exists (docker inspect/stats/compose-ps, journalctl -o json → all NDJSON via splitNdjson); hand-written parsers for df -B1/free -b/uptime/ps/du -sb/ls, ss -H, dmesg, systemctl show (chose `systemctl show --property=` over `-o json` for cross-version safety).
+- All sizes in bytes (df -B1/free -b/du -sb); `dead_end_risk` computed from real thresholds (disk >90%, PSI some_avg10 >10%).
+- `logs docker` → `{ts, stream, text}` lines + `next_since`; stream always 'stdout' (docker logs CLI has no reliable per-line stream tag — documented limitation).
+- `files cat` masks `.env` KEY=value lines by default, `--reveal <key>` opts a key out (audit added the missing tests).
+- `files download` reads base64 over the ssh channel (stays on the one transport path, no separate scp).
+- Missing remote binary (e.g. no docker) → clean COMMAND_FAILED via `command -v docker || exit 127` guard.
+**Issues:** audit found `.env` masking had zero tests (added 3) + added real-shell injection drives + a zero-knowledge error-path test → 50 tests pass.
+**Deviations from plan:** scripts/sshd-fixture/Dockerfile deferred (optional this phase).
+**Notes for next phase (LOAD-BEARING):**
+- CARRIED-FORWARD for Phase 6/7 smoke suite: these command output shapes were coded from docs/man-pages, NOT live-captured (dev box is macOS, target is Linux) — MUST be spot-checked against a real Linux+docker host before SKILL.md ships them: `docker stats --format json` field names, `docker compose ps --format json` (Publishers[]), `dmesg -T` format, `journalctl -o json` fields, `ss -H -tlnp` columns, `systemctl show` properties. Build scripts/sshd-fixture/Dockerfile (sshd + docker-cli + coreutils) for this.
+- Phase 4 (db) and Phase 5 (mutating) both APPEND ops to the same `src/registry.ts` REGISTRY array — they cannot run in parallel (file contention), stay sequential. Follow the exact OpSpec shape; add entries, don't restructure.
+- `services stats` parses docker's human byte strings via `parseHumanBytes` (the one place a human size is parsed) — fine, documented.
+
 ## Review findings
 
 (Filled by auditor subagents.)
