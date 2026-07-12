@@ -640,4 +640,77 @@ describe('db group — layered read-only enforcement', () => {
       }
     }
   });
+
+  function writeSensitiveFixtureTargets(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-db-zk-test-'));
+    const path = join(dir, 'targets.toml');
+    writeFileSync(
+      path,
+      [
+        '[prod]',
+        'alias = "lms-server"',
+        'compose_file = "/opt/super-secret-path/docker-compose.yml"',
+        'service = "secret-db-service"',
+        'user = "sshepherd_ro_SECRET_USER"',
+        'database = "SECRET_DATABASE_NAME"',
+        '',
+      ].join('\n'),
+    );
+    return path;
+  }
+
+  test('db op envelope never leaks compose_file/service/db_user/db_name — success path', async () => {
+    const op = getOp('db', 'activity');
+    if (!op) {
+      throw new Error('db activity op missing');
+    }
+    const ctx = buildDbOpContext('prod', {}, writeSensitiveFixtureTargets());
+    const stdout = JSON.stringify({ backends_total: 1, max_connections: 100, backends: [] });
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const envelope = await executeOp(op, ctx, { transport: { runner } });
+
+    expect(envelope.ok).toBe(true);
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain('super-secret-path');
+    expect(serialized).not.toContain('secret-db-service');
+    expect(serialized).not.toContain('SECRET_USER');
+    expect(serialized).not.toContain('SECRET_DATABASE_NAME');
+    // The alias IS allowed — it's the one identity field the envelope carries.
+    expect(envelope.alias).toBe('lms-server');
+  });
+
+  test('db op envelope never leaks compose_file/service/db_user/db_name — error path (psql failure)', async () => {
+    const op = getOp('db', 'tables');
+    if (!op) {
+      throw new Error('db tables op missing');
+    }
+    const ctx = buildDbOpContext('prod', {}, writeSensitiveFixtureTargets());
+    // Simulate psql actually failing with an error message that WOULD contain the
+    // real user/database name (e.g. `FATAL: role "sshepherd_ro_SECRET_USER" does not
+    // exist`) — this must never reach the envelope, only the classified code + a
+    // static message + the numeric exit code.
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false },
+      { code: 0, stdout: '', stderr: '', timedOut: false },
+      {
+        code: 2,
+        stdout: '',
+        stderr:
+          'FATAL:  role "sshepherd_ro_SECRET_USER" does not exist on database SECRET_DATABASE_NAME',
+        timedOut: false,
+      },
+    ]);
+    const envelope = await executeOp(op, ctx, { transport: { runner } });
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error).toEqual({
+      code: 'COMMAND_FAILED',
+      message: 'Remote command exited with a non-zero status',
+      remote_exit: 2,
+    });
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain('SECRET_USER');
+    expect(serialized).not.toContain('SECRET_DATABASE_NAME');
+    expect(serialized).not.toContain('does not exist');
+  });
 });
