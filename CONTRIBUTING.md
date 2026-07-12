@@ -20,8 +20,9 @@ just test    # bun test — unit tests, no live ssh required
 just build   # compiles dist/sshepherd
 ```
 
-All three run in CI on every push and PR (`.github/workflows/ci.yml`) and must pass. Do not
-commit `dist/` — it's gitignored; release binaries ship via GitHub Releases only. Add an
+CI runs the same typecheck, lint, test, and build steps on every push and PR
+(`.github/workflows/ci.yml`) and must pass. Do not commit `dist/` — it's gitignored; release
+binaries ship via GitHub Releases only. Add an
 entry to `docs/progress.md` describing what changed and why (and `docs/changelog.md` too, if
 the change is user-facing) — see the note at the bottom of this file.
 

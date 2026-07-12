@@ -155,6 +155,12 @@ it mutates); `src/transport.ts` is the one zero-knowledge execution path every o
 through; `src/cli.ts` parses argv and dispatches. See [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 for setup, the pre-PR checklist, and where things live.
 
+## Topics
+
+`claude-code` · `claude-skills` · `claude-code-skills` · `agent-skills` · `ssh` · `devops` ·
+`cli` · `security` · `zero-knowledge` · `postgres` · `deploy` — the GitHub topics to set on
+this repo for discovery.
+
 ## License
 
 [MIT](./LICENSE)
