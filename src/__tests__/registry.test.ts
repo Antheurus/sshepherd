@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { STEP_FAILURE_MARKER } from '../recipes.ts';
 import { executeOp, getOp, listOps } from '../registry.ts';
 import { buildDbOpContext } from '../targets.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
@@ -928,6 +929,136 @@ describe('deploy run — non-dry-run executes the combined resolved script (LMS 
       }
       expect(remoteCmd).toContain('artisan migrate --force');
       expect(remoteCmd).not.toContain('git pull');
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+});
+
+describe('deploy run — step-failure attribution (marker on stdout, one round trip)', () => {
+  test('the wrapped remote script still has each raw step command intact and a per-step failure wrapper', () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { recipe: 'demo' } });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+      expect(remoteCmd).toContain('git pull --ff-only');
+      expect(remoteCmd).toContain('docker compose build app');
+      expect(remoteCmd).toContain('docker compose up -d');
+      expect(remoteCmd).toContain('artisan migrate --force');
+      expect(remoteCmd).toContain(STEP_FAILURE_MARKER);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('a failing step (index 1) surfaces failed_step in the envelope; other steps are not implicated', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const stdout = `${STEP_FAILURE_MARKER} 1 compose build-image\n`;
+      const runner = scriptedRunner([
+        { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
+        { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check
+        { code: 1, stdout, stderr: '', timedOut: false }, // remote script fails at step 1
+      ]);
+
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo' } },
+        { transport: { runner }, yes: true },
+      );
+
+      expect(envelope.ok).toBe(false);
+      expect(envelope.error?.code).toBe('COMMAND_FAILED');
+      expect(envelope.data).toEqual({
+        failed_step: { index: 1, kind: 'compose', name: 'build-image' },
+      });
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('success (no marker in stdout) yields ok:true with no failed_step', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes('deploy ok\n'));
+
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo' } },
+        { transport: { runner }, yes: true },
+      );
+
+      expect(envelope.ok).toBe(true);
+      expect(envelope.data).toEqual({ output: 'deploy ok' });
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('deploy migrate attributes a failure to the migrate step within its own subset ordering', async () => {
+    const op = getOp('deploy', 'migrate');
+    if (!op) {
+      throw new Error('deploy migrate op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const stdout = `${STEP_FAILURE_MARKER} 0 migrate migrate\n`;
+      const runner = scriptedRunner([
+        { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
+        { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check
+        { code: 1, stdout, stderr: '', timedOut: false }, // remote script fails
+      ]);
+
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo' } },
+        { transport: { runner }, yes: true },
+      );
+
+      expect(envelope.ok).toBe(false);
+      expect(envelope.data).toEqual({
+        failed_step: { index: 0, kind: 'migrate', name: 'migrate' },
+      });
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('a COMMAND_FAILED with no marker in stdout (transport-level failure) leaves data null, same as any other op', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const runner = scriptedRunner([
+        { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
+        { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check
+        { code: 1, stdout: '', stderr: '', timedOut: false }, // no marker at all
+      ]);
+
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo' } },
+        { transport: { runner }, yes: true },
+      );
+
+      expect(envelope.ok).toBe(false);
+      expect(envelope.data).toBeNull();
     } finally {
       delete process.env.SSHEPHERD_RECIPE_PATH;
     }

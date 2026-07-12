@@ -352,9 +352,51 @@ function stepMutates(step: RecipeStep): boolean {
   }
 }
 
-/** One ssh round trip for the whole recipe: every step joined with `&&` so the first failure stops the rest. */
+/** Prefix of the marker a wrapped step echoes to STDOUT (never stderr — the transport
+ *  discards stderr entirely) on failure, so the caller can attribute a `COMMAND_FAILED`
+ *  to the step that actually failed. */
+export const STEP_FAILURE_MARKER = '__SSHEPHERD_STEP_FAILED__';
+
+/**
+ * Wraps one step's inner script so a non-zero exit echoes a parseable failure marker
+ * before aborting the `&&` chain (`exit 1` keeps the stop-on-first-failure semantics).
+ * The marker text is built entirely from author-controlled recipe data (the step's own
+ * declared index/kind/name) and passed to `echo` as a single `shq`-quoted argument, so
+ * a step name containing shell metacharacters cannot break out of the wrapper.
+ */
+function wrapStepScript(inner: string, index: number, kind: string, name: string): string {
+  const marker = `${STEP_FAILURE_MARKER} ${index} ${kind} ${name}`;
+  return `{ ${inner} ; } || { echo ${shq(marker)}; exit 1; }`;
+}
+
+export interface FailedStep {
+  index: number;
+  kind: string;
+  name: string;
+}
+
+/**
+ * Recovers which step failed from the deploy script's captured STDOUT. Returns
+ * `undefined` when no step wrapper fired (e.g. a transport-level failure that never
+ * reached the remote script at all).
+ */
+export function parseFailedStepMarker(stdout: string): FailedStep | undefined {
+  const pattern = new RegExp(`^${STEP_FAILURE_MARKER} (\\d+) (\\S+) (.+)$`, 'm');
+  const match = pattern.exec(stdout);
+  if (!match) {
+    return undefined;
+  }
+  return { index: Number(match[1]), kind: match[2] as string, name: match[3] as string };
+}
+
+/** One ssh round trip for the whole recipe: every step wrapped + joined with `&&` so the
+ *  first failure stops the rest and echoes a `STEP_FAILURE_MARKER` line identifying itself. */
 export function buildRunScript(steps: RecipeStep[], workdir: string): string {
-  const combined = steps.map((step) => buildStepInnerScript(step, workdir)).join(' && ');
+  const combined = steps
+    .map((step, index) =>
+      wrapStepScript(buildStepInnerScript(step, workdir), index, step.kind, step.name),
+    )
+    .join(' && ');
   return shellJoin(['sh', '-c', combined]);
 }
 

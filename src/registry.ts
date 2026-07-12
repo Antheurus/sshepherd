@@ -39,11 +39,12 @@ import {
   buildRunScript,
   type DeployPlan,
   loadRecipe,
+  parseFailedStepMarker,
   planRecipe,
 } from './recipes.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
 import { errorInfo, run, type TransportDeps } from './transport.ts';
-import type { ArgSpec, Envelope, OpContext, OpSpec, OutputMode } from './types.ts';
+import type { ArgSpec, Envelope, OpContext, OpSpec, OutputMode, RawResult } from './types.ts';
 
 const DEFAULT_TIMEOUT_SEC = 12;
 const LOG_TIMEOUT_SEC = 20;
@@ -1606,6 +1607,13 @@ function loadRecipeFromCtx(ctx: OpContext): ReturnType<typeof loadRecipe> {
   return loadRecipe(reqStr(ctx, 'recipe'));
 }
 
+/** Attributes a `COMMAND_FAILED` deploy/migrate failure to the step that actually failed,
+ *  by recovering the `STEP_FAILURE_MARKER` line `buildRunScript` wraps each step to echo. */
+function shapeDeployError(raw: RawResult): Record<string, unknown> | undefined {
+  const failedStep = parseFailedStepMarker(raw.stdout);
+  return failedStep ? { failed_step: failedStep } : undefined;
+}
+
 const deployRun: OpSpec<DeployPlan | { output: string }> = {
   group: 'deploy',
   name: 'run',
@@ -1630,6 +1638,7 @@ const deployRun: OpSpec<DeployPlan | { output: string }> = {
     return buildRunScript(recipe.steps, recipe.workdir);
   },
   shape: (parsed) => ({ output: (parsed as string).trim() }),
+  shapeError: shapeDeployError,
   runLocal: (ctx) => planRecipe(loadRecipeFromCtx(ctx)),
 };
 
@@ -1699,6 +1708,7 @@ const deployMigrate: OpSpec<{ output: string }> = {
     return buildMigrateScript(recipe.steps, recipe.workdir);
   },
   shape: (parsed) => ({ output: (parsed as string).trim() }),
+  shapeError: shapeDeployError,
 };
 
 // ---------------------------------------------------------------------------
@@ -1921,7 +1931,7 @@ export async function executeOp(
       alias: ctx.alias,
       command,
       startedAtMs,
-      data: null,
+      data: op.shapeError?.(result.raw, ctx) ?? null,
       error: result.error,
     });
   }

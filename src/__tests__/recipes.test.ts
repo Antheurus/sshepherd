@@ -8,9 +8,11 @@ import {
   buildRollbackCommand,
   buildRunScript,
   loadRecipe,
+  parseFailedStepMarker,
   planRecipe,
   type RecipeStep,
   resolveStepOrder,
+  STEP_FAILURE_MARKER,
 } from '../recipes.ts';
 
 const FIXTURE_PATH = join(import.meta.dir, 'fixtures', 'deploy.demo.toml');
@@ -178,6 +180,55 @@ describe('buildMigrateScript', () => {
   });
 });
 
+describe('buildRunScript — per-step failure marker (observability, one round trip)', () => {
+  test('each step keeps its raw run command intact and gains a failure-marker wrapper, still && stop-on-first-failure', () => {
+    const recipe = loadRecipe('demo', FIXTURE_PATH);
+    const script = buildRunScript(recipe.steps, recipe.workdir);
+
+    expect(script).toContain('git pull --ff-only');
+    expect(script).toContain('docker compose build app');
+    expect(script).toContain('docker compose up -d');
+    expect(script).toContain('artisan migrate --force');
+
+    recipe.steps.forEach((recipeStep, index) => {
+      expect(script).toContain(
+        `${STEP_FAILURE_MARKER} ${index} ${recipeStep.kind} ${recipeStep.name}`,
+      );
+    });
+
+    // Every step gets exactly one failure-wrapper, and the wrappers stay chained with &&
+    // (not `;`) so a failure still aborts the remaining steps.
+    expect(script.split('} || {')).toHaveLength(recipe.steps.length + 1);
+    expect(script.split('; exit 1; }')).toHaveLength(recipe.steps.length + 1);
+  });
+
+  test('a failing step exit still propagates through the wrapper so && aborts the rest', () => {
+    const steps: RecipeStep[] = [
+      step('a'),
+      { kind: 'shell', name: 'b', run: 'false', mutates: true },
+      step('c'),
+    ];
+    const script = buildRunScript(steps, '/opt/app');
+    const result = Bun.spawnSync(['sh', '-c', script]);
+    expect(result.exitCode).not.toBe(0);
+  });
+});
+
+describe('parseFailedStepMarker', () => {
+  test('parses index/kind/name out of noisy stdout', () => {
+    const stdout = `some program output\n${STEP_FAILURE_MARKER} 1 compose build-image\nmore output\n`;
+    expect(parseFailedStepMarker(stdout)).toEqual({
+      index: 1,
+      kind: 'compose',
+      name: 'build-image',
+    });
+  });
+
+  test('returns undefined when no marker line is present', () => {
+    expect(parseFailedStepMarker('plain stdout with no marker at all')).toBeUndefined();
+  });
+});
+
 describe('buildRollbackCommand', () => {
   test('refuses when the recipe declares no [rollback] block', () => {
     const recipe = { ...loadRecipe('demo', FIXTURE_PATH), rollback: null };
@@ -240,6 +291,17 @@ describe('quoting — non-shell recipe step fields are injection-safe (real sh -
     // healthcheckScript loops until timeout; give the injected marker a chance to fire if unsafe.
     Bun.spawnSync(['sh', '-c', script], { stdout: 'ignore', stderr: 'ignore' });
     expect(existsSync(marker)).toBe(false);
+  });
+
+  test('a step name shaped like a shell injection cannot splice a second command via the failure-marker wrapper', () => {
+    const marker = freshMarkerPath();
+    const maliciousName = `noop'; touch ${marker}; echo '`;
+    // run: 'false' forces the step to fail, so the wrapper's echo(marker) branch actually runs.
+    const steps: RecipeStep[] = [
+      { kind: 'shell', name: maliciousName, run: 'false', mutates: true },
+    ];
+    const script = buildRunScript(steps, '/opt/lms');
+    assertShellParsesSafely(script, marker);
   });
 
   test('http-probe url shaped like a shell injection cannot splice a second command', () => {

@@ -79,5 +79,10 @@ export interface OpSpec<T = unknown> {
   output: OutputMode;
   buildRemote: (ctx: OpContext) => string | null;
   shape: (parsed: unknown, ctx: OpContext) => T;
+  /** Optional: called on the failure path (`result.error` set) to pull additional
+   *  structured context out of the raw transport result's stdout — e.g. which recipe
+   *  step failed. Reads `raw.stdout` only, never `transportStderr`/`commandStderr`.
+   *  Returns `undefined` when nothing to add, in which case `data` stays `null`. */
+  shapeError?: (raw: RawResult, ctx: OpContext) => Record<string, unknown> | undefined;
   runLocal?: (ctx: OpContext, sshConfigPath: string) => T;
 }
