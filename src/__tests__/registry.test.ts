@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeOp, getOp, listOps } from '../registry.ts';
+import { buildDbOpContext } from '../targets.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
 
 /** Scripted runner: returns queued outcomes in call order, last one repeats if exhausted. */
@@ -28,7 +29,7 @@ function connectedRunOutcomes(stdout: string): SpawnOutcome[] {
 }
 
 describe('registry — getOp/listOps', () => {
-  test('every read-only op declared in the phase brief is registered', () => {
+  test('every read-only op declared in the phase brief is registered (Phases 3-4)', () => {
     const expected: Array<[string, string]> = [
       ['hosts', 'list'],
       ['hosts', 'test'],
@@ -55,6 +56,13 @@ describe('registry — getOp/listOps', () => {
       ['files', 'tail'],
       ['files', 'download'],
       ['files', 'disk-usage'],
+      ['db', 'list'],
+      ['db', 'tables'],
+      ['db', 'activity'],
+      ['db', 'connections'],
+      ['db', 'slow'],
+      ['db', 'size'],
+      ['db', 'query'],
     ];
     for (const [group, name] of expected) {
       expect(getOp(group, name)).toBeDefined();
@@ -461,5 +469,175 @@ describe('executeOp — zero-knowledge error path never leaks transport stderr',
     expect(serialized).not.toContain('10.55.66.77');
     expect(serialized).not.toContain('deploy');
     expect(serialized).not.toContain('Connection refused');
+  });
+});
+
+describe('db group — layered read-only enforcement', () => {
+  function writeFixtureTargets(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-db-registry-test-'));
+    const path = join(dir, 'targets.toml');
+    writeFileSync(
+      path,
+      [
+        '[prod]',
+        'alias = "lms-server"',
+        'container = "lms_postgres_1"',
+        'user = "sshepherd_ro"',
+        'database = "lms"',
+        '',
+      ].join('\n'),
+    );
+    return path;
+  }
+
+  test('db query rejects a non-SELECT statement at the parser layer with a clear error', () => {
+    const op = getOp('db', 'query');
+    if (!op) {
+      throw new Error('db query op missing');
+    }
+    const ctx = buildDbOpContext('prod', { sql: 'DELETE FROM users' }, writeFixtureTargets());
+    expect(() => op.buildRemote(ctx)).toThrow(/refusing statement type 'delete'/);
+  });
+
+  test('a writable-CTE attempt passes the parser (documents the txn-readonly wrapper as the real gate) and fails engine-side', async () => {
+    const op = getOp('db', 'query');
+    if (!op) {
+      throw new Error('db query op missing');
+    }
+    const ctx = buildDbOpContext(
+      'prod',
+      { sql: "WITH x AS (INSERT INTO users (name) VALUES ('x') RETURNING *) SELECT * FROM x" },
+      writeFixtureTargets(),
+    );
+    // The parser layer must not throw — a writable CTE parses as `select`.
+    expect(() => op.buildRemote(ctx)).not.toThrow();
+
+    // Simulate the engine actually rejecting the write inside the read-only transaction
+    // (`ON_ERROR_STOP=1` aborts the whole -c buffer, psql exits non-zero).
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
+      { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check
+      {
+        code: 3,
+        stdout: '',
+        stderr: 'ERROR:  cannot execute INSERT in a read-only transaction',
+        timedOut: false,
+      },
+    ]);
+    const envelope = await executeOp(op, ctx, { transport: { runner } });
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error).toEqual({
+      code: 'COMMAND_FAILED',
+      message: 'Remote command exited with a non-zero status',
+      remote_exit: 3,
+    });
+  });
+
+  test('db activity returns numeric query_seconds/blocked_by and backends_total vs max_connections rollups', async () => {
+    const op = getOp('db', 'activity');
+    if (!op) {
+      throw new Error('db activity op missing');
+    }
+    const stdout = JSON.stringify({
+      backends_total: 3,
+      max_connections: 100,
+      backends: [
+        {
+          pid: 42,
+          usename: 'sshepherd_ro',
+          application_name: 'psql',
+          state: 'active',
+          query_start: '2026-07-12T10:00:00.000Z',
+          query_seconds: 12.5,
+          wait_event: null,
+          blocked_by: [17],
+        },
+      ],
+    });
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const ctx = buildDbOpContext('prod', {}, writeFixtureTargets());
+    const envelope = await executeOp(op, ctx, { transport: { runner } });
+
+    expect(envelope.ok).toBe(true);
+    const data = envelope.data as {
+      backends_total: number;
+      max_connections: number;
+      backends: Array<{ query_seconds: number; blocked_by: number[] }>;
+    };
+    expect(data.backends_total).toBe(3);
+    expect(data.max_connections).toBe(100);
+    expect(typeof data.backends[0]?.query_seconds).toBe('number');
+    expect(data.backends[0]?.query_seconds).toBe(12.5);
+    expect(data.backends[0]?.blocked_by).toEqual([17]);
+  });
+
+  test('db slow degrades gracefully when pg_stat_statements is absent (no error thrown)', async () => {
+    const op = getOp('db', 'slow');
+    if (!op) {
+      throw new Error('db slow op missing');
+    }
+    const stdout = '{"available":false,"reason":"pg_stat_statements not installed"}';
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const ctx = buildDbOpContext('prod', {}, writeFixtureTargets());
+    const envelope = await executeOp(op, ctx, { transport: { runner } });
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.error).toBeNull();
+    const data = envelope.data as { available: boolean; reason: string | null; queries: unknown[] };
+    expect(data.available).toBe(false);
+    expect(data.reason).toBe('pg_stat_statements not installed');
+    expect(data.queries).toEqual([]);
+  });
+
+  test('db slow returns queries when pg_stat_statements is present', async () => {
+    const op = getOp('db', 'slow');
+    if (!op) {
+      throw new Error('db slow op missing');
+    }
+    const stdout = JSON.stringify({
+      available: true,
+      queries: [
+        {
+          query: 'SELECT * FROM users WHERE id = $1',
+          calls: 120,
+          total_exec_time: 45.2,
+          mean_exec_time: 0.377,
+          rows: 120,
+        },
+      ],
+    });
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const ctx = buildDbOpContext('prod', {}, writeFixtureTargets());
+    const envelope = await executeOp(op, ctx, { transport: { runner } });
+
+    expect(envelope.ok).toBe(true);
+    const data = envelope.data as {
+      available: boolean;
+      queries: Array<{ mean_exec_time: number }>;
+    };
+    expect(data.available).toBe(true);
+    expect(data.queries).toHaveLength(1);
+    expect(data.queries[0]?.mean_exec_time).toBe(0.377);
+  });
+
+  test('db list reads targets.toml locally — never opens ssh', async () => {
+    const op = getOp('db', 'list');
+    if (!op) {
+      throw new Error('db list op missing');
+    }
+    const path = writeFixtureTargets();
+    const originalEnv = process.env.SSHEPHERD_TARGETS_PATH;
+    process.env.SSHEPHERD_TARGETS_PATH = path;
+    try {
+      const envelope = await executeOp(op, { alias: '', args: {} }, {});
+      expect(envelope.ok).toBe(true);
+      expect(envelope.data).toEqual({ targets: ['prod'] });
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.SSHEPHERD_TARGETS_PATH;
+      } else {
+        process.env.SSHEPHERD_TARGETS_PATH = originalEnv;
+      }
+    }
   });
 });

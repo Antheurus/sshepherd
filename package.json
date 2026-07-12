@@ -5,8 +5,13 @@
   "type": "module",
   "license": "MIT",
   "private": true,
-  "repository": { "type": "git", "url": "https://github.com/Antheurus/sshepherd.git" },
-  "bin": { "sshepherd": "./dist/sshepherd" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Antheurus/sshepherd.git"
+  },
+  "bin": {
+    "sshepherd": "./dist/sshepherd"
+  },
   "scripts": {
     "build": "bun build ./src/cli.ts --compile --outfile ./dist/sshepherd",
     "dev": "bun --hot ./src/cli.ts",
@@ -20,5 +25,8 @@
     "@biomejs/biome": "^2.5.3",
     "@types/bun": "^1.3.14",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "node-sql-parser": "^5.4.0"
   }
 }

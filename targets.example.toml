@@ -1,0 +1,42 @@
+# Example sshepherd `db` group targets — copy to ~/.config/sshepherd/targets.toml and
+# fill in real values. Each `[<name>]` table is a `<pg-target>`: the `db` group's
+# equivalent of an SSH alias, so the agent invoking `db <op> <target>` never sees or
+# passes a database password.
+#
+# Password handling — read this before wiring a real target:
+#   sshepherd never transports a database password. `docker exec`/`docker compose exec`
+#   reaches psql INSIDE the container, so auth is whatever that container/psql already
+#   trusts: Postgres `peer`/`trust` auth for the exec'd user, or a `~/.pgpass` file that
+#   already exists on the remote host (in the container image or a mounted volume) that
+#   psql reads on its own. If neither is set up, `psql` will prompt for a password and
+#   the non-interactive `-c` invocation will simply fail — configure peer/trust or
+#   `.pgpass` on the target before declaring it here.
+#
+# Read-only enforcement — three layers, only the first is YOUR responsibility:
+#   1. Read-only DB role (recommended, engine-side boundary): the `user` below should be
+#      a role with SELECT-only grants, e.g.
+#        CREATE ROLE sshepherd_ro WITH LOGIN;
+#        GRANT pg_read_all_data TO sshepherd_ro;            -- PG14+
+#        ALTER ROLE sshepherd_ro SET default_transaction_read_only = on;
+#      This is the real boundary — it catches writable CTEs and volatile functions that
+#      no client-side parser can reliably detect.
+#   2. sshepherd wraps every query in `BEGIN TRANSACTION READ ONLY; ...; ROLLBACK;`
+#      (defense in depth, not a substitute for #1 — a session can revoke read-only on
+#      itself).
+#   3. sshepherd rejects an obviously non-SELECT statement (INSERT/UPDATE/DELETE/DDL)
+#      locally before ever opening an ssh connection (UX guardrail only).
+
+# Compose-hosted Postgres — `docker compose -f <compose_file> exec -T <service> psql ...`
+[prod]
+alias = "lms-server"                        # ssh alias this pg-target rides on
+compose_file = "/opt/lms/docker-compose.yml" # path to the compose file ON THE REMOTE
+service = "db"                               # compose service name for the db container
+user = "sshepherd_ro"                        # read-only role (see above)
+database = "lms"
+
+# Plain-container Postgres — `docker exec -i <container> psql ...`
+[staging]
+alias = "staging-1"
+container = "staging_postgres_1"             # container name or ID ON THE REMOTE
+user = "sshepherd_ro"
+database = "app"
