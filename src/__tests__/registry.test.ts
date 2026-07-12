@@ -1144,4 +1144,133 @@ describe('quoting — Phase 5 mutating ops are injection-safe (real sh -c drive)
     }
     assertShellParsesRemoteCmdSafely(remoteCmd, marker);
   });
+
+  test('config get: a path shaped like a shell injection (present on its own allowlist) is neutralized', () => {
+    const op = getOp('config', 'get');
+    if (!op) {
+      throw new Error('config get op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `/etc/nginx/nginx.conf'; touch ${marker}; echo '`;
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-config-get-inj-test-'));
+    const allowlistPath = join(dir, 'config-allowlist.toml');
+    writeFileSync(allowlistPath, `[lms-server]\npaths = [${JSON.stringify(malicious)}]\n`);
+    process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { path: malicious } });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+      assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+    } finally {
+      delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+    }
+  });
+
+  test('config put: a path shaped like a shell injection (present on its own allowlist) is neutralized', () => {
+    const op = getOp('config', 'put');
+    if (!op) {
+      throw new Error('config put op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `/etc/nginx/nginx.conf'; touch ${marker}; echo '`;
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-config-put-inj-test-'));
+    const allowlistPath = join(dir, 'config-allowlist.toml');
+    writeFileSync(allowlistPath, `[lms-server]\npaths = [${JSON.stringify(malicious)}]\n`);
+    process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const contentBase64 = Buffer.from('hi\n', 'utf8').toString('base64');
+      const remoteCmd = op.buildRemote({
+        alias: 'lms-server',
+        args: { path: malicious, 'content-base64': contentBase64 },
+      });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+      assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+    } finally {
+      delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+    }
+  });
+
+  test('config validate: a caddy path shaped like a shell injection cannot splice a second command', () => {
+    const op = getOp('config', 'validate');
+    if (!op) {
+      throw new Error('config validate op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `/etc/caddy/Caddyfile'; touch ${marker}; echo '`;
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-config-validate-inj-test-'));
+    const allowlistPath = join(dir, 'config-allowlist.toml');
+    writeFileSync(allowlistPath, `[lms-server]\npaths = [${JSON.stringify(malicious)}]\n`);
+    process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { path: malicious } });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+      assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+    } finally {
+      delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+    }
+  });
+
+  test('deploy logs: a tail arg shaped like a shell injection cannot splice a second command', () => {
+    const op = getOp('deploy', 'logs');
+    if (!op) {
+      throw new Error('deploy logs op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `50'; touch ${marker}; echo '`;
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const remoteCmd = op.buildRemote({
+        alias: 'lms-server',
+        args: { recipe: 'demo', tail: malicious },
+      });
+      if (remoteCmd === null) {
+        throw new Error('expected a remote command');
+      }
+      assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('deploy rollback (previous-tag): a tag shaped like a shell injection cannot splice a second command', () => {
+    const op = getOp('deploy', 'rollback');
+    if (!op) {
+      throw new Error('deploy rollback op missing');
+    }
+    const marker = freshMarkerPath();
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-rollback-inj-test-'));
+    const recipePath = join(dir, 'recipe.toml');
+    const maliciousTag = `v1'; touch ${marker}; echo '`;
+    writeFileSync(
+      recipePath,
+      [
+        'name = "inj"',
+        'alias = "lms-server"',
+        'workdir = "/opt/lms"',
+        '[[step]]',
+        'name = "up"',
+        'kind = "compose"',
+        'run = "up -d"',
+        '[rollback]',
+        'strategy = "previous-tag"',
+        `tag = ${JSON.stringify(maliciousTag)}`,
+        '',
+      ].join('\n'),
+    );
+    process.env.SSHEPHERD_RECIPE_PATH = recipePath;
+    try {
+      const cmd = op.buildRemote({ alias: 'lms-server', args: { recipe: 'inj' } });
+      if (cmd === null) {
+        throw new Error('expected a remote command');
+      }
+      assertShellParsesRemoteCmdSafely(cmd, marker);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
 });

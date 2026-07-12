@@ -1,10 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  buildDeployOpContext,
   buildMigrateScript,
   buildRollbackCommand,
+  buildRunScript,
   loadRecipe,
   planRecipe,
   type RecipeStep,
@@ -19,6 +21,21 @@ function writeRecipe(lines: string[]): string {
   writeFileSync(path, `${lines.join('\n')}\n`);
   return path;
 }
+
+describe('buildDeployOpContext — resolves ctx.alias from the recipe (mirrors buildDbOpContext)', () => {
+  test('alias comes from the recipe file, not the recipe name, and recipe name is preserved in args', () => {
+    const ctx = buildDeployOpContext('demo', { 'dry-run': true }, FIXTURE_PATH);
+    expect(ctx.alias).toBe('lms-server');
+    expect(ctx.args.recipe).toBe('demo');
+    expect(ctx.args['dry-run']).toBe(true);
+  });
+
+  test('a missing recipe throws the same clear error loadRecipe throws', () => {
+    expect(() =>
+      buildDeployOpContext('does-not-exist', {}, join(tmpdir(), 'sshepherd-nope-ctx.toml')),
+    ).toThrow(/not found/);
+  });
+});
 
 describe('loadRecipe — fixture', () => {
   test('parses the demo recipe and resolves migrate after up despite file order', () => {
@@ -183,5 +200,87 @@ describe('buildRollbackCommand', () => {
     const command = buildRollbackCommand(recipe);
     expect(command).toContain('docker-compose.previous.yml');
     expect(command).toContain('up -d');
+  });
+});
+
+/**
+ * Real drive, not a string-shape guess: `buildRunScript`'s output is exactly the argv
+ * `run()` (transport.ts) hands to `ssh <alias> <command>` — feeding it to a real local
+ * `sh -c` reproduces the exact parse the remote login shell would do. Payloads always end
+ * in `touch <marker>` so even a genuine quoting failure only creates a harmless temp file.
+ */
+function freshMarkerPath(): string {
+  return join(
+    tmpdir(),
+    `sshepherd-recipe-pwn-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+}
+
+function assertShellParsesSafely(remoteCmd: string, marker: string): void {
+  Bun.spawnSync(['sh', '-c', remoteCmd], { stdout: 'ignore', stderr: 'ignore' });
+  expect(existsSync(marker)).toBe(false);
+}
+
+describe('quoting — non-shell recipe step fields are injection-safe (real sh -c drive)', () => {
+  test('workdir shaped like a shell injection cannot splice a second command via cd', () => {
+    const marker = freshMarkerPath();
+    const maliciousWorkdir = `/opt/lms'; touch ${marker}; echo '`;
+    const steps: RecipeStep[] = [step('noop')];
+    const script = buildRunScript(steps, maliciousWorkdir);
+    assertShellParsesSafely(script, marker);
+  });
+
+  test('healthcheck target shaped like a shell injection cannot splice a second command', () => {
+    const marker = freshMarkerPath();
+    const maliciousTarget = `app'; touch ${marker}; echo '`;
+    const steps: RecipeStep[] = [
+      { kind: 'healthcheck', name: 'verify', target: maliciousTarget, timeout: '2s' },
+    ];
+    const script = buildRunScript(steps, '/opt/lms');
+    // healthcheckScript loops until timeout; give the injected marker a chance to fire if unsafe.
+    Bun.spawnSync(['sh', '-c', script], { stdout: 'ignore', stderr: 'ignore' });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test('http-probe url shaped like a shell injection cannot splice a second command', () => {
+    const marker = freshMarkerPath();
+    const maliciousUrl = `http://x'; touch ${marker}; echo '`;
+    const steps: RecipeStep[] = [
+      {
+        kind: 'http-probe',
+        name: 'probe',
+        url: maliciousUrl,
+        expect_status: 200,
+        retries: 1,
+        interval: 0,
+      },
+    ];
+    const script = buildRunScript(steps, '/opt/lms');
+    assertShellParsesSafely(script, marker);
+  });
+});
+
+describe('buildRollbackCommand — injection safety on rollback fields (real sh -c drive)', () => {
+  test('previous-tag: a tag shaped like a shell injection cannot splice a second command', () => {
+    const marker = freshMarkerPath();
+    const recipe = {
+      ...loadRecipe('demo', FIXTURE_PATH),
+      rollback: { strategy: 'previous-tag' as const, tag: `v1'; touch ${marker}; echo '` },
+    };
+    const command = buildRollbackCommand(recipe);
+    assertShellParsesSafely(command, marker);
+  });
+
+  test('compose-file: a file shaped like a shell injection cannot splice a second command', () => {
+    const marker = freshMarkerPath();
+    const recipe = {
+      ...loadRecipe('demo', FIXTURE_PATH),
+      rollback: {
+        strategy: 'compose-file' as const,
+        file: `docker-compose.yml'; touch ${marker}; echo '`,
+      },
+    };
+    const command = buildRollbackCommand(recipe);
+    assertShellParsesSafely(command, marker);
   });
 });
