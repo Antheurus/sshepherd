@@ -526,6 +526,17 @@ plus `--help` per group and `references/*.md` deep docs.
 - `buildDeployOpContext` (recipes.ts) is built + unit-tested but UNWIRED (its caller is cli.ts, Phase 6's placeholder) — Phase 6 must wire it, not reinvent it.
 - CARRIED: no live docker/compose/sshd host drive (no fixture container) — Phase 6/7 smoke suite must build scripts/sshd-fixture (sshd + docker-cli + coreutils + postgres) and spot-check the mutating command shapes + db SQL + Linux read-only shapes against it.
 
+### Phase 5B: 9-group scope completion (security-read + files upload) — 2026-07-13
+
+**Status:** Complete (orchestrator-verified live on the two risk areas — mutating gate + authorized-keys zero-knowledge)
+**Files created:** src/parsers/{sshd-directives,authorized-keys,fail2ban}.ts
+**Files modified:** src/registry.ts (5 ops appended: security ssh-audit/listeners/authorized-keys/fail2ban read-only + files upload mutating), src/__tests__/registry.test.ts
+**Key decisions:**
+- `security listeners` reuses parseSs + the exact `ss -H -tlnp` of `check ports` (no duplication). `security ssh-audit`'s recommended-value table IS `[...HARDEN_SAFE_DIRECTIVES, ...HARDEN_RISKY_DIRECTIVES]` — the read-only report and the mutating `harden` share one source of truth so they can never disagree on what "hardened" means. `authorized-keys` returns `{options,type,comment}` + a remote-computed SHA256 fingerprint (ssh-keygen -lf), NEVER the key blob, never local ~/.ssh material. `fail2ban` degrades to `{available:false}` (mirrors db slow).
+- `files upload` is mutating:true → same executeOp confirmGate+auditMutating gate as every mutating op (verified live: refuses without --yes, ssh untouched, audit written); reuses config put's base64-over-ssh (no scp/sftp, one transport path); local file read in buildRemote throws locally before ssh; no .bak, no allowlist (general upload, not in-place config overwrite).
+**Test count:** 143 → 157 pass, `just check` clean, `bun build ./src/registry.ts --compile` exits 0.
+**Notes:** 9-group set now genuinely complete (hosts, check, logs, services, deploy, config, db, files, security) — Phase 6 SKILL.md can document a real, existing command matrix.
+
 ## Review findings
 
 (Filled by auditor subagents.)
