@@ -188,4 +188,60 @@ describe('hygiene invariant — transport stderr never reaches the envelope', ()
     expect(Object.keys(envelope)).not.toContain('user');
     expect(Object.keys(envelope)).not.toContain('port');
   });
+
+  test('a remote command that itself prints an IP on stderr with a non-255 exit stays out of the error message, since only remote stdout is legitimate payload', async () => {
+    const remoteIp = '198.51.100.7';
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
+      { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check (master already up)
+      {
+        code: 1,
+        stdout: '',
+        // This is the REMOTE COMMAND's own stderr (e.g. `curl` failing and echoing the
+        // IP it tried to hit) — not an ssh transport failure. Exit code is non-255, so
+        // transport.run must route this to commandStderr, and classify() must never
+        // read commandStderr when building the static ErrorInfo.message.
+        stderr: `curl: (7) Failed to connect to ${remoteIp} port 443: Connection refused`,
+        timedOut: false,
+      },
+    ]);
+
+    const startedAtMs = Date.now();
+    const result = await run('lms-server', 'curl https://internal', 10, { runner });
+    const envelope = buildEnvelope({
+      alias: 'lms-server',
+      command: 'net check',
+      startedAtMs,
+      data: null,
+      error: result.error,
+    });
+
+    expect(result.error?.code).toBe('COMMAND_FAILED');
+    expect(result.error?.remote_exit).toBe(1);
+    // The remote command's own stderr text (and the IP inside it) must never surface —
+    // only the static per-code message is allowed into the envelope.
+    expect(result.error?.message).toBe('Remote command exited with a non-zero status');
+    expect(JSON.stringify(envelope)).not.toContain(remoteIp);
+  });
+
+  test('remote command STDOUT is the legitimate payload and is not scrubbed even if it contains an IP — only ssh transport stderr is discarded', async () => {
+    const remoteIp = '198.51.100.7';
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
+      { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check (master already up)
+      {
+        code: 0,
+        // Legitimate op output, e.g. `ip addr` — this is the payload the user asked
+        // for, not transport chatter, and must pass through untouched.
+        stdout: `{"iface":"eth0","addr":"${remoteIp}"}`,
+        stderr: '',
+        timedOut: false,
+      },
+    ]);
+
+    const result = await run('lms-server', 'ip -j addr show eth0', 10, { runner });
+
+    expect(result.error).toBeNull();
+    expect(result.raw.stdout).toContain(remoteIp);
+  });
 });
