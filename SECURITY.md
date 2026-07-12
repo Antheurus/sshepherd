@@ -102,5 +102,5 @@ Preferred: use
 [GitHub's private vulnerability reporting](https://github.com/Antheurus/sshepherd/security/advisories/new)
 on this repository.
 
-Backup: email brightyglobalsinergi@gmail.com with a description of the issue, steps to
+Backup: email mispaqul.attoriq@gmail.com with a description of the issue, steps to
 reproduce, and the affected version. A response should be expected within a few days.

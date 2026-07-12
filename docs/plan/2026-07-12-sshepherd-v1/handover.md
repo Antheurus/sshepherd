@@ -76,8 +76,8 @@ Phase 4 audit = d1cbfcb. After Phase 4 audits ✅, proceed to Block 5 (Phase 5 m
 - Dev box is **macOS** (M2 Pro); target servers are **Linux**. `df`/`free`/etc. differ on mac —
   Phase 3 parsers were coded to documented Linux shapes, NOT live-captured. This is the #1 carried
   risk (see Known issues #1).
-- Commits use `git -c user.name=Antheurus -c user.email=brightyglobalsinergi@gmail.com` (the repo
-  has no committer identity configured; set it per-commit or configure it once).
+- Commits use the machine's configured git identity (`mispaqul.attoriq@gmail.com`) — just run
+  plain `git commit`, do not override the email with `-c user.email=...`.
 - Each phase is committed separately so the next audit has a clean baseline diff. Follow this.
 
 ---
@@ -117,7 +117,7 @@ Then invoke Skill({skill: "od-execute"}) and resume at Block 4:
   (all three, see Known issue #2). Add node-sql-parser as the only runtime dep. Postgres-only.
 - Then Block 5 (Phase 5 mutating), Block 6 (Phase 6 SKILL.md), Block 7 (Phase 7 OSS packaging).
 - Phases 3/4/5 all append to src/registry.ts -> keep sequential, never parallel.
-- Commit each phase separately (git -c user.name=Antheurus -c user.email=brightyglobalsinergi@gmail.com).
+- Commit each phase separately (plain `git commit` — the machine git identity is mispaqul.attoriq@gmail.com).
 - Do NOT push to GitHub or file awesome-list PRs (user-driven, needs their auth).
 
 Do not re-plan. Do not re-ask answered questions. Pick up at Phase 4.
