@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeOp, getOp, listOps } from '../registry.ts';
@@ -301,5 +301,165 @@ describe('logs docker — line objects + next_since', () => {
       text: 'booting app',
     });
     expect(data.next_since).toBe('2026-07-12T10:00:01.200000000Z');
+  });
+});
+
+/**
+ * Real drive, not a string-shape guess: `remoteCmd` is exactly the string ssh hands to the
+ * remote login shell to parse (ssh concatenates argv with spaces and the remote shell
+ * parses it once), so feeding it to a real local `sh -c` reproduces that exact parse. The
+ * injection payload always ends in `touch <marker>` (never `rm`/anything destructive) so
+ * that even a genuine quoting failure only creates a harmless temp file instead of doing
+ * real damage — a missing `docker`/other binary along the way is expected and ignored.
+ */
+function freshMarkerPath(): string {
+  return join(tmpdir(), `sshepherd-audit-pwn-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+}
+
+function assertShellParsesRemoteCmdSafely(remoteCmd: string, marker: string): void {
+  Bun.spawnSync(['sh', '-c', remoteCmd], { stdout: 'ignore', stderr: 'ignore' });
+  expect(existsSync(marker)).toBe(false);
+}
+
+describe('quoting — adversarial args never break out of their remote-command argument boundary', () => {
+  test('logs docker: a container name shaped like a shell injection cannot splice in a second command', () => {
+    const op = getOp('logs', 'docker');
+    if (!op) {
+      throw new Error('logs docker op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `innocent'; touch ${marker}; echo '`;
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { container: malicious } });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+  });
+
+  test('files cat: a path shaped like a shell injection is neutralized when actually parsed by a shell', () => {
+    const op = getOp('files', 'cat');
+    if (!op) {
+      throw new Error('files cat op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `/tmp/foo\`touch ${marker}\`; touch ${marker}`;
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { path: malicious } });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    const result = Bun.spawnSync(['sh', '-c', remoteCmd]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString().trim()).toBe('__NOT_FOUND__');
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test('services inspect: a container arg with embedded single quotes cannot escape its argument', () => {
+    const op = getOp('services', 'inspect');
+    if (!op) {
+      throw new Error('services inspect op missing');
+    }
+    const marker = freshMarkerPath();
+    const malicious = `web' 'evil'; touch ${marker}; echo '`;
+    const remoteCmd = op.buildRemote({ alias: 'lms-server', args: { container: malicious } });
+    if (remoteCmd === null) {
+      throw new Error('expected a remote command');
+    }
+    assertShellParsesRemoteCmdSafely(remoteCmd, marker);
+  });
+});
+
+describe('files cat — env file masking', () => {
+  const ENV_CONTENT = [
+    'NODE_ENV=production',
+    'DB_PASSWORD=s3cr3t-value',
+    'API_KEY=abcd1234',
+    '',
+  ].join('\n');
+
+  test('a .env path is masked by default — secret values never reach the envelope', async () => {
+    const op = getOp('files', 'cat');
+    if (!op) {
+      throw new Error('files cat op missing');
+    }
+    const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { path: '/srv/app/.env' } },
+      { transport: { runner } },
+    );
+
+    expect(envelope.ok).toBe(true);
+    const data = envelope.data as { masked: boolean; content: string | null };
+    expect(data.masked).toBe(true);
+    expect(data.content).toContain('DB_PASSWORD=***MASKED***');
+    expect(data.content).toContain('API_KEY=***MASKED***');
+    expect(data.content).toContain('NODE_ENV=***MASKED***');
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain('s3cr3t-value');
+    expect(serialized).not.toContain('abcd1234');
+  });
+
+  test('an explicit --reveal key unmasks only that key, others stay masked', async () => {
+    const op = getOp('files', 'cat');
+    if (!op) {
+      throw new Error('files cat op missing');
+    }
+    const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { path: '/srv/app/.env', reveal: 'DB_PASSWORD' } },
+      { transport: { runner } },
+    );
+
+    const data = envelope.data as { masked: boolean; content: string | null };
+    expect(data.masked).toBe(true);
+    expect(data.content).toContain('DB_PASSWORD=s3cr3t-value');
+    expect(data.content).toContain('API_KEY=***MASKED***');
+  });
+
+  test('a non-.env path is never masked', async () => {
+    const op = getOp('files', 'cat');
+    if (!op) {
+      throw new Error('files cat op missing');
+    }
+    const runner = scriptedRunner(connectedRunOutcomes('plain config content\n'));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { path: '/srv/app/config.yml' } },
+      { transport: { runner } },
+    );
+
+    const data = envelope.data as { masked: boolean; content: string | null };
+    expect(data.masked).toBe(false);
+    expect(data.content).toBe('plain config content\n');
+  });
+});
+
+describe('executeOp — zero-knowledge error path never leaks transport stderr', () => {
+  test('a COMMAND_FAILED error carries only the static ErrorInfo shape, never raw stderr text', async () => {
+    const op = getOp('check', 'ports');
+    if (!op) {
+      throw new Error('check ports op missing');
+    }
+    const secretStderr =
+      'ssh: connect to host 10.55.66.77 port 22: Connection refused (user deploy)';
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
+      { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check
+      { code: 1, stdout: '', stderr: secretStderr, timedOut: false }, // remote command fails
+    ]);
+
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.data).toBeNull();
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain('10.55.66.77');
+    expect(serialized).not.toContain('deploy');
+    expect(serialized).not.toContain('Connection refused');
   });
 });
