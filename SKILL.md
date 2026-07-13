@@ -1,6 +1,6 @@
 ---
 name: sshepherd
-description: Use this skill whenever the user mentions "sshepherd" by name, or wants to check on a remote server (health, disk, memory, CPU, ports, OOM history), inspect or restart docker/systemd services, tail remote logs, read or write remote config files, deploy a project via a named recipe, introspect a remote Postgres database, or audit SSH/security posture on a box — while keeping the agent zero-knowledge about credentials (no password, private key, or host/user/port ever reaches the agent's context or a tool response). Covers all 9 command groups (hosts, check, logs, services, deploy, config, db, files, security) via a single compiled Bun/TypeScript CLI that shells out to the system `ssh` binary — the agent only ever passes an ssh alias, a pg-target name, or a recipe name, never a credential.
+description: Use this skill whenever the user mentions "sshepherd" by name, or wants to check on a remote server (health, disk, memory, CPU, ports, OOM history), inspect or restart docker/systemd services, tail remote logs, read or write remote config files, deploy a project via a named recipe, introspect a remote Postgres database, or audit SSH/security posture on a box — while keeping the agent zero-knowledge about credentials (no password, private key, or host/user/port ever reaches the agent's context or a tool response). Covers all 9 registry-driven command groups (hosts, check, logs, services, deploy, config, db, files, security) via a single compiled Bun/TypeScript CLI that shells out to the system `ssh` binary — the agent only ever passes an ssh alias, a pg-target name, or a recipe name, never a credential. `setup` is a separate, human-only group (deliberately not one of the 9, and never invoked by the agent) that writes sshepherd's own local config files.
 ---
 
 # sshepherd
@@ -65,7 +65,7 @@ sshepherd <group> <action> [positionals...] [--flag value]
 ```
 
 ```bash
-sshepherd --help                # lists all 9 groups
+sshepherd --help                # lists 9 registry groups + the human-only setup group
 sshepherd <group> --help        # lists that group's actions + args/flags
 sshepherd <group> <action> --help   # shows one action's args
 ```
@@ -94,7 +94,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — all 52 ops across 9 groups
+## Quick reference — 9 registry-driven groups (52 ops) + 1 human-only `setup` group (4 sub-groups, 6 actions)
 
 ```bash
 # hosts
@@ -167,6 +167,14 @@ sshepherd security ssh-audit lms-server
 sshepherd security listeners lms-server
 sshepherd security authorized-keys lms-server
 sshepherd security fail2ban lms-server
+
+# setup — HUMAN-ONLY, agent must never invoke (see Gotchas #9)
+sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes
+sshepherd setup ssh-alias keygen myserver --yes
+sshepherd setup ssh-alias remove myserver --yes
+sshepherd setup db-target scaffold prod --alias myserver --user app --database appdb --container app_db --yes
+sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf,/opt/app/.env --yes
+sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app --yes
 ```
 
 ## Gotchas
@@ -201,6 +209,11 @@ sshepherd security fail2ban lms-server
    that could disable the session's own auth method (`PermitRootLogin`,
    `PasswordAuthentication`) are only applied when `--keep-session=false` is passed
    explicitly; the safe subset always applies.
+9. **The agent must never invoke `setup`.** Every `setup` action is meant to be typed
+   directly into a human's own terminal, never issued by an AI agent on the user's behalf —
+   even though nothing enforces this technically, an agent reading this file must treat
+   `setup` as off-limits, the same way `plain ssh <alias>` (gotcha 3) is human break-glass,
+   not an agent tool.
 
 ## Errors
 

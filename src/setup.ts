@@ -10,13 +10,16 @@ import { buildSetupResult, printSetupResult, type SetupResult } from './setup-ty
  * drives the 9 existing groups, but deliberately kept out of `REGISTRY`/`OpSpec`
  * entirely (see research.md, why `OpSpec.runLocal` can't express `setup`).
  */
-interface SetupSubGroupSpec {
+export interface SetupSubGroupSpec {
   name: string;
   summary: string;
   actions: string[];
 }
 
-const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
+/** Exported (data only, same precedent as `registry.ts`'s `export { parseHumanBytes }`)
+ *  so `skill-doc.test.ts` can assert SKILL.md's documented sub-group/action counts against
+ *  this real data structure instead of a static string check. */
+export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
   {
     name: 'ssh-alias',
     summary: 'Register, generate a keypair for, or remove a ~/.ssh/config alias.',

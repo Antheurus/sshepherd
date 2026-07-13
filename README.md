@@ -109,6 +109,13 @@ skill definition:
 
 Output is JSON to stdout by default (add `--pretty` for a human table/key-value view).
 
+A separate `setup` group writes sshepherd's own local config files instead of you
+hand-authoring them — `setup ssh-alias register/keygen/remove` for `~/.ssh/config`, `setup
+db-target` for `targets.toml`, `setup config-allowlist` for `config-allowlist.toml`, and
+`setup deploy-recipe` for a starter recipe TOML. It's not counted in the nine groups above
+and is human-only: run it yourself in your own terminal, never through an agent — `SKILL.md`
+tells every agent session to treat it as off-limits.
+
 ## What sshepherd NEVER does
 
 - **Never reads `~/.ssh` private keys or any key material.** Authentication happens
