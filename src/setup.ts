@@ -1,4 +1,5 @@
 import { getFlag, hasFlag, parseArgv } from './cli.ts';
+import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts';
 import { scaffold } from './setup-db-target.ts';
 import { keygen, register, remove } from './setup-ssh-alias.ts';
 import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
@@ -217,6 +218,53 @@ function runDbTargetAction(argTail: string[]): void {
 }
 
 /**
+ * `config-allowlist` is the third setup sub-group to leave stub status (Phase 4) — real
+ * scaffold logic lives in `setup-config-allowlist.ts`. `config-allowlist` only ever has one
+ * action (`scaffold`), same shape as `runDbTargetAction`.
+ */
+function runConfigAllowlistAction(argTail: string[]): void {
+  const command = 'setup config-allowlist scaffold';
+  const { positionals, flags } = parseArgv(argTail);
+  const pretty = hasFlag(flags, 'pretty');
+  const yes = hasFlag(flags, 'yes');
+  const alias = positionals[0];
+
+  if (alias === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: missing required positional argument 'alias'`,
+      },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const pathsRaw = getFlag(flags, 'paths');
+  if (pathsRaw === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: { code: 'INVALID_ARGS', message: `${command}: --paths is required` },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const paths = pathsRaw
+    .split(',')
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0);
+
+  const result = scaffoldConfigAllowlist(alias, { paths, yes });
+
+  printSetupResult(result, pretty);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+/**
  * `setup`'s own dispatcher — a fully separate path from `run()`'s `OpSpec`/`executeOp`
  * flow (see research.md, why `runLocal` can't express `setup`). `cli.ts` intercepts
  * `first === 'setup'` and hands the remaining argv (everything after `setup`) to this
@@ -253,6 +301,11 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (subGroup.name === 'db-target') {
     runDbTargetAction(argTail);
+    return;
+  }
+
+  if (subGroup.name === 'config-allowlist') {
+    runConfigAllowlistAction(argTail);
     return;
   }
 
