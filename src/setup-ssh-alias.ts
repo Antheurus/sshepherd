@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { auditMutating, confirmGate } from './audit.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
+import { readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 
 const DEFAULT_PORT = 22;
@@ -64,14 +65,6 @@ function splitLines(text: string): string[] {
 
 function joinLines(lines: string[]): string {
   return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
-}
-
-function readConfigText(configPath: string): string {
-  try {
-    return readFileSync(configPath, 'utf8');
-  } catch {
-    return '';
-  }
 }
 
 function buildStanzaLines(alias: string, host: string, user: string, port: number): string[] {
@@ -162,11 +155,6 @@ function upsertIdentityFile(
   return [...lines.slice(0, stanza.startIndex), ...newBlock, ...lines.slice(stanza.endIndex + 1)];
 }
 
-function writeConfigText(configPath: string, text: string): void {
-  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  writeFileSync(configPath, text, { mode: 0o600 });
-}
-
 /**
  * Appends a `# sshepherd-managed: <alias>` stanza to `configPath`. Refuses with `ALIAS_EXISTS`
  * for any pre-existing alias of the same name (hand-written or setup-managed) unless
@@ -200,7 +188,7 @@ export function register(
   const existingAliases = listHostAliases(configPath);
   const alreadyExists = existingAliases.includes(alias);
 
-  let lines = splitLines(readConfigText(configPath));
+  let lines = splitLines(readTextOrEmpty(configPath));
 
   if (alreadyExists) {
     if (!options.overwrite) {
@@ -228,7 +216,7 @@ export function register(
   }
 
   const newLines = appendStanza(lines, buildStanzaLines(alias, options.host, options.user, port));
-  writeConfigText(configPath, joinLines(newLines));
+  writeTextSecure(configPath, joinLines(newLines));
 
   auditMutating({ alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({
@@ -259,7 +247,7 @@ export async function keygen(
     });
   }
 
-  const lines = splitLines(readConfigText(configPath));
+  const lines = splitLines(readTextOrEmpty(configPath));
   const found = findManagedStanza(lines, alias);
   if (found.kind === 'not_found') {
     auditMutating({ alias, command, argsSummary, outcome: 'error' });
@@ -302,7 +290,7 @@ export async function keygen(
   }
 
   const newLines = upsertIdentityFile(lines, found, keyPath);
-  writeConfigText(configPath, joinLines(newLines));
+  writeTextSecure(configPath, joinLines(newLines));
 
   auditMutating({ alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({
@@ -333,7 +321,7 @@ export async function remove(
     });
   }
 
-  const lines = splitLines(readConfigText(configPath));
+  const lines = splitLines(readTextOrEmpty(configPath));
   const found = findManagedStanza(lines, alias);
   if (found.kind === 'not_found') {
     auditMutating({ alias, command, argsSummary, outcome: 'error' });
@@ -357,7 +345,7 @@ export async function remove(
   }
 
   const newLines = removeStanzaLines(lines, found);
-  writeConfigText(configPath, joinLines(newLines));
+  writeTextSecure(configPath, joinLines(newLines));
 
   const keyPath = keyPathFor(alias, configPath);
   const pubKeyPath = `${keyPath}.pub`;

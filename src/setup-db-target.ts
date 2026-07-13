@@ -1,6 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { auditMutating, confirmGate } from './audit.ts';
+import { readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
 
@@ -60,19 +59,6 @@ function resolveContainerRef(options: ScaffoldOptions): ContainerRef {
     return { kind: 'invalid', message: '--compose-file and --service must be provided together' };
   }
   return { kind: 'invalid', message: 'needs either --compose-file/--service or --container' };
-}
-
-function readTargetsText(path: string): string {
-  try {
-    return readFileSync(path, 'utf8');
-  } catch {
-    return '';
-  }
-}
-
-function writeTargetsText(path: string, text: string): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  writeFileSync(path, text, { mode: 0o600 });
 }
 
 /** Field order/quoting matches targets.example.toml's per-field style. */
@@ -149,8 +135,8 @@ export function scaffold(
   }
 
   const tableLines = buildTargetTableLines(name, options, ref);
-  const newText = appendTargetTable(readTargetsText(path), tableLines);
-  writeTargetsText(path, newText);
+  const newText = appendTargetTable(readTextOrEmpty(path), tableLines);
+  writeTextSecure(path, newText);
 
   auditMutating({ alias: options.alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({
