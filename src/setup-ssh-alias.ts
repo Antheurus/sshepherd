@@ -592,6 +592,16 @@ export async function install(
       },
     });
   }
+  if (outcome.kind === 'key_ssh_failed') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INSTALL_FAILED',
+        message: `ssh exited with code ${outcome.exitCode} while installing the key for alias '${alias}' — check the pasted key and try again`,
+      },
+    });
+  }
   if (outcome.kind === 'invalid_private_key') {
     auditMutating({ alias, command, argsSummary, outcome: 'error' });
     return buildSetupResult({

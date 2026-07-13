@@ -33,6 +33,7 @@ export type InstallOutcome =
   | { kind: 'tailscale_detected' }
   | { kind: 'timed_out' }
   | { kind: 'ssh_failed'; exitCode: number }
+  | { kind: 'key_ssh_failed'; exitCode: number }
   | { kind: 'sshpass_not_found' }
   | { kind: 'invalid_private_key' }
   | { kind: 'passphrase_protected_key' };
@@ -41,10 +42,12 @@ export type InstallOutcome =
  *  member here already exists in that union), kept as its own narrower type so a `switch`
  *  over it stays exhaustive without dragging in outcome kinds this function can never
  *  produce (`already_trusted`, `tailscale_detected`, `sshpass_not_found`, the form's own
- *  abandoned-form `timed_out`). */
+ *  abandoned-form `timed_out`). `key_ssh_failed` (rather than the password path's
+ *  `ssh_failed`) keeps the two credential methods' ssh failures distinguishable downstream,
+ *  since there's no password to blame for a key-path failure. */
 export type SpawnInstallWithKeyOutcome =
   | { kind: 'installed' }
-  | { kind: 'ssh_failed'; exitCode: number }
+  | { kind: 'key_ssh_failed'; exitCode: number }
   | { kind: 'invalid_private_key' }
   | { kind: 'passphrase_protected_key' };
 
@@ -301,12 +304,12 @@ export async function defaultSpawnInstallWithKey(
 
     const spawnResult = await runSsh(args);
     if (spawnResult.timedOut) {
-      return { kind: 'ssh_failed', exitCode: -1 };
+      return { kind: 'key_ssh_failed', exitCode: -1 };
     }
     if (spawnResult.code === 0) {
       return { kind: 'installed' };
     }
-    return { kind: 'ssh_failed', exitCode: spawnResult.code };
+    return { kind: 'key_ssh_failed', exitCode: spawnResult.code };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -519,10 +522,6 @@ export async function runInstallServer(
 ): Promise<InstallOutcome> {
   const deps: InstallServerDeps = { ...defaultInstallServerDeps(), ...overrides };
 
-  if (deps.which('sshpass') === null) {
-    return { kind: 'sshpass_not_found' };
-  }
-
   const token = deps.randomToken();
   let settled = false;
   let resolveOutcome: (outcome: InstallOutcome) => void = () => {};
@@ -600,6 +599,16 @@ export async function runInstallServer(
           status: 400,
           headers: { 'content-type': 'text/html' },
         });
+      }
+
+      if (deps.which('sshpass') === null) {
+        settle({ kind: 'sshpass_not_found' });
+        return new Response(
+          renderErrorHtml(
+            'sshpass is not installed on this host — install it (macOS: brew install sshpass, Debian/Ubuntu: apt install sshpass) or use the private key method instead',
+          ),
+          { status: 400, headers: { 'content-type': 'text/html' } },
+        );
       }
 
       const spawnResult = await deps.spawnInstall(password, target);

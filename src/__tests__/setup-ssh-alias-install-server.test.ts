@@ -150,16 +150,60 @@ describe('buildSshpassArgs', () => {
 });
 
 describe('runInstallServer', () => {
-  test('checks sshpass up front; missing sshpass returns sshpass_not_found and starts no server', async () => {
+  test('missing sshpass + password method selected: form is still served, submission returns sshpass_not_found without spawning ssh', async () => {
+    let capturedFetch: ServeLikeOptions['fetch'] | undefined;
+    let spawnCalled = false;
     const { serve, calls } = fakeServe();
+    const capturingServe: ServeLikeFn = (options) => {
+      capturedFetch = options.fetch;
+      return serve(options);
+    };
 
-    const outcome = await runInstallServer(TARGET, {
-      ...baseDeps({ which: () => null }),
-      serve,
+    const resultPromise = runInstallServer(TARGET, {
+      ...baseDeps({ which: () => null, timeoutMs: 60_000 }),
+      serve: capturingServe,
+      spawnInstall: async () => {
+        spawnCalled = true;
+        return { code: 0, timedOut: false };
+      },
     });
 
+    const form = new FormData();
+    form.set('password', 'irrelevant-password');
+    const response = await capturedFetch?.(
+      new Request('http://127.0.0.1:1/fixed-token/submit', { method: 'POST', body: form }),
+    );
+
+    expect(response?.status).toBe(400);
+    const outcome = await resultPromise;
     expect(outcome).toEqual({ kind: 'sshpass_not_found' });
-    expect(calls).toHaveLength(0);
+    expect(spawnCalled).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  test('missing sshpass + key method selected: proceeds normally, not blocked by the sshpass gate', async () => {
+    let capturedFetch: ServeLikeOptions['fetch'] | undefined;
+    const capturingServe: ServeLikeFn = (options) => {
+      capturedFetch = options.fetch;
+      return { port: 1, stop: () => {} };
+    };
+
+    const resultPromise = runInstallServer(TARGET, {
+      ...baseDeps({ which: () => null, timeoutMs: 60_000 }),
+      serve: capturingServe,
+      spawnInstallWithKey: async () => ({ kind: 'installed' }),
+    });
+
+    const form = new FormData();
+    form.set('method', 'key');
+    form.set('private_key', 'irrelevant-key-text');
+    const response = await capturedFetch?.(
+      new Request('http://127.0.0.1:1/fixed-token/submit', { method: 'POST', body: form }),
+    );
+
+    expect(response?.status).toBe(200);
+    const outcome = await resultPromise;
+    expect(outcome).toEqual({ kind: 'installed' });
   });
 
   test('binds 127.0.0.1 only, never 0.0.0.0', async () => {
@@ -482,7 +526,7 @@ describe('defaultSpawnInstallWithKey (real temp-file + ssh-keygen preflight)', (
     expect(existsSync(dirname(capturedKeyPath as string))).toBe(false);
   });
 
-  test('a failed ssh spawn maps to ssh_failed with the real exit code and still removes the temp dir', async () => {
+  test('a failed ssh spawn maps to key_ssh_failed with the real exit code and still removes the temp dir', async () => {
     let capturedKeyPath: string | undefined;
     const fakeRunSsh = async (args: string[]): Promise<SpawnInstallOutcome> => {
       capturedKeyPath = keyPathFromArgs(args);
@@ -491,17 +535,17 @@ describe('defaultSpawnInstallWithKey (real temp-file + ssh-keygen preflight)', (
 
     const outcome = await defaultSpawnInstallWithKey(VALID_TEST_KEY, TARGET, fakeRunSsh);
 
-    expect(outcome).toEqual({ kind: 'ssh_failed', exitCode: 5 });
+    expect(outcome).toEqual({ kind: 'key_ssh_failed', exitCode: 5 });
     expect(capturedKeyPath).toBeDefined();
     expect(existsSync(dirname(capturedKeyPath as string))).toBe(false);
   });
 
-  test('a timed-out ssh spawn maps to ssh_failed (exitCode -1), not the form-abandon timed_out kind', async () => {
+  test('a timed-out ssh spawn maps to key_ssh_failed (exitCode -1), not the form-abandon timed_out kind', async () => {
     const fakeRunSsh = async (): Promise<SpawnInstallOutcome> => ({ code: -1, timedOut: true });
 
     const outcome = await defaultSpawnInstallWithKey(VALID_TEST_KEY, TARGET, fakeRunSsh);
 
-    expect(outcome).toEqual({ kind: 'ssh_failed', exitCode: -1 });
+    expect(outcome).toEqual({ kind: 'key_ssh_failed', exitCode: -1 });
   });
 
   test('a passphrase-protected key is rejected before ever spawning ssh, temp dir removed', async () => {
@@ -623,7 +667,7 @@ describe('install (setup-ssh-alias.ts)', () => {
     expect(result.error?.code).toBe('INSTALL_FAILED');
   });
 
-  test('fails with SSHPASS_NOT_FOUND when sshpass is missing', async () => {
+  test('fails with SSHPASS_NOT_FOUND when sshpass is missing and the password method is submitted', async () => {
     const configPath = tempConfigPath();
     register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
     await keygen('myserver', { yes: true }, configPath);
@@ -632,11 +676,30 @@ describe('install (setup-ssh-alias.ts)', () => {
       'myserver',
       { yes: true },
       configPath,
-      fakeInstallDeps({ which: () => null }),
+      fakeInstallDeps({ which: () => null, serve: submittingServe('irrelevant-password') }),
     );
 
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('SSHPASS_NOT_FOUND');
+  }, 15_000);
+
+  test('missing sshpass does not block the pasted-key method', async () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    await keygen('myserver', { yes: true }, configPath);
+
+    const result = await install(
+      'myserver',
+      { yes: true },
+      configPath,
+      fakeInstallDeps({
+        which: () => null,
+        serve: submittingKeyServe(VALID_TEST_KEY),
+        spawnInstallWithKey: async () => ({ kind: 'installed' }),
+      }),
+    );
+
+    expect(result.ok).toBe(true);
   }, 15_000);
 
   test('fails with INSTALL_TIMED_OUT when the form is abandoned', async () => {
@@ -835,7 +898,7 @@ describe('install (setup-ssh-alias.ts)', () => {
     expect(JSON.stringify(result)).not.toContain('BEGIN OPENSSH PRIVATE KEY');
   }, 15_000);
 
-  test('fails with INSTALL_FAILED on a pasted-key ssh_failed outcome, never leaking key content', async () => {
+  test('fails with INSTALL_FAILED on a pasted-key key_ssh_failed outcome, with a key-aware message, never leaking key content', async () => {
     const configPath = tempConfigPath();
     register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
     await keygen('myserver', { yes: true }, configPath);
@@ -846,12 +909,14 @@ describe('install (setup-ssh-alias.ts)', () => {
       configPath,
       fakeInstallDeps({
         serve: submittingKeyServe(VALID_TEST_KEY),
-        spawnInstallWithKey: async () => ({ kind: 'ssh_failed', exitCode: 5 }),
+        spawnInstallWithKey: async () => ({ kind: 'key_ssh_failed', exitCode: 5 }),
       }),
     );
 
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('INSTALL_FAILED');
+    expect(result.error?.message).toContain('pasted key');
+    expect(result.error?.message).not.toContain('wrong password');
     expect(JSON.stringify(result)).not.toContain(VALID_TEST_KEY_SNIPPET);
   }, 15_000);
 });
