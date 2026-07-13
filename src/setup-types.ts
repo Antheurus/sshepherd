@@ -26,8 +26,19 @@ export interface SetupErrorInfo {
  * config-allowlist, deploy-recipe) can each add their own codes in this file without
  * touching every existing call site. `NOT_IMPLEMENTED` covers this phase's stub
  * sub-groups; `UNKNOWN_SUBGROUP` covers an unrecognized `setup <x>` or `setup <sub> <x>`.
+ * `INVALID_ARGS` covers CLI-level argument validation (missing/malformed flags) before a
+ * sub-module is even called. `CONFIRMATION_REQUIRED`/`ALIAS_EXISTS`/`ALIAS_NOT_FOUND`/
+ * `PARSE_MISMATCH`/`KEYGEN_FAILED` are `setup ssh-alias`'s codes (Phase 2).
  */
-export type SetupErrorCode = 'NOT_IMPLEMENTED' | 'UNKNOWN_SUBGROUP';
+export type SetupErrorCode =
+  | 'NOT_IMPLEMENTED'
+  | 'UNKNOWN_SUBGROUP'
+  | 'INVALID_ARGS'
+  | 'CONFIRMATION_REQUIRED'
+  | 'ALIAS_EXISTS'
+  | 'ALIAS_NOT_FOUND'
+  | 'PARSE_MISMATCH'
+  | 'KEYGEN_FAILED';
 
 export interface BuildSetupResultInput<T> {
   command: string;

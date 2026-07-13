@@ -1,5 +1,6 @@
-import { hasFlag, parseArgv } from './cli.ts';
-import { buildSetupResult, printSetupResult } from './setup-types.ts';
+import { getFlag, hasFlag, parseArgv } from './cli.ts';
+import { keygen, register, remove } from './setup-ssh-alias.ts';
+import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
 
 /**
  * A `setup` sub-group's declared action names — data-driven the same way `registry.ts`
@@ -106,6 +107,60 @@ function runStubAction(sub: SetupSubGroupSpec, action: string, argTail: string[]
 }
 
 /**
+ * `ssh-alias` is the first setup sub-group to leave stub status (Phase 2) — real
+ * register/keygen/remove logic lives in `setup-ssh-alias.ts`. Every other sub-group still
+ * falls through to `runStubAction` until its own phase lands.
+ */
+async function runSshAliasAction(action: string, argTail: string[]): Promise<void> {
+  const command = `setup ssh-alias ${action}`;
+  const { positionals, flags } = parseArgv(argTail);
+  const pretty = hasFlag(flags, 'pretty');
+  const yes = hasFlag(flags, 'yes');
+  const alias = positionals[0];
+
+  if (alias === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: missing required positional argument 'alias'`,
+      },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  let result: SetupResult<unknown>;
+  if (action === 'register') {
+    const host = getFlag(flags, 'host');
+    const user = getFlag(flags, 'user');
+    const portRaw = getFlag(flags, 'port');
+    const port = portRaw === undefined ? undefined : Number(portRaw);
+    if (host === undefined || user === undefined) {
+      result = buildSetupResult({
+        command,
+        error: { code: 'INVALID_ARGS', message: `${command}: --host and --user are required` },
+      });
+    } else if (port !== undefined && !Number.isInteger(port)) {
+      result = buildSetupResult({
+        command,
+        error: { code: 'INVALID_ARGS', message: `${command}: --port must be an integer` },
+      });
+    } else {
+      result = register(alias, { host, user, port, overwrite: hasFlag(flags, 'overwrite'), yes });
+    }
+  } else if (action === 'keygen') {
+    result = await keygen(alias, { yes });
+  } else {
+    result = await remove(alias, { yes });
+  }
+
+  printSetupResult(result, pretty);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+/**
  * `setup`'s own dispatcher — a fully separate path from `run()`'s `OpSpec`/`executeOp`
  * flow (see research.md, why `runLocal` can't express `setup`). `cli.ts` intercepts
  * `first === 'setup'` and hands the remaining argv (everything after `setup`) to this
@@ -132,6 +187,11 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (!subGroup.actions.includes(actionOrHelp)) {
     printUnknownAction(subGroup, actionOrHelp);
+    return;
+  }
+
+  if (subGroup.name === 'ssh-alias') {
+    await runSshAliasAction(actionOrHelp, argTail);
     return;
   }
 
