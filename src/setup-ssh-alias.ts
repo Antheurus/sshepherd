@@ -65,6 +65,19 @@ export interface InstallData {
   port: number;
 }
 
+export interface ListData {
+  aliases: string[];
+}
+
+export interface StatusData {
+  alias: string;
+  host: string;
+  user: string;
+  port: number;
+  hasKey: boolean;
+  managed: true;
+}
+
 /** Overridable via `SSHEPHERD_SSH_CONFIG_PATH` (or an explicit path param) for tests — mirrors
  *  targets.ts's `SSHEPHERD_TARGETS_PATH` override. Purely additive: the real default
  *  (`~/.ssh/config`) is unchanged when the env var is unset. */
@@ -76,8 +89,12 @@ export function defaultSshConfigPath(): string {
   return join(homedir(), '.ssh', 'config');
 }
 
+/** Shared with `list`'s marker scan so the prefix used to write a stanza and the prefix used to
+ *  enumerate them can never drift apart. */
+const MANAGED_MARKER_PREFIX = '# sshepherd-managed: ';
+
 function markerLine(alias: string): string {
-  return `# sshepherd-managed: ${alias}`;
+  return `${MANAGED_MARKER_PREFIX}${alias}`;
 }
 
 function keyPathFor(alias: string, configPath: string): string {
@@ -506,5 +523,85 @@ export async function install(
   return buildSetupResult({
     command,
     data: { alias, host: connection.host, user: connection.user, port: connection.port },
+  });
+}
+
+/**
+ * Enumerates every sshepherd-managed alias by name only, via a fresh scan of `configPath` for
+ * `# sshepherd-managed: <name>` marker lines. Deliberately not a loop over `findManagedStanza`
+ * (which locates one alias at a time) nor a reuse of `listHostAliases` (which enumerates every
+ * `Host` entry, including hand-written ones sshepherd didn't write) — this is name-only and
+ * sshepherd-managed-only by design. Non-mutating: no `confirmGate`/`auditMutating`, no `--yes`,
+ * same `mutating: false` precedent as `hosts test`.
+ */
+export function list(configPath: string = defaultSshConfigPath()): SetupResult<ListData> {
+  const command = 'setup ssh-alias list';
+  const lines = splitLines(readTextOrEmpty(configPath));
+  const aliases = lines
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(MANAGED_MARKER_PREFIX))
+    .map((line) => line.slice(MANAGED_MARKER_PREFIX.length));
+
+  return buildSetupResult({ command, data: { aliases } });
+}
+
+/**
+ * Reports one alias's full local state (host/user/port/hasKey) — a deliberate, user-approved
+ * exception to `list`'s name-only rule, since the caller already supplied host/user/port to
+ * `register` in the first place. Stays local/config-only: no live reachability check (that's
+ * `hosts test <alias>`). `hasKey` requires BOTH an `IdentityFile` line in the stanza AND both key
+ * files actually existing on disk, since a stanza can reference a path whose files were manually
+ * deleted. Refuses with `ALIAS_NOT_FOUND`/`PARSE_MISMATCH` the same way `keygen`/`remove` do.
+ * Non-mutating: no `confirmGate`/`auditMutating`, no `--yes`.
+ */
+export function status(
+  alias: string,
+  configPath: string = defaultSshConfigPath(),
+): SetupResult<StatusData> {
+  const command = 'setup ssh-alias status';
+
+  const lines = splitLines(readTextOrEmpty(configPath));
+  const found = findManagedStanza(lines, alias);
+  if (found.kind === 'not_found') {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'ALIAS_NOT_FOUND',
+        message: `alias '${alias}' is not registered via setup ssh-alias register`,
+      },
+    });
+  }
+  if (found.kind === 'mismatch') {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+
+  const block = lines.slice(found.startIndex, found.endIndex + 1);
+  const host = stanzaPropertyValue(block, 'HostName');
+  const user = stanzaPropertyValue(block, 'User');
+  if (!host || !user) {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+
+  const portRaw = stanzaPropertyValue(block, 'Port');
+  const port = portRaw ? Number(portRaw) : DEFAULT_PORT;
+  const identityFile = stanzaPropertyValue(block, 'IdentityFile');
+  const hasKey =
+    identityFile !== undefined && existsSync(identityFile) && existsSync(`${identityFile}.pub`);
+
+  return buildSetupResult({
+    command,
+    data: { alias, host, user, port, hasKey, managed: true },
   });
 }
