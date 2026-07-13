@@ -1,3 +1,6 @@
+import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { readTextOrEmpty } from './setup-file-io.ts';
 
 /** Abandoned form (nobody submits) gives up after 3 minutes — see plan.md's assumptions. */
@@ -30,7 +33,20 @@ export type InstallOutcome =
   | { kind: 'tailscale_detected' }
   | { kind: 'timed_out' }
   | { kind: 'ssh_failed'; exitCode: number }
-  | { kind: 'sshpass_not_found' };
+  | { kind: 'sshpass_not_found' }
+  | { kind: 'invalid_private_key' }
+  | { kind: 'passphrase_protected_key' };
+
+/** What `spawnInstallWithKey` resolves with — a strict subset of `InstallOutcome` (every
+ *  member here already exists in that union), kept as its own narrower type so a `switch`
+ *  over it stays exhaustive without dragging in outcome kinds this function can never
+ *  produce (`already_trusted`, `tailscale_detected`, `sshpass_not_found`, the form's own
+ *  abandoned-form `timed_out`). */
+export type SpawnInstallWithKeyOutcome =
+  | { kind: 'installed' }
+  | { kind: 'ssh_failed'; exitCode: number }
+  | { kind: 'invalid_private_key' }
+  | { kind: 'passphrase_protected_key' };
 
 /** What a single `sshpass ssh ...` invocation returns — mirrors `transport.ts`'s
  *  `SpawnOutcome` shape (`code` + `timedOut`), minus stdout/stderr, which `install` never
@@ -46,6 +62,22 @@ export type SpawnInstallFn = (
   password: string,
   target: InstallTarget,
 ) => Promise<SpawnInstallOutcome>;
+
+/** Injected in tests with a fake implementation so `install`'s pasted-private-key tests never
+ *  spawn a real `ssh` process against a real network target — same seam style as
+ *  `SpawnInstallFn`. Unlike the password path, the temp-file materialization + `ssh-keygen`
+ *  preflight this wraps run for real even under the fake (both are pure local-disk work, no
+ *  network) — only the actual `ssh -i` network step is faked at this level. */
+export type SpawnInstallWithKeyFn = (
+  privateKeyText: string,
+  target: InstallTarget,
+) => Promise<SpawnInstallWithKeyOutcome>;
+
+/** Low-level `ssh -i <path> ...` invocation, factored out of `defaultSpawnInstallWithKey` so
+ *  that function's own tests can fake only this network step while still exercising the real
+ *  `mkdtempSync`/`openSync`/`ssh-keygen` preflight against a real filesystem — mirrors why
+ *  `buildSshpassArgs` is kept separate and pure from `defaultSpawnInstall`. */
+export type SshKeySpawnFn = (args: string[]) => Promise<SpawnInstallOutcome>;
 
 /** Injected in tests with a fake implementation so `install`'s Tailscale pre-check never
  *  opens a real socket — same seam style as `SpawnInstallFn`. Resolves `true` when the
@@ -79,6 +111,7 @@ export interface InstallServerDeps {
   probeReachable: ProbeReachableFn;
   serve: ServeLikeFn;
   spawnInstall: SpawnInstallFn;
+  spawnInstallWithKey: SpawnInstallWithKeyFn;
   announceUrl: (url: string) => void;
   randomToken: () => string;
   timeoutMs: number;
@@ -145,6 +178,138 @@ async function defaultSpawnInstall(
   clearTimeout(timer);
 
   return { code, timedOut };
+}
+
+const KEY_TEMP_DIR_PREFIX = 'sshepherd-key-';
+
+/** Pure, no key-text argument at all — proves by construction that the pasted key content
+ *  never becomes part of the `ssh` argv (only its temp-file path does). Mirrors
+ *  `buildSshpassArgs`'s same proof-by-construction shape for the password path. */
+function buildSshKeyArgs(keyPath: string, target: InstallTarget, remoteCmd: string): string[] {
+  return [
+    'ssh',
+    '-i',
+    keyPath,
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'StrictHostKeyChecking=accept-new',
+    '-o',
+    `ConnectTimeout=${INSTALL_CONNECT_TIMEOUT_S}`,
+    '-p',
+    String(target.port),
+    `${target.user}@${target.host}`,
+    remoteCmd,
+  ];
+}
+
+/** Real `ssh -i <path> ...` spawn — the low-level network step `defaultSpawnInstallWithKey`
+ *  delegates to via the injectable `SshKeySpawnFn` seam. Mirrors `defaultSpawnInstall`'s
+ *  timeout-race shape. */
+async function runSshKeySpawn(args: string[]): Promise<SpawnInstallOutcome> {
+  const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' });
+
+  let timedOut = false;
+  const timer = setTimeout(
+    () => {
+      timedOut = true;
+      proc.kill();
+    },
+    (INSTALL_CONNECT_TIMEOUT_S + 5) * 1_000,
+  );
+
+  const code = await proc.exited;
+  clearTimeout(timer);
+
+  return { code, timedOut };
+}
+
+/**
+ * Runs `ssh-keygen -y -f <path> -P ''` against the freshly-written key file to distinguish a
+ * genuinely passphrase-protected key from text that doesn't parse as a private key at all —
+ * both fail non-interactively with the empty passphrase, but with different stderr text.
+ * Verified empirically (both cases generated locally with real `ssh-keygen`, see plan.md
+ * Phase 4's brief): a passphrase-protected key's stderr contains "incorrect passphrase
+ * supplied to decrypt private key"; garbage/truncated/empty text instead says "invalid
+ * format". `-P ''` never needs (or sees) the real passphrase — it only needs to be present
+ * to detect that one *is* required.
+ */
+async function preflightPrivateKey(
+  keyPath: string,
+): Promise<'ok' | 'passphrase_protected' | 'invalid'> {
+  const proc = Bun.spawn(['ssh-keygen', '-y', '-f', keyPath, '-P', ''], {
+    stdout: 'ignore',
+    stderr: 'pipe',
+    stdin: 'ignore',
+  });
+  const stderrText = await new Response(proc.stderr).text();
+  const code = await proc.exited;
+
+  if (code === 0) {
+    return 'ok';
+  }
+  return stderrText.includes('incorrect passphrase') ? 'passphrase_protected' : 'invalid';
+}
+
+/**
+ * Installs the alias's public key over `ssh -i <tempfile>` instead of a password. Unlike
+ * `defaultSpawnInstall`, this credential structurally cannot avoid touching disk: OpenSSH's
+ * `sshkey_load_private_type` (see plan.md Phase 4's research citation of `authfile.c`) requires
+ * a real, `fstat`-able regular file for `-i`, with no pipe/FD equivalent to `sshpass -f
+ * /dev/stdin`. The temp file is minimized instead: a fresh `mkdtempSync` directory (0700, per
+ * POSIX `mkdtemp` semantics) rooted at the *resolved* tmpdir (`realpathSync` — macOS's `/tmp`
+ * is itself a symlink to `/private/tmp`), holding one key file opened `O_CREAT|O_EXCL|O_WRONLY`
+ * at mode 0600 from the moment it's created (never chmod-after-write, which would leave a
+ * window at the default, world-readable-ish mode). CRLF-normalized before it's ever written, so
+ * a Windows-clipboard paste can't corrupt PEM parsing.
+ *
+ * `finally` removes the whole temp directory on every exit path — success, preflight
+ * rejection, ssh failure, or timeout. The one residual risk this can't close: a SIGKILL
+ * against this process skips `finally` entirely, so the temp key file would survive on disk
+ * until the OS's own tmp-cleanup policy reclaims it. Accepted for v1 (plan.md Phase 4's
+ * Concerns) — closing it needs a process-external cleanup mechanism (crash-safe registry,
+ * signal handlers) that's out of reach for this subprocess-based design.
+ */
+export async function defaultSpawnInstallWithKey(
+  privateKeyText: string,
+  target: InstallTarget,
+  runSsh: SshKeySpawnFn = runSshKeySpawn,
+): Promise<SpawnInstallWithKeyOutcome> {
+  const normalizedKey = privateKeyText.replace(/\r\n/g, '\n');
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), KEY_TEMP_DIR_PREFIX));
+
+  try {
+    const keyPath = join(dir, 'key');
+    const fd = openSync(keyPath, 'wx', 0o600);
+    try {
+      writeSync(fd, normalizedKey);
+    } finally {
+      closeSync(fd);
+    }
+
+    const preflight = await preflightPrivateKey(keyPath);
+    if (preflight === 'passphrase_protected') {
+      return { kind: 'passphrase_protected_key' };
+    }
+    if (preflight === 'invalid') {
+      return { kind: 'invalid_private_key' };
+    }
+
+    const publicKey = readTextOrEmpty(target.publicKeyPath).trim();
+    const remoteCmd = buildRemoteInstallCommand(publicKey);
+    const args = buildSshKeyArgs(keyPath, target, remoteCmd);
+
+    const spawnResult = await runSsh(args);
+    if (spawnResult.timedOut) {
+      return { kind: 'ssh_failed', exitCode: -1 };
+    }
+    if (spawnResult.code === 0) {
+      return { kind: 'installed' };
+    }
+    return { kind: 'ssh_failed', exitCode: spawnResult.code };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -277,6 +442,7 @@ export function defaultInstallServerDeps(): InstallServerDeps {
     probeReachable: probeAlreadyTrusted,
     serve: defaultServe,
     spawnInstall: defaultSpawnInstall,
+    spawnInstallWithKey: defaultSpawnInstallWithKey,
     announceUrl: defaultAnnounceUrl,
     randomToken: () => crypto.randomUUID(),
     timeoutMs: DEFAULT_INSTALL_TIMEOUT_MS,
@@ -296,19 +462,35 @@ const PAGE_STYLE = `<style>
   h1{margin:0 0 1rem;font-size:1rem;letter-spacing:.08em;text-transform:uppercase;color:#33ff66}
   p{margin:0;color:#7fdba0;line-height:1.5;font-size:.9rem}
   label{display:block;margin-bottom:1.25rem;color:#7fdba0;font-size:.85rem}
-  input[type=password]{width:100%;margin-top:.5rem;padding:.6rem .7rem;border-radius:2px;
+  input[type=password],textarea{width:100%;margin-top:.5rem;padding:.6rem .7rem;border-radius:2px;
     background:#000;border:1px solid #1f4d2e;color:#33ff66;font:inherit;font-size:1rem}
-  input[type=password]:focus{outline:none;border-color:#33ff66}
+  textarea{font-family:ui-monospace,'SF Mono',Menlo,Consolas,'Courier New',monospace;
+    font-size:.8rem;resize:vertical}
+  input[type=password]:focus,textarea:focus{outline:none;border-color:#33ff66}
   button{width:100%;margin-top:.25rem;padding:.65rem;border-radius:2px;cursor:pointer;
     background:#122417;border:1px solid #33ff66;color:#33ff66;font:inherit;font-size:.85rem;
     letter-spacing:.08em;text-transform:uppercase}
   button:hover{background:#1a3320}
+  input.method-radio{position:absolute;opacity:0;pointer-events:none}
+  .method-tabs{display:flex;gap:.5rem;margin-bottom:1.25rem}
+  .method-tabs label{flex:1;margin:0;padding:.5rem;text-align:center;border-radius:2px;
+    border:1px solid #1f4d2e;cursor:pointer;font-size:.8rem;letter-spacing:.04em;
+    text-transform:uppercase}
+  #method-password:checked ~ .method-tabs label[for=method-password],
+  #method-key:checked ~ .method-tabs label[for=method-key]{border-color:#33ff66;color:#33ff66}
+  .method-section{display:none}
+  #method-password:checked ~ .method-section-password{display:block}
+  #method-key:checked ~ .method-section-key{display:block}
 </style>`;
 const FORM_HTML_HEAD = `<!doctype html><html><head><meta charset="utf-8"><title>sshepherd install</title>${PAGE_STYLE}</head><body><div class="card">`;
 const FORM_HTML_TAIL = '</div></body></html>';
 
+/** The method toggle is pure CSS (radio inputs + a `:checked ~` sibling selector) — no JS,
+ *  matching this page's zero-external-dependency, hand-rolled-CSS-only constraint. Both
+ *  credential fields are always present in the DOM/form submission; the server dispatches on
+ *  the `method` radio's value, not on which field happens to be non-empty. */
 function renderFormHtml(alias: string, token: string): string {
-  return `${FORM_HTML_HEAD}<h1>Install SSH key for '${alias}'</h1><form method="post" action="/${token}/submit"><label>Password<input type="password" name="password" autofocus></label><button type="submit">Install</button></form>${FORM_HTML_TAIL}`;
+  return `${FORM_HTML_HEAD}<h1>Install SSH key for '${alias}'</h1><form method="post" action="/${token}/submit"><input type="radio" id="method-password" class="method-radio" name="method" value="password" checked><input type="radio" id="method-key" class="method-radio" name="method" value="key"><div class="method-tabs"><label for="method-password">Password</label><label for="method-key">Private key</label></div><div class="method-section method-section-password"><label>Password<input type="password" name="password" autofocus></label></div><div class="method-section method-section-key"><label>Private key<textarea name="private_key" rows="8" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"></textarea></label></div><button type="submit">Install</button></form>${FORM_HTML_TAIL}`;
 }
 
 function renderSuccessHtml(): string {
@@ -323,9 +505,13 @@ function renderErrorHtml(message: string): string {
  * One-shot local browser form: binds `127.0.0.1` only (never `0.0.0.0`) on an ephemeral
  * port, gates every route behind a random per-invocation token (wrong/missing token always
  * 404s — never 403, so the route's existence isn't confirmable), waits for either a
- * password submission or `deps.timeoutMs` of silence, and resolves with a typed outcome.
- * The password itself only ever exists as a local variable inside the POST handler and the
- * argument to `deps.spawnInstall` — it is never returned, logged, or written to disk.
+ * credential submission or `deps.timeoutMs` of silence, and resolves with a typed outcome.
+ * A human may submit either a password or a pasted private key (the form's `method` toggle
+ * selects which); either credential only ever exists as a local variable inside the POST
+ * handler and the argument to `deps.spawnInstall`/`deps.spawnInstallWithKey` — it is never
+ * returned, logged, or written to disk (the pasted key's one exception is the ephemeral,
+ * 0600, `finally`-cleaned temp file `spawnInstallWithKey` itself creates and removes — see
+ * its own doc comment for why that disk touch is structurally unavoidable for `ssh -i`).
  */
 export async function runInstallServer(
   target: InstallTarget,
@@ -368,6 +554,46 @@ export async function runInstallServer(
 
     if (req.method === 'POST' && parts.length === 2 && parts[1] === 'submit') {
       const form = await req.formData();
+      const method = form.get('method');
+
+      if (method === 'key') {
+        const privateKey = form.get('private_key');
+        if (typeof privateKey !== 'string' || privateKey.trim().length === 0) {
+          return new Response(renderErrorHtml('Private key is required'), {
+            status: 400,
+            headers: { 'content-type': 'text/html' },
+          });
+        }
+
+        const keyOutcome = await deps.spawnInstallWithKey(privateKey, target);
+        // `privateKey` goes out of scope here — never referenced again.
+        settle(keyOutcome);
+
+        if (keyOutcome.kind === 'installed') {
+          return new Response(renderSuccessHtml(), { headers: { 'content-type': 'text/html' } });
+        }
+        if (keyOutcome.kind === 'passphrase_protected_key') {
+          return new Response(
+            renderErrorHtml(
+              'The pasted key is passphrase-protected, which install cannot supply non-interactively — use an unencrypted key or the password method instead',
+            ),
+            { status: 400, headers: { 'content-type': 'text/html' } },
+          );
+        }
+        if (keyOutcome.kind === 'invalid_private_key') {
+          return new Response(
+            renderErrorHtml('The pasted text does not look like a valid private key'),
+            { status: 400, headers: { 'content-type': 'text/html' } },
+          );
+        }
+        return new Response(
+          renderErrorHtml(
+            'ssh exited with a non-zero status — check the private key and try again',
+          ),
+          { headers: { 'content-type': 'text/html' } },
+        );
+      }
+
       const password = form.get('password');
       if (typeof password !== 'string' || password.length === 0) {
         return new Response(renderErrorHtml('Password is required'), {

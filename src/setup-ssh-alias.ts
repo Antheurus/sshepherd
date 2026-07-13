@@ -592,6 +592,27 @@ export async function install(
       },
     });
   }
+  if (outcome.kind === 'invalid_private_key') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_PRIVATE_KEY',
+        message: 'the pasted text does not look like a valid private key',
+      },
+    });
+  }
+  if (outcome.kind === 'passphrase_protected_key') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PASSPHRASE_PROTECTED_KEY_UNSUPPORTED',
+        message:
+          "the pasted key is passphrase-protected, which sshepherd's install cannot supply non-interactively; use an unencrypted key or the password method instead",
+      },
+    });
+  }
 
   auditMutating({ alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({
