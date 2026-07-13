@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readTextOrEmpty, writeTextSecure } from '../setup-file-io.ts';
+import { appendBlock, readTextOrEmpty, writeTextSecure } from '../setup-file-io.ts';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'sshepherd-file-io-test-'));
@@ -44,5 +44,19 @@ describe('writeTextSecure', () => {
     writeTextSecure(path, 'second');
 
     expect(readFileSync(path, 'utf8')).toBe('second');
+  });
+});
+
+describe('appendBlock', () => {
+  test('returns the new block as-is (plus a trailing newline) when existing content is empty', () => {
+    expect(appendBlock('', 'a\nb')).toBe('a\nb\n');
+  });
+
+  test('appends with exactly one blank-line separator when existing content is non-empty', () => {
+    expect(appendBlock('a\nb\n', 'c\nd')).toBe('a\nb\n\nc\nd\n');
+  });
+
+  test('strips trailing whitespace off existing content before separating', () => {
+    expect(appendBlock('a\nb\n\n\n', 'c')).toBe('a\nb\n\nc\n');
   });
 });

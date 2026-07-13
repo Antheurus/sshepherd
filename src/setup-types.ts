@@ -30,6 +30,7 @@ export interface SetupErrorInfo {
  * sub-module is even called. `CONFIRMATION_REQUIRED`/`ALIAS_EXISTS`/`ALIAS_NOT_FOUND`/
  * `PARSE_MISMATCH`/`KEYGEN_FAILED` are `setup ssh-alias`'s codes (Phase 2).
  * `VALIDATION_ERROR`/`TARGET_EXISTS` are `setup db-target`'s codes (Phase 3).
+ * `RECIPE_EXISTS` is `setup deploy-recipe`'s code (Phase 5), mirroring `TARGET_EXISTS`.
  */
 export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
@@ -41,7 +42,8 @@ export type SetupErrorCode =
   | 'PARSE_MISMATCH'
   | 'KEYGEN_FAILED'
   | 'VALIDATION_ERROR'
-  | 'TARGET_EXISTS';
+  | 'TARGET_EXISTS'
+  | 'RECIPE_EXISTS';
 
 export interface BuildSetupResultInput<T> {
   command: string;

@@ -1,6 +1,7 @@
 import { getFlag, hasFlag, parseArgv } from './cli.ts';
 import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts';
 import { scaffold } from './setup-db-target.ts';
+import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
 import { keygen, register, remove } from './setup-ssh-alias.ts';
 import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
 
@@ -265,6 +266,49 @@ function runConfigAllowlistAction(argTail: string[]): void {
 }
 
 /**
+ * `deploy-recipe` is the fourth setup sub-group to leave stub status (Phase 5) — real
+ * scaffold logic lives in `setup-deploy-recipe.ts`. `deploy-recipe` only ever has one action
+ * (`scaffold`), same shape as `runDbTargetAction`/`runConfigAllowlistAction`.
+ */
+function runDeployRecipeAction(argTail: string[]): void {
+  const command = 'setup deploy-recipe scaffold';
+  const { positionals, flags } = parseArgv(argTail);
+  const pretty = hasFlag(flags, 'pretty');
+  const yes = hasFlag(flags, 'yes');
+  const name = positionals[0];
+
+  if (name === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: missing required positional argument 'name'`,
+      },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const alias = getFlag(flags, 'alias');
+  const workdir = getFlag(flags, 'workdir');
+  if (alias === undefined || workdir === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: { code: 'INVALID_ARGS', message: `${command}: --alias and --workdir are required` },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const result = scaffoldDeployRecipe(name, { alias, workdir, yes });
+
+  printSetupResult(result, pretty);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+/**
  * `setup`'s own dispatcher — a fully separate path from `run()`'s `OpSpec`/`executeOp`
  * flow (see research.md, why `runLocal` can't express `setup`). `cli.ts` intercepts
  * `first === 'setup'` and hands the remaining argv (everything after `setup`) to this
@@ -306,6 +350,11 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (subGroup.name === 'config-allowlist') {
     runConfigAllowlistAction(argTail);
+    return;
+  }
+
+  if (subGroup.name === 'deploy-recipe') {
+    runDeployRecipeAction(argTail);
     return;
   }
 

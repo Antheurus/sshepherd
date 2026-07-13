@@ -1,5 +1,5 @@
 import { auditMutating, confirmGate } from './audit.ts';
-import { readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
+import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
 
@@ -77,14 +77,6 @@ function buildTargetTableLines(
   return lines;
 }
 
-/** Appends a blank-line-separated table after any existing content; the file always ends in
- *  exactly one trailing newline, mirroring setup-ssh-alias.ts's `appendStanza`. */
-function appendTargetTable(existingText: string, tableLines: string[]): string {
-  const trimmed = existingText.replace(/\s+$/, '');
-  const tableText = tableLines.join('\n');
-  return trimmed.length === 0 ? `${tableText}\n` : `${trimmed}\n\n${tableText}\n`;
-}
-
 /**
  * Appends a `[<name>]` table to `targets.toml`. Refuses with `VALIDATION_ERROR` if the
  * container reference isn't exactly one of `{compose_file, service}` or `{container}` —
@@ -135,7 +127,7 @@ export function scaffold(
   }
 
   const tableLines = buildTargetTableLines(name, options, ref);
-  const newText = appendTargetTable(readTextOrEmpty(path), tableLines);
+  const newText = appendBlock(readTextOrEmpty(path), tableLines.join('\n'));
   writeTextSecure(path, newText);
 
   auditMutating({ alias: options.alias, command, argsSummary, outcome: 'ok' });

@@ -1,6 +1,6 @@
 import { auditMutating, confirmGate } from './audit.ts';
 import { defaultConfigAllowlistPath, loadConfigAllowlist } from './registry.ts';
-import { readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
+import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 
 export interface ScaffoldOptions {
@@ -78,15 +78,6 @@ function buildAllowlistTableLines(alias: string, paths: string[]): string[] {
   return [`[${alias}]`, formatPathsLine(paths)];
 }
 
-/** Appends a blank-line-separated table after any existing content; the file always ends in
- *  exactly one trailing newline — mirrors setup-db-target.ts's appendTargetTable. */
-function appendAllowlistTable(existingLines: string[], tableLines: string[]): string[] {
-  if (existingLines.length === 0) {
-    return tableLines;
-  }
-  return [...existingLines, '', ...tableLines];
-}
-
 /**
  * Appends a `[<alias>]` table to `config-allowlist.toml`, or, if `<alias>` already has a
  * table, unions its existing `paths` with the newly supplied ones in place — never errors on
@@ -124,14 +115,19 @@ export function scaffold(
   const mergedPaths = unionPaths(existingAllowlist[alias] ?? [], options.paths);
   const tableLines = buildAllowlistTableLines(alias, mergedPaths);
 
-  const lines = splitLines(readTextOrEmpty(path));
+  const existingText = readTextOrEmpty(path);
+  const lines = splitLines(existingText);
   const found = findTable(lines, alias);
-  const newLines =
+  const newText =
     found.kind === 'found'
-      ? [...lines.slice(0, found.startIndex), ...tableLines, ...lines.slice(found.endIndex + 1)]
-      : appendAllowlistTable(lines, tableLines);
+      ? joinLines([
+          ...lines.slice(0, found.startIndex),
+          ...tableLines,
+          ...lines.slice(found.endIndex + 1),
+        ])
+      : appendBlock(existingText, tableLines.join('\n'));
 
-  writeTextSecure(path, joinLines(newLines));
+  writeTextSecure(path, newText);
 
   auditMutating({ alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({ command, data: { alias, paths: mergedPaths } });

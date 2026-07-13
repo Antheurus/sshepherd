@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { auditMutating, confirmGate } from './audit.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
-import { readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
+import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 
 const DEFAULT_PORT = 22;
@@ -73,15 +73,6 @@ function buildStanzaLines(alias: string, host: string, user: string, port: numbe
     lines.push(`    Port ${port}`);
   }
   return lines;
-}
-
-/** Appends a blank-line-separated stanza after any existing content; the file always ends
- *  in exactly one trailing newline, so repeated appends never accumulate blank lines. */
-function appendStanza(existingLines: string[], stanzaLines: string[]): string[] {
-  if (existingLines.length === 0) {
-    return stanzaLines;
-  }
-  return [...existingLines, '', ...stanzaLines];
 }
 
 type FindStanzaResult =
@@ -215,8 +206,9 @@ export function register(
     lines = removeStanzaLines(lines, found);
   }
 
-  const newLines = appendStanza(lines, buildStanzaLines(alias, options.host, options.user, port));
-  writeTextSecure(configPath, joinLines(newLines));
+  const stanzaLines = buildStanzaLines(alias, options.host, options.user, port);
+  const newText = appendBlock(joinLines(lines), stanzaLines.join('\n'));
+  writeTextSecure(configPath, newText);
 
   auditMutating({ alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({
