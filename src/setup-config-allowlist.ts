@@ -1,7 +1,14 @@
 import { auditMutating, confirmGate } from './audit.ts';
 import { defaultConfigAllowlistPath, loadConfigAllowlist } from './registry.ts';
-import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
+import {
+  appendBlock,
+  joinLines,
+  readTextOrEmpty,
+  splitLines,
+  writeTextSecure,
+} from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
+import { tomlQuote } from './toml-quote.ts';
 
 export interface ScaffoldOptions {
   paths: string[];
@@ -11,17 +18,6 @@ export interface ScaffoldOptions {
 export interface ScaffoldData {
   alias: string;
   paths: string[];
-}
-
-/** Splits a config's text into lines with no trailing empty element — mirrors
- *  setup-ssh-alias.ts's splitLines/joinLines pair. */
-function splitLines(text: string): string[] {
-  const withoutTrailingNewline = text.endsWith('\n') ? text.slice(0, -1) : text;
-  return withoutTrailingNewline.length === 0 ? [] : withoutTrailingNewline.split('\n');
-}
-
-function joinLines(lines: string[]): string {
-  return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
 }
 
 type FindTableResult =
@@ -71,7 +67,7 @@ function unionPaths(existingPaths: string[], incomingPaths: string[]): string[] 
 }
 
 function formatPathsLine(paths: string[]): string {
-  return `paths = [${paths.map((path) => `"${path}"`).join(', ')}]`;
+  return `paths = [${paths.map((path) => tomlQuote(path)).join(', ')}]`;
 }
 
 function buildAllowlistTableLines(alias: string, paths: string[]): string[] {

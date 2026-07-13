@@ -177,6 +177,21 @@ describe('scaffold', () => {
     expect(existsSync(path)).toBe(false);
   });
 
+  test('a value containing a double quote round-trips through the real loadTargets without throwing (regression for CRITICAL 1)', () => {
+    const path = tempTargetsPath();
+    const result = scaffold(
+      'weird',
+      { alias: 'my"alias', user: 'app', database: 'appdb', container: 'c', yes: true },
+      path,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.data?.alias).toBe('my"alias');
+
+    expect(() => loadTargets(path)).not.toThrow();
+    expect(loadTargets(path).weird?.alias).toBe('my"alias');
+  });
+
   test('fails with TARGET_EXISTS for a duplicate name, existing file untouched byte-for-byte', () => {
     const path = tempTargetsPath();
     writeFileSync(

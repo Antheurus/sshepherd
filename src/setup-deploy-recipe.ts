@@ -3,6 +3,7 @@ import { auditMutating, confirmGate } from './audit.ts';
 import { resolveRecipePath } from './recipes.ts';
 import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
+import { tomlQuote } from './toml-quote.ts';
 
 export interface ScaffoldOptions {
   alias: string;
@@ -24,9 +25,9 @@ export interface ScaffoldData {
  */
 function buildRecipeLines(name: string, alias: string, workdir: string): string[] {
   return [
-    `name = "${name}"`,
-    `alias = "${alias}"`,
-    `workdir = "${workdir}"`,
+    `name = ${tomlQuote(name)}`,
+    `alias = ${tomlQuote(alias)}`,
+    `workdir = ${tomlQuote(workdir)}`,
     '',
     '[[step]]',
     'name = "example"',

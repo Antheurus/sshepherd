@@ -33,3 +33,16 @@ export function appendBlock(existingContent: string, newBlock: string): string {
   const trimmed = existingContent.replace(/\s+$/, '');
   return trimmed.length === 0 ? `${newBlock}\n` : `${trimmed}\n\n${newBlock}\n`;
 }
+
+/** Splits a config's text into lines with no trailing empty element, so line indices map
+ *  exactly onto what a human editor would show — `joinLines` is its exact inverse. Shared by
+ *  setup-ssh-alias.ts and setup-config-allowlist.ts, which both need to locate and rewrite a
+ *  specific stanza/table by line index. */
+export function splitLines(text: string): string[] {
+  const withoutTrailingNewline = text.endsWith('\n') ? text.slice(0, -1) : text;
+  return withoutTrailingNewline.length === 0 ? [] : withoutTrailingNewline.split('\n');
+}
+
+export function joinLines(lines: string[]): string {
+  return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
+}

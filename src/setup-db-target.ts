@@ -2,6 +2,7 @@ import { auditMutating, confirmGate } from './audit.ts';
 import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
+import { tomlQuote } from './toml-quote.ts';
 
 export interface ScaffoldOptions {
   alias: string;
@@ -67,13 +68,16 @@ function buildTargetTableLines(
   options: ScaffoldOptions,
   ref: ContainerRef,
 ): string[] {
-  const lines = [`[${name}]`, `alias = "${options.alias}"`];
+  const lines = [`[${name}]`, `alias = ${tomlQuote(options.alias)}`];
   if (ref.kind === 'compose') {
-    lines.push(`compose_file = "${ref.composeFile}"`, `service = "${ref.service}"`);
+    lines.push(
+      `compose_file = ${tomlQuote(ref.composeFile)}`,
+      `service = ${tomlQuote(ref.service)}`,
+    );
   } else if (ref.kind === 'container') {
-    lines.push(`container = "${ref.container}"`);
+    lines.push(`container = ${tomlQuote(ref.container)}`);
   }
-  lines.push(`user = "${options.user}"`, `database = "${options.database}"`);
+  lines.push(`user = ${tomlQuote(options.user)}`, `database = ${tomlQuote(options.database)}`);
   return lines;
 }
 

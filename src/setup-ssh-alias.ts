@@ -3,7 +3,13 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { auditMutating, confirmGate } from './audit.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
-import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
+import {
+  appendBlock,
+  joinLines,
+  readTextOrEmpty,
+  splitLines,
+  writeTextSecure,
+} from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 
 const DEFAULT_PORT = 22;
@@ -43,8 +49,14 @@ export interface RemoveData {
   keyRemoved: boolean;
 }
 
-/** Overridable via an explicit path param for tests — mirrors targets.ts's `defaultTargetsPath`. */
+/** Overridable via `SSHEPHERD_SSH_CONFIG_PATH` (or an explicit path param) for tests — mirrors
+ *  targets.ts's `SSHEPHERD_TARGETS_PATH` override. Purely additive: the real default
+ *  (`~/.ssh/config`) is unchanged when the env var is unset. */
 export function defaultSshConfigPath(): string {
+  const override = process.env.SSHEPHERD_SSH_CONFIG_PATH;
+  if (override && override.length > 0) {
+    return override;
+  }
   return join(homedir(), '.ssh', 'config');
 }
 
@@ -54,17 +66,6 @@ function markerLine(alias: string): string {
 
 function keyPathFor(alias: string, configPath: string): string {
   return join(dirname(configPath), `sshepherd_${alias}_ed25519`);
-}
-
-/** Splits a config's text into lines with no trailing empty element, so line indices map
- *  exactly onto what a human editor would show — `joinLines` is its exact inverse. */
-function splitLines(text: string): string[] {
-  const withoutTrailingNewline = text.endsWith('\n') ? text.slice(0, -1) : text;
-  return withoutTrailingNewline.length === 0 ? [] : withoutTrailingNewline.split('\n');
-}
-
-function joinLines(lines: string[]): string {
-  return lines.length === 0 ? '' : `${lines.join('\n')}\n`;
 }
 
 function buildStanzaLines(alias: string, host: string, user: string, port: number): string[] {

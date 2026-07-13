@@ -92,30 +92,8 @@ function printUnknownAction(sub: SetupSubGroupSpec, action: string): void {
 }
 
 /**
- * Every real sub-group (ssh-alias, db-target, config-allowlist, deploy-recipe) is wired
- * to this stub in Phase 1 — later phases replace each entry's handling with real
- * config-writing logic. `--yes` is parsed here (same `parseArgv`/`hasFlag` the 9 existing
- * groups use) so a later phase can thread `{mutating, yes}` through to `confirmGate`
- * without changing how the dispatcher reads argv.
- */
-function runStubAction(sub: SetupSubGroupSpec, action: string, argTail: string[]): void {
-  const { flags } = parseArgv(argTail);
-  const pretty = hasFlag(flags, 'pretty');
-  const result = buildSetupResult({
-    command: `setup ${sub.name} ${action}`,
-    error: {
-      code: 'NOT_IMPLEMENTED',
-      message: `setup ${sub.name} ${action} is not implemented yet`,
-    },
-  });
-  printSetupResult(result, pretty);
-  process.exitCode = 1;
-}
-
-/**
  * `ssh-alias` is the first setup sub-group to leave stub status (Phase 2) — real
- * register/keygen/remove logic lives in `setup-ssh-alias.ts`. Every other sub-group still
- * falls through to `runStubAction` until its own phase lands.
+ * register/keygen/remove logic lives in `setup-ssh-alias.ts`.
  */
 async function runSshAliasAction(action: string, argTail: string[]): Promise<void> {
   const command = `setup ssh-alias ${action}`;
@@ -360,6 +338,4 @@ export async function runSetup(tail: string[]): Promise<void> {
     runDeployRecipeAction(argTail);
     return;
   }
-
-  runStubAction(subGroup, actionOrHelp, argTail);
 }
