@@ -154,12 +154,32 @@ export function defaultInstallServerDeps(): InstallServerDeps {
   };
 }
 
-const FORM_HTML_HEAD =
-  '<!doctype html><html><head><meta charset="utf-8"><title>sshepherd install</title></head><body>';
-const FORM_HTML_TAIL = '</body></html>';
+// Inline, no external requests — this page is where a password gets typed, so it never
+// loads a third-party stylesheet/script (e.g. a Tailwind CDN), only hand-rolled CSS.
+const PAGE_STYLE = `<style>
+  :root{color-scheme:dark}
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0a0e0a;color:#33ff66;
+    font-family:ui-monospace,'SF Mono',Menlo,Consolas,'Courier New',monospace}
+  .card{width:100%;max-width:420px;margin:1.5rem;padding:2rem 2.25rem;border-radius:4px;
+    background:#0d120d;border:1px solid #1f4d2e;box-shadow:0 0 24px rgba(51,255,102,.08)}
+  h1{margin:0 0 1rem;font-size:1rem;letter-spacing:.08em;text-transform:uppercase;color:#33ff66}
+  p{margin:0;color:#7fdba0;line-height:1.5;font-size:.9rem}
+  label{display:block;margin-bottom:1.25rem;color:#7fdba0;font-size:.85rem}
+  input[type=password]{width:100%;margin-top:.5rem;padding:.6rem .7rem;border-radius:2px;
+    background:#000;border:1px solid #1f4d2e;color:#33ff66;font:inherit;font-size:1rem}
+  input[type=password]:focus{outline:none;border-color:#33ff66}
+  button{width:100%;margin-top:.25rem;padding:.65rem;border-radius:2px;cursor:pointer;
+    background:#122417;border:1px solid #33ff66;color:#33ff66;font:inherit;font-size:.85rem;
+    letter-spacing:.08em;text-transform:uppercase}
+  button:hover{background:#1a3320}
+</style>`;
+const FORM_HTML_HEAD = `<!doctype html><html><head><meta charset="utf-8"><title>sshepherd install</title>${PAGE_STYLE}</head><body><div class="card">`;
+const FORM_HTML_TAIL = '</div></body></html>';
 
-function renderFormHtml(alias: string): string {
-  return `${FORM_HTML_HEAD}<h1>Install SSH key for '${alias}'</h1><form method="post" action="submit"><label>Password: <input type="password" name="password" autofocus></label><button type="submit">Install</button></form>${FORM_HTML_TAIL}`;
+function renderFormHtml(alias: string, token: string): string {
+  return `${FORM_HTML_HEAD}<h1>Install SSH key for '${alias}'</h1><form method="post" action="/${token}/submit"><label>Password<input type="password" name="password" autofocus></label><button type="submit">Install</button></form>${FORM_HTML_TAIL}`;
 }
 
 function renderSuccessHtml(): string {
@@ -212,7 +232,7 @@ export async function runInstallServer(
     }
 
     if (req.method === 'GET' && parts.length === 1) {
-      return new Response(renderFormHtml(target.alias), {
+      return new Response(renderFormHtml(target.alias, token), {
         headers: { 'content-type': 'text/html' },
       });
     }

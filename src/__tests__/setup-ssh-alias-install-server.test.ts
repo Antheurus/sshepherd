@@ -191,11 +191,21 @@ describe('runInstallServer', () => {
       serve: capturingServe,
     });
 
-    const response = await capturedFetch?.(new Request('http://127.0.0.1:1/tok'));
+    const requestUrl = 'http://127.0.0.1:1/tok';
+    const response = await capturedFetch?.(new Request(requestUrl));
     expect(response?.status).toBe(200);
     const body = await response?.text();
     expect(body).toContain('<form');
     expect(body).toContain(TARGET.alias);
+
+    // Regression guard: a relative `action` (e.g. action="submit") resolves against the
+    // page URL per browser semantics, and `/tok` (no trailing slash) resolves "submit" to
+    // `/submit` — dropping the token entirely and 404ing on real submission. Resolve the
+    // form's actual action the same way a browser does, don't just grep for a substring.
+    const actionMatch = body?.match(/action="([^"]+)"/);
+    expect(actionMatch?.[1]).toBeTruthy();
+    const resolvedSubmitUrl = new URL(actionMatch?.[1] ?? '', requestUrl);
+    expect(resolvedSubmitUrl.pathname).toBe('/tok/submit');
 
     await resultPromise;
   });
