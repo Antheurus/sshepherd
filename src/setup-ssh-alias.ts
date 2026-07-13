@@ -78,6 +78,20 @@ export interface StatusData {
   managed: true;
 }
 
+export interface UpdateOptions {
+  host?: string;
+  user?: string;
+  port?: number;
+  yes: boolean;
+}
+
+export interface UpdateData {
+  alias: string;
+  host: string;
+  user: string;
+  port: number;
+}
+
 /** Overridable via `SSHEPHERD_SSH_CONFIG_PATH` (or an explicit path param) for tests — mirrors
  *  targets.ts's `SSHEPHERD_TARGETS_PATH` override. Purely additive: the real default
  *  (`~/.ssh/config`) is unchanged when the env var is unset. */
@@ -165,19 +179,34 @@ function removeStanzaLines(
   return [...lines.slice(0, removeStart), ...lines.slice(removeEnd + 1)];
 }
 
+/**
+ * Rewrites (or appends, if absent) a single `    <property> <value>` line inside the located
+ * managed stanza — the general form `upsertIdentityFile` used to hand-roll for `IdentityFile`
+ * alone. Shared by `keygen` (IdentityFile) and `update` (HostName/User/Port) so the "find the
+ * property line, replace it in place, else append" rule lives in exactly one place.
+ */
+function upsertStanzaProperty(
+  lines: string[],
+  stanza: { startIndex: number; endIndex: number },
+  property: string,
+  value: string,
+): string[] {
+  const propertyLine = `    ${property} ${value}`;
+  const block = lines.slice(stanza.startIndex, stanza.endIndex + 1);
+  const propertyIndex = block.findIndex((line) => line.trim().startsWith(`${property} `));
+  const newBlock =
+    propertyIndex === -1
+      ? [...block, propertyLine]
+      : block.map((line, i) => (i === propertyIndex ? propertyLine : line));
+  return [...lines.slice(0, stanza.startIndex), ...newBlock, ...lines.slice(stanza.endIndex + 1)];
+}
+
 function upsertIdentityFile(
   lines: string[],
   stanza: { startIndex: number; endIndex: number },
   keyPath: string,
 ): string[] {
-  const identityLine = `    IdentityFile ${keyPath}`;
-  const block = lines.slice(stanza.startIndex, stanza.endIndex + 1);
-  const identityIndex = block.findIndex((line) => line.trim().startsWith('IdentityFile '));
-  const newBlock =
-    identityIndex === -1
-      ? [...block, identityLine]
-      : block.map((line, i) => (i === identityIndex ? identityLine : line));
-  return [...lines.slice(0, stanza.startIndex), ...newBlock, ...lines.slice(stanza.endIndex + 1)];
+  return upsertStanzaProperty(lines, stanza, 'IdentityFile', keyPath);
 }
 
 function stanzaPropertyValue(block: string[], property: string): string | undefined {
@@ -603,5 +632,104 @@ export function status(
   return buildSetupResult({
     command,
     data: { alias, host, user, port, hasKey, managed: true },
+  });
+}
+
+/**
+ * Rewrites HostName/User/Port in place on an already-registered alias's managed stanza — the
+ * generated key (`IdentityFile`) and everything else in the stanza is left completely untouched,
+ * and `update` never regenerates or reinstalls a key; that stays a separate, explicit
+ * `keygen`/`install` step. At least one of `host`/`user`/`port` is required, enforced at the CLI
+ * layer (`runSshAliasAction`) as `INVALID_ARGS`, mirroring how `register` validates its own
+ * required flags. Refuses with `ALIAS_NOT_FOUND`/`PARSE_MISMATCH` the same way
+ * `keygen`/`remove`/`install` do.
+ */
+export function update(
+  alias: string,
+  options: UpdateOptions,
+  configPath: string = defaultSshConfigPath(),
+): SetupResult<UpdateData> {
+  const command = 'setup ssh-alias update';
+  const argsSummary: Record<string, string | boolean> = {};
+  if (options.host !== undefined) {
+    argsSummary.host = options.host;
+  }
+  if (options.user !== undefined) {
+    argsSummary.user = options.user;
+  }
+  if (options.port !== undefined) {
+    argsSummary.port = String(options.port);
+  }
+
+  if (!confirmGate({ mutating: true, yes: options.yes })) {
+    auditMutating({ alias, command, argsSummary, outcome: 'refused' });
+    return buildSetupResult({
+      command,
+      error: { code: 'CONFIRMATION_REQUIRED', message: 'update requires --yes' },
+    });
+  }
+
+  const lines = splitLines(readTextOrEmpty(configPath));
+  const found = findManagedStanza(lines, alias);
+  if (found.kind === 'not_found') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'ALIAS_NOT_FOUND',
+        message: `alias '${alias}' is not registered via setup ssh-alias register`,
+      },
+    });
+  }
+  if (found.kind === 'mismatch') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+
+  let newLines = lines;
+  let stanza: { startIndex: number; endIndex: number } = found;
+  const edits: Array<[string, string | undefined]> = [
+    ['HostName', options.host],
+    ['User', options.user],
+    ['Port', options.port === undefined ? undefined : String(options.port)],
+  ];
+  for (const [property, value] of edits) {
+    if (value === undefined) {
+      continue;
+    }
+    newLines = upsertStanzaProperty(newLines, stanza, property, value);
+    const refound = findManagedStanza(newLines, alias);
+    if (refound.kind === 'found') {
+      stanza = refound;
+    }
+  }
+  writeTextSecure(configPath, joinLines(newLines));
+
+  const block = newLines.slice(stanza.startIndex, stanza.endIndex + 1);
+  const host = stanzaPropertyValue(block, 'HostName');
+  const user = stanzaPropertyValue(block, 'User');
+  if (!host || !user) {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+  const portRaw = stanzaPropertyValue(block, 'Port');
+  const port = portRaw ? Number(portRaw) : DEFAULT_PORT;
+
+  auditMutating({ alias, command, argsSummary, outcome: 'ok' });
+  return buildSetupResult({
+    command,
+    data: { alias, host, user, port },
   });
 }

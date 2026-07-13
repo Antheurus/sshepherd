@@ -2,7 +2,7 @@ import { getFlag, hasFlag, parseArgv } from './cli.ts';
 import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts';
 import { scaffold } from './setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
-import { install, keygen, list, register, remove, status } from './setup-ssh-alias.ts';
+import { install, keygen, list, register, remove, status, update } from './setup-ssh-alias.ts';
 import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
 
 /**
@@ -23,7 +23,7 @@ export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
   {
     name: 'ssh-alias',
     summary: 'Register, generate a keypair for, install a key on, or remove a ~/.ssh/config alias.',
-    actions: ['register', 'keygen', 'remove', 'install', 'list', 'status'],
+    actions: ['register', 'keygen', 'remove', 'install', 'list', 'status', 'update'],
   },
   {
     name: 'db-target',
@@ -150,6 +150,27 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
     result = await install(alias, { yes });
   } else if (action === 'status') {
     result = status(alias);
+  } else if (action === 'update') {
+    const host = getFlag(flags, 'host');
+    const user = getFlag(flags, 'user');
+    const portRaw = getFlag(flags, 'port');
+    const port = portRaw === undefined ? undefined : Number(portRaw);
+    if (host === undefined && user === undefined && port === undefined) {
+      result = buildSetupResult({
+        command,
+        error: {
+          code: 'INVALID_ARGS',
+          message: `${command}: at least one of --host, --user, --port is required`,
+        },
+      });
+    } else if (port !== undefined && !Number.isInteger(port)) {
+      result = buildSetupResult({
+        command,
+        error: { code: 'INVALID_ARGS', message: `${command}: --port must be an integer` },
+      });
+    } else {
+      result = update(alias, { host, user, port, yes });
+    }
   } else {
     result = await remove(alias, { yes });
   }
