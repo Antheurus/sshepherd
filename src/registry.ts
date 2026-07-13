@@ -2168,4 +2168,11 @@ export async function executeOp(
 }
 
 // Re-exported for parser unit tests and future CLI --help rendering.
-export { parseHumanBytes };
+// Re-exported for setup config-allowlist scaffolding and its round-trip tests (mirrors
+// targets.ts's exported loadTargets/defaultTargetsPath — see setup-config-allowlist.ts).
+export {
+  assertConfigPathAllowed,
+  defaultConfigAllowlistPath,
+  loadConfigAllowlist,
+  parseHumanBytes,
+};

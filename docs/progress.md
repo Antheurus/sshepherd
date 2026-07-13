@@ -1,5 +1,44 @@
 # sshepherd Progress
 
+## Session — 2026-07-13 (cont) — v0.2.0 (setup command group)
+
+Added `setup`, a tenth, deliberately separate command group that writes sshepherd's own
+local config files instead of talking to a remote host — explicitly human-only, never
+invoked by an AI agent, and dispatched through its own `runSetup` shell in `src/setup.ts`
+rather than the registry-driven `OpSpec`/`executeOp` path the other 9 groups use (there's no
+remote command or `Envelope<T>` to build; `SetupResult<T>` is its own return shape). Four
+sub-groups: `ssh-alias` (register/keygen/remove a managed `~/.ssh/config` stanza, generating
+a passphrase-less ed25519 keypair), `db-target` (scaffold a `[<name>]` table into
+`targets.toml`), `config-allowlist` (scaffold/union a `[<alias>]` paths table into
+`config-allowlist.toml`), and `deploy-recipe` (scaffold a minimal recipe TOML skeleton).
+Each writer refuses loudly rather than guessing — `ALIAS_EXISTS`/`TARGET_EXISTS`/
+`RECIPE_EXISTS` on a collision, `PARSE_MISMATCH` when a marker doesn't match the exact shape
+`register` itself writes, `CONFIRMATION_REQUIRED` without `--yes` — and every mutating action
+goes through the same `confirmGate`/`auditMutating` pair the other 9 groups use. Built across
+6 phases plus a docs pass, then closed by a cross-phase audit that found and fixed 6 issues:
+(1) CRITICAL — none of the 3 TOML scaffolders escaped `"`/`\` in interpolated values, so a
+value like `my"alias` wrote a corrupt file that crashed the *next* `db list`/`deploy run`
+with a raw, unhandled `Bun.TOML.parse` stack trace; fixed with a new `src/toml-quote.ts`
+(`tomlQuote`), hand-rolled rather than `JSON.stringify` because `JSON.stringify`'s `\t`
+escape round-trips incorrectly through `Bun.TOML.parse` (a real Bun parser bug — it comes
+back as `\f`), so `tomlQuote` leaves tab literal (valid per the TOML spec) and only escapes
+`"`, `\`, and the other control characters; (2) `splitLines`/`joinLines` were duplicated
+byte-for-byte between `setup-ssh-alias.ts` and `setup-config-allowlist.ts`, extracted into
+`setup-file-io.ts` alongside the other shared write primitives; (3) `runStubAction` in
+`setup.ts` was dead code once all 4 sub-groups left stub status, deleted along with its
+now-stale doc comments; (4) no test exercised the full cross-sub-command sequence a real
+onboarding session runs, added `src/__tests__/setup-integration.test.ts` driving
+register→keygen→db-target→config-allowlist→deploy-recipe→remove against one shared temp
+environment and asserting later steps see the same alias earlier steps wrote; (5) this
+progress log entry itself, previously missing across all 8 commits of the build; (6) `setup
+ssh-alias` had no path-override mechanism unlike the other 3 sub-commands, added
+`SSHEPHERD_SSH_CONFIG_PATH` (purely additive — the real default `~/.ssh/config` is unchanged
+when unset), consistent with `SSHEPHERD_TARGETS_PATH`/`SSHEPHERD_CONFIG_ALLOWLIST_PATH`/
+`SSHEPHERD_RECIPE_PATH`. `bun test` 221/221, `tsc --noEmit` and `biome check` both clean.
+Version bumped to v0.2.0 (`package.json`, `src/cli.ts`'s `VERSION` const).
+
+---
+
 ## Session — 2026-07-13 — v0.1.0 (sshepherd v1 complete)
 
 sshepherd's v1 build finished across 7 orchestrated phases. Phase 1 scaffolded the Bun/TS/

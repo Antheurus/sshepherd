@@ -1,5 +1,18 @@
 # sshepherd Changelog
 
+## v0.2.0 — `setup`: onboard a new server without hand-editing config files
+
+- New: `sshepherd setup`, a separate command group you run yourself in your own terminal —
+  never something an agent should type on your behalf — for writing sshepherd's own local
+  config files instead of hand-authoring them. `setup ssh-alias register/keygen/remove`
+  adds, generates a dedicated keypair for, or removes an alias in `~/.ssh/config`; `setup
+  db-target` scaffolds a new entry in `targets.toml`; `setup config-allowlist` scaffolds the
+  paths an alias is allowed to read/write via `config get`/`config put`; and `setup
+  deploy-recipe` scaffolds a starter recipe TOML you fill in with your real deploy steps.
+  Every action still requires `--yes` and writes an audit line, same as the other 9 groups,
+  and none of it opens an SSH connection or touches a remote server — it only ever writes
+  local files on the machine `sshepherd` runs on.
+
 ## v0.1.0 — sshepherd v1: safe SSH server ops from Claude Code
 
 - New: `sshepherd`, a single CLI you (or an agent driving Claude Code) can use to check on

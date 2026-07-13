@@ -4,11 +4,12 @@ import { readFileSync } from 'node:fs';
 import { printError, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
 import { type ExecuteDeps, executeOp, getOp, listOps } from './registry.ts';
+import { runSetup } from './setup.ts';
 import { buildDbOpContext } from './targets.ts';
 import { closeMaster } from './transport.ts';
 import type { ArgSpec, OpContext, OpSpec } from './types.ts';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 /** Flags declared as booleans across the registry's ArgSpecs (`ArgSpec` carries no type
  *  field, so this is the CLI's own small lookup — every other flag is a string value). */
@@ -38,10 +39,12 @@ const GLOBAL_FLAGS = [
 class UsageError extends Error {}
 
 // -- argv parsing (mirrors anywrite's src/cli.ts parseFlags) --------------------------------
+// Exported so `setup.ts` reuses the same parsing instead of reinventing it for its own,
+// parallel dispatch path.
 
-type FlagMap = Map<string, string[]>;
+export type FlagMap = Map<string, string[]>;
 
-function parseArgv(tokens: string[]): { positionals: string[]; flags: FlagMap } {
+export function parseArgv(tokens: string[]): { positionals: string[]; flags: FlagMap } {
   const positionals: string[] = [];
   const flags: FlagMap = new Map();
   for (let index = 0; index < tokens.length; index++) {
@@ -70,11 +73,11 @@ function parseArgv(tokens: string[]): { positionals: string[]; flags: FlagMap } 
   return { positionals, flags };
 }
 
-function getFlag(flags: FlagMap, name: string): string | undefined {
+export function getFlag(flags: FlagMap, name: string): string | undefined {
   return flags.get(name)?.[0];
 }
 
-function hasFlag(flags: FlagMap, name: string): boolean {
+export function hasFlag(flags: FlagMap, name: string): boolean {
   return flags.has(name);
 }
 
@@ -201,6 +204,7 @@ function formatTopHelp(): string {
     '',
     'Groups:',
     ...GROUPS.map((group) => `  ${group}`),
+    '  setup             human-only — writes local config, see `sshepherd setup --help`',
     '',
     'Run `sshepherd <group> --help` to see actions + args for a group.',
     'Run `sshepherd <group> <action> --help` to see one action.',
@@ -233,6 +237,11 @@ async function run(argv: string[]): Promise<void> {
   }
   if (first === '--version' || first === '-v') {
     process.stdout.write(`sshepherd ${VERSION}\n`);
+    return;
+  }
+
+  if (first === 'setup') {
+    await runSetup(rest);
     return;
   }
 
