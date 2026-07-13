@@ -331,10 +331,146 @@ stateDiagram-v2
 
 (Append-only. Executor subagents add one entry after completing each phase.)
 
+### Phase 1 — DONE (2026-07-13)
+
+Commit `5969983` — `feat(setup): add ssh-alias list + status`. Added `list()`/`status()` to
+`src/setup-ssh-alias.ts` (new `MANAGED_MARKER_PREFIX` constant shared by the write path
+(`markerLine()`) and the new read-side scan, so they can't drift apart), wired both into
+`src/setup.ts`'s `SETUP_SUB_GROUPS`/dispatch chain, added 10 tests to
+`src/__tests__/setup-ssh-alias.test.ts`. `bun test`: 248 pass / 2 fail (the 2 failures are the
+expected, plan-documented `skill-doc.test.ts` drift assertions — Phase 5's scope, not a
+regression; baseline re-verified at 240/0 via a disposable worktree). `tsc --noEmit` and
+`bun run lint` both clean. Audited independently (re-ran tests from a clean worktree, read the
+implementation, live-drove the real CLI against a throwaway ssh config) — verdict DONE, zero
+concerns, zero scope creep. `git diff` against `src/registry.ts`/`src/transport.ts` confirmed
+empty, per the standing `setup ⊥ registry/transport` import boundary.
+
+### Phase 2 — DONE (2026-07-13)
+
+Commit `fe39784` — `feat(setup): add ssh-alias update, generalize upsertStanzaProperty`.
+Generalized `upsertIdentityFile` into `upsertStanzaProperty(lines, stanza, property, value)`
+(now a 1-line wrapper, zero behavior change for `keygen`); added `update(alias, {host?, user?,
+port?, yes})` mirroring `register`'s mutating-action skeleton — `confirmGate`/`--yes` required,
+`INVALID_ARGS` when no fields given or `--port` isn't an integer, `findManagedStanza` reused
+verbatim for `ALIAS_NOT_FOUND`/`PARSE_MISMATCH`. `argsSummary` matches `register`'s real
+precedent (`{host, user, port: String(port), overwrite}` — real values, not booleans, per the
+plan's own footnote resolving in favor of the existing pattern over the draft's stale
+boolean-only assumption), only including keys for fields actually provided. `update` never
+touches `IdentityFile`/key files — verified both by unit test and a live CLI drive that keygen'd
+a real key, updated `--host`, and confirmed the key file's md5 was unchanged. `bun test`: 255
+pass / 2 fail (same 2 expected `skill-doc.test.ts` drift failures, Phase 5's scope), `tsc`/lint
+clean. Audited independently with a full live CLI drive (register→keygen→update sequence
+against a throwaway ssh config, including the port-append-on-first-update edge case and an
+audit.jsonl inspection confirming no raw host/user/port leak into the audit log) — verdict DONE,
+zero concerns.
+
+### Phase 3 — DONE (2026-07-13)
+
+Commit `7832d1d` — `feat(setup): install short-circuits on already-trusted + Tailscale-fronted
+targets`. Added `peekTailscaleBanner` (raw `Bun.connect` socket peek, reads one `\r\n`-terminated
+line, checks case-sensitive `Tailscale` substring, 3s fail-soft timeout, never invokes
+ssh/sshpass) and `probeAlreadyTrusted` (mirrors `defaultSpawnInstall`'s spawn+timeout shape,
+`BatchMode=yes`, zero credentials) to `setup-ssh-alias-install-server.ts`; `install()` in
+`setup-ssh-alias.ts` now runs the Tailscale peek then the reachability probe before ever calling
+`which('sshpass')`/opening the server. Added `TAILSCALE_SSH_DETECTED` to `SetupErrorCode`.
+`bun test`: 258 pass / 2 fail (same 2 expected skill-doc failures); install-server suite alone
+22/22 green (19 pre-existing unmodified + 3 new). Audited independently WITH a live drive against
+real targets: a raw-socket probe confirmed the real wire banner is exactly `SSH-2.0-Tailscale\r\n`
+against `otomasiaja-server2` (100.103.182.84); a live CLI run against that same box returned
+`TAILSCALE_SSH_DETECTED` in 0.14s (the actual bug this phase exists to fix, reproduced and fixed
+live, not just unit-tested); a live CLI run against `dev-server`'s real host returned
+`already_trusted` in 1.03s with zero server opened. Verdict DONE, zero blocking concerns — one
+non-blocking note that a code comment attributes the timing benefit to `ConnectTimeout` when the
+real bound is `probeAlreadyTrusted`'s own kill-timer (cosmetic, not spec-blocking, left as-is).
+Throwaway test aliases/scratch config fully cleaned up; real `~/.ssh/config` confirmed untouched.
+
+### Phase 4 — DONE (2026-07-13)
+
+Commit `6fbffd4` — `feat(setup): install gains a pasted-private-key credential method`. Added
+`INVALID_PRIVATE_KEY`/`PASSPHRASE_PROTECTED_KEY_UNSUPPORTED` to `SetupErrorCode`;
+`defaultSpawnInstallWithKey` (CRLF-normalize → `mkdtempSync` 0700 dir rooted at
+`realpathSync(tmpdir())` joined properly → `openSync(path,'wx',0o600)` at creation, no
+chmod-after-write → `ssh-keygen -y -f <path> -P ''` preflight distinguishing passphrase-protected
+from invalid via stderr content → `ssh -i <path>` spawn with only the path in argv → `finally`
+rmSync cleanup on every exit path); form gains a pure-CSS radio toggle + textarea, zero external
+stylesheet/script. Two minor, reasonable deviations from the spec's literal prose (a `join()` fix
+for a real path-construction bug in the spec's literal string-concat form; `defaultSpawnInstallWithKey`
+naming to match the existing `defaultSpawnInstall` convention while the `InstallServerDeps` field
+itself matches spec exactly). `bun test`: 274 pass / 2 fail (same 2 expected skill-doc failures);
+install-server suite 38/38 green (16 new). Audited with a FULLY INDEPENDENT from-scratch secret-lifecycle
+trace (per the plan's Cross-phase guidelines) — the auditor re-derived the entire pasted-key
+lifecycle cold, independently re-ran real `ssh-keygen` against real generated fixture keys
+(unencrypted, passphrase-protected ed25519+RSA, garbage, CRLF-corrupted) to verify the
+passphrase-vs-invalid stderr distinction, wrote a standalone script to `statSync` the temp dir/file
+mid-flight confirming exact 0700/0600 modes before cleanup, and traced every exception path for a
+low-probability leak (e.g. a stack trace including file content) — found zero leak paths. Verdict:
+no issues found, no fix loop needed. Real end-to-end `ssh -i` against a live target correctly
+deferred to the orchestration-level live-verification step (target not yet chosen).
+
+### Phase 5 — DONE (2026-07-13)
+
+Commit `9374a0c` — `docs(setup): document list/status/update and install's smart pre-checks`.
+`SKILL.md`/`README.md` updated to the final 10-action set (7 `ssh-alias` + 3 scaffolders): the
+zero-knowledge model section now states `status`'s scoped host/user/port-echo exception precisely
+(not just in the Quick-reference block), Gotcha 9 rewritten to explain install's pre-check order
+(Tailscale peek before already-trusted probe, with the reasoning) and the password-or-pasted-key
+credential choice. New `src/__tests__/setup-ssh-alias-import-boundary.test.ts` grep-asserts zero
+`registry.ts`/`transport.ts` imports across every `setup-ssh-alias*.ts` file — the `setup ⊥
+registry/transport` convention is now an enforced test, not just a followed one.
+`skill-doc.test.ts` deliberately left unmodified (its assertions derive expected counts
+programmatically from `SETUP_SUB_GROUPS`, so fixing `SKILL.md` alone made them pass). `bun test`:
+**278 pass / 0 fail — fully green for the first time this orchestration** (Phases 1-4 all carried
+the 2 expected skill-doc-drift failures this phase was responsible for closing). `tsc`/lint clean.
+Audited independently: re-ran both guardrail tests' live-mutation-experiments from scratch (added
+a real `registry.ts` import, confirmed the boundary test fails then reverts clean; mutated
+SKILL.md's action count, confirmed the drift test fails then reverts clean), cross-checked every
+doc claim against the real `install()`/`SETUP_SUB_GROUPS` code, confirmed zero logic-file changes.
+Verdict DONE, zero concerns. This closes the final phase — ready for `od-finish`'s cross-phase
+audit.
+
 ## Review findings
 
-(Filled by reviewer subagent at step 4.)
+Cross-phase audit (Opus) reviewed the full `dd7bf1b..9374a0c` diff plus ran a full regression
+pass (`bun test` 278/0, `tsc`/lint clean, a live end-to-end CLI smoke sequence, and a live
+pre-check fall-through drive against an unroutable host confirming no hang). Verdict:
+NEEDS-DISCUSSION with one Important finding and one Minor finding, no Critical findings. Also
+performed a THIRD independent, cold re-trace of Phase 4's pasted-private-key secret lifecycle (per
+this plan's own Cross-phase guidelines) — independently confirmed zero leak paths, matching the
+two prior independent traces.
+
+**Important (fixed):** the top-level `which('sshpass') === null` gate in `runInstallServer`
+rejected the entire browser form — including the Phase 4 key-paste method, which uses `ssh -i` and
+never touches sshpass at all. On a host without sshpass installed, the key-paste method was
+unreachable even though it would work, defeating the point of adding a second, sshpass-independent
+credential method. Fixed in commit `db18ea6`: the sshpass check moved into the password-only
+branch of the POST handler; the key-paste branch is no longer gated by sshpass presence.
+
+**Minor (fixed):** a key-method network failure/timeout was rendered with the password path's
+"(likely a wrong password)" hint, which is misleading when there's no password involved. Fixed in
+the same commit: the key path now returns its own `key_ssh_failed` outcome kind, rendered with a
+"check the pasted key and try again" message instead.
+
+Fix verified independently by the orchestrator (not the cross-phase auditor, per od-finish's
+one-shot discipline): `bun test` 280 pass / 0 fail (2 new tests covering the fix), `tsc`/lint
+clean, diff spot-checked directly — confirms the gate genuinely moved and the outcome kind
+genuinely split. Final HEAD: `db18ea6`.
 
 ## Final status
 
-(One paragraph at the end. What was built, how it aligns with plan, any notable learnings.)
+Built as planned: `setup ssh-alias` gained `list`/`status`/`update` (Phases 1-2), and `install`
+became genuinely smart — an already-trusted short-circuit and a Tailscale-SSH-fronted diagnosis
+both run before ever asking a human for a credential (Phase 3), and when a credential is needed,
+a human may supply either a password or paste an existing private key, with the same "agent never
+sees the secret" guarantee traced and independently re-verified three times for the new key-paste
+path (Phase 4). Docs and one guardrail test closed out the build (Phase 5). One cross-phase
+integration gap was found and fixed post-audit: the sshpass presence check was incorrectly gating
+the whole form instead of just the password method, which would have made the new key-paste
+credential method unreachable on any host without sshpass installed — an ironic bug given the
+feature's whole point was reducing dependence on the password/sshpass path. All 5 phases plus the
+fix are committed on `feat/setup-ssh-alias-lifecycle` (HEAD `db18ea6`), full test suite green
+(280/0), `tsc`/lint clean throughout. Phase 3's Tailscale detection and Phase 4's secret handling
+were both live-verified against real infrastructure during per-phase audits (not just unit tests)
+— notably reproducing and fixing, live, the exact hang this whole plan was motivated by. Remaining
+work, deliberately out of this orchestration's scope: a real end-to-end pasted-key install against
+a live target (needs a live-verification target decision — should not be one of the user's 3 real
+production aliases without asking first) and opening a PR to merge this branch to `main`.
