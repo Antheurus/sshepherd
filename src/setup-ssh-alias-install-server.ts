@@ -5,6 +5,15 @@ export const DEFAULT_INSTALL_TIMEOUT_MS = 3 * 60 * 1_000;
 
 const INSTALL_CONNECT_TIMEOUT_S = 10;
 
+/** How long `peekTailscaleBanner` waits for the first `\r\n`-terminated line before giving
+ *  up and failing soft (treated as "not Tailscale, proceed") — see plan.md Phase 3. */
+const BANNER_PEEK_TIMEOUT_MS = 3_000;
+
+/** `ConnectTimeout` for `probeAlreadyTrusted`'s non-interactive `ssh -o BatchMode=yes` probe —
+ *  short on purpose so a target that isn't already trusted fails fast instead of stalling
+ *  the browser form behind it. */
+const PROBE_CONNECT_TIMEOUT_S = 8;
+
 /** Connection target `install` needs — read from the alias's managed ssh-config stanza by
  *  the caller (`setup-ssh-alias.ts`'s `install()`), never re-derived here. */
 export interface InstallTarget {
@@ -17,6 +26,8 @@ export interface InstallTarget {
 
 export type InstallOutcome =
   | { kind: 'installed' }
+  | { kind: 'already_trusted' }
+  | { kind: 'tailscale_detected' }
   | { kind: 'timed_out' }
   | { kind: 'ssh_failed'; exitCode: number }
   | { kind: 'sshpass_not_found' };
@@ -36,6 +47,17 @@ export type SpawnInstallFn = (
   target: InstallTarget,
 ) => Promise<SpawnInstallOutcome>;
 
+/** Injected in tests with a fake implementation so `install`'s Tailscale pre-check never
+ *  opens a real socket — same seam style as `SpawnInstallFn`. Resolves `true` when the
+ *  target's banner line matches Tailscale, `false` for everything else (including a peek
+ *  that timed out or errored — the check fails soft). */
+export type PeekBannerFn = (target: InstallTarget) => Promise<boolean>;
+
+/** Injected in tests with a fake implementation so `install`'s already-trusted pre-check
+ *  never spawns a real `ssh` process — same seam style as `SpawnInstallFn`. Resolves `true`
+ *  when the target already accepts a key/agent-based connection with no password supplied. */
+export type ProbeReachableFn = (target: InstallTarget) => Promise<boolean>;
+
 export interface ServeLikeOptions {
   hostname: string;
   port: number;
@@ -53,6 +75,8 @@ export type ServeLikeFn = (options: ServeLikeOptions) => ServeHandle;
 
 export interface InstallServerDeps {
   which: (cmd: string) => string | null;
+  peekBanner: PeekBannerFn;
+  probeReachable: ProbeReachableFn;
   serve: ServeLikeFn;
   spawnInstall: SpawnInstallFn;
   announceUrl: (url: string) => void;
@@ -123,6 +147,109 @@ async function defaultSpawnInstall(
   return { code, timedOut };
 }
 
+/**
+ * Opens a raw TCP socket to `target.host:target.port` and reads only the first
+ * `\r\n`-terminated line (the SSH protocol identification banner per RFC 4253), looking for
+ * the (undocumented, empirically observed — see research.md's captured `ssh -v` transcript)
+ * `Tailscale` substring. Never invokes `ssh`/`sshpass` — a raw socket peek is the only way to
+ * see this banner without triggering Tailscale SSH's own auth-method interception, which is
+ * what makes a password/key probe hang instead of failing fast. Fails soft (resolves `false`)
+ * on any timeout, connect error, or unexpected close, since an ordinary sshd that isn't
+ * Tailscale-fronted must never be misreported as one. Not exercised by `bun test` against a
+ * real socket (see plan.md's test-seam note); reserved for the manual/live verification step.
+ */
+function peekTailscaleBanner(target: InstallTarget): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let socket: Bun.Socket<undefined> | undefined;
+    let buffer = '';
+
+    const finish = (detected: boolean): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      socket?.end();
+      resolve(detected);
+    };
+
+    const timer = setTimeout(() => finish(false), BANNER_PEEK_TIMEOUT_MS);
+
+    Bun.connect({
+      hostname: target.host,
+      port: target.port,
+      socket: {
+        data(_socket, data) {
+          buffer += data.toString('utf8');
+          const lineEnd = buffer.indexOf('\r\n');
+          if (lineEnd !== -1) {
+            finish(buffer.slice(0, lineEnd).includes('Tailscale'));
+          }
+        },
+        error: () => finish(false),
+        close: () => finish(false),
+        connectError: () => finish(false),
+      },
+    })
+      .then((connected) => {
+        if (settled) {
+          // The timeout/error path already resolved while the connect was in flight —
+          // don't leave a socket dangling open past this function's own lifetime.
+          connected.end();
+          return;
+        }
+        socket = connected;
+      })
+      .catch(() => finish(false));
+  });
+}
+
+/**
+ * Non-interactive reachability probe: `ssh -o BatchMode=yes -o ConnectTimeout=<n> -p <port>
+ * <user>@<host> -- echo sshepherd-ok` with no password or key ever written to the child's
+ * stdin (`stdin: 'ignore'`) — proves whether the target already trusts whatever identity/agent
+ * the local `ssh` picks up on its own, with zero new credentials supplied. Mirrors
+ * `defaultSpawnInstall`'s spawn+timeout+cleanup shape. `BatchMode=yes` makes a missing
+ * key/agent fail immediately instead of hanging on a password prompt with no TTY to answer it.
+ * Not exercised by `bun test` against a real `ssh` process (see plan.md's test-seam note);
+ * reserved for the manual/live verification step.
+ */
+async function probeAlreadyTrusted(target: InstallTarget): Promise<boolean> {
+  const args = [
+    'ssh',
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    `ConnectTimeout=${PROBE_CONNECT_TIMEOUT_S}`,
+    '-p',
+    String(target.port),
+    `${target.user}@${target.host}`,
+    '--',
+    'echo sshepherd-ok',
+  ];
+
+  const proc = Bun.spawn(args, {
+    stdout: 'ignore',
+    stderr: 'ignore',
+    stdin: 'ignore',
+  });
+
+  let timedOut = false;
+  const timer = setTimeout(
+    () => {
+      timedOut = true;
+      proc.kill();
+    },
+    (PROBE_CONNECT_TIMEOUT_S + 5) * 1_000,
+  );
+
+  const code = await proc.exited;
+  clearTimeout(timer);
+
+  return !timedOut && code === 0;
+}
+
 function defaultAnnounceUrl(url: string): void {
   process.stdout.write(`Open this URL in your browser to install the key: ${url}\n`);
   try {
@@ -146,6 +273,8 @@ function defaultServe(options: ServeLikeOptions): ServeHandle {
 export function defaultInstallServerDeps(): InstallServerDeps {
   return {
     which: (cmd) => Bun.which(cmd),
+    peekBanner: peekTailscaleBanner,
+    probeReachable: probeAlreadyTrusted,
     serve: defaultServe,
     spawnInstall: defaultSpawnInstall,
     announceUrl: defaultAnnounceUrl,

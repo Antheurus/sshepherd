@@ -11,6 +11,8 @@ import {
   writeTextSecure,
 } from './setup-file-io.ts';
 import {
+  defaultInstallServerDeps,
+  type InstallOutcome,
   type InstallServerDeps,
   type InstallTarget,
   runInstallServer,
@@ -63,6 +65,10 @@ export interface InstallData {
   host: string;
   user: string;
   port: number;
+  /** Only ever present when the already-trusted pre-check short-circuited the whole
+   *  password-form flow — omitted entirely (not just `undefined`) on a normal password
+   *  install, so the existing success shape is unchanged for that path. */
+  method?: 'already_trusted';
 }
 
 export interface ListData {
@@ -460,6 +466,13 @@ export async function remove(
  * `runInstallServer`'s typed `InstallOutcome` crosses back over. Refuses with
  * `ALIAS_NOT_FOUND`/`PARSE_MISMATCH` the same way `keygen`/`remove` do, and with
  * `INSTALL_FAILED` when `keygen` hasn't been run yet (no public key to install).
+ *
+ * Before ever opening the browser form, two cheap pre-checks run in order: first a raw-socket
+ * Tailscale banner peek (fast — a password/key probe against a Tailscale-SSH-fronted target
+ * hangs instead of failing, so this must run first to give an accurate diagnosis instead of
+ * eating the second check's own timeout), then a non-interactive already-trusted probe with
+ * zero new credentials. Either short-circuit skips `runInstallServer` entirely — no server
+ * opened, no password ever requested.
  */
 export async function install(
   alias: string,
@@ -514,8 +527,40 @@ export async function install(
   }
 
   const target: InstallTarget = { alias, ...connection };
-  const outcome = await runInstallServer(target, serverDeps);
+  const deps: InstallServerDeps = { ...defaultInstallServerDeps(), ...serverDeps };
 
+  let outcome: InstallOutcome;
+  if (await deps.peekBanner(target)) {
+    outcome = { kind: 'tailscale_detected' };
+  } else if (await deps.probeReachable(target)) {
+    outcome = { kind: 'already_trusted' };
+  } else {
+    outcome = await runInstallServer(target, serverDeps);
+  }
+
+  if (outcome.kind === 'tailscale_detected') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'TAILSCALE_SSH_DETECTED',
+        message: `alias '${alias}' is fronted by Tailscale SSH, which does not use authorized_keys — install cannot place a key here; the target must already be authorized via Tailscale's own ACL/identity, or reached over a non-Tailscale network path`,
+      },
+    });
+  }
+  if (outcome.kind === 'already_trusted') {
+    auditMutating({ alias, command, argsSummary, outcome: 'ok' });
+    return buildSetupResult({
+      command,
+      data: {
+        alias,
+        host: connection.host,
+        user: connection.user,
+        port: connection.port,
+        method: 'already_trusted',
+      },
+    });
+  }
   if (outcome.kind === 'sshpass_not_found') {
     auditMutating({ alias, command, argsSummary, outcome: 'error' });
     return buildSetupResult({

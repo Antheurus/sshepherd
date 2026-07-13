@@ -284,6 +284,10 @@ describe('install (setup-ssh-alias.ts)', () => {
   function fakeInstallDeps(overrides: Partial<InstallServerDeps> = {}): Partial<InstallServerDeps> {
     return {
       which: () => '/opt/homebrew/bin/sshpass',
+      // Neither pre-check fires by default, so the existing tests below keep exercising
+      // the exact password-form flow they were written against.
+      peekBanner: async () => false,
+      probeReachable: async () => false,
       serve: () => ({ port: 1, stop: () => {} }),
       announceUrl: () => {},
       randomToken: () => 'tok',
@@ -402,4 +406,82 @@ describe('install (setup-ssh-alias.ts)', () => {
     expect(result.data).toEqual({ alias: 'myserver', host: '9.9.9.9', user: 'deploy', port: 2222 });
     expect(JSON.stringify(result)).not.toMatch(/password/i);
   }, 15_000);
+
+  test('fails with TAILSCALE_SSH_DETECTED when the banner peek detects Tailscale, no server opened', async () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    await keygen('myserver', { yes: true }, configPath);
+
+    let serveCalled = false;
+    const result = await install(
+      'myserver',
+      { yes: true },
+      configPath,
+      fakeInstallDeps({
+        peekBanner: async () => true,
+        serve: () => {
+          serveCalled = true;
+          return { port: 1, stop: () => {} };
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('TAILSCALE_SSH_DETECTED');
+    expect(result.error?.message).toContain('myserver');
+    expect(serveCalled).toBe(false);
+  });
+
+  test('succeeds immediately (already_trusted) when the reachability probe succeeds, no server opened', async () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '9.9.9.9', user: 'deploy', port: 2222, yes: true }, configPath);
+    await keygen('myserver', { yes: true }, configPath);
+
+    let serveCalled = false;
+    const result = await install(
+      'myserver',
+      { yes: true },
+      configPath,
+      fakeInstallDeps({
+        probeReachable: async () => true,
+        serve: () => {
+          serveCalled = true;
+          return { port: 1, stop: () => {} };
+        },
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({
+      alias: 'myserver',
+      host: '9.9.9.9',
+      user: 'deploy',
+      port: 2222,
+      method: 'already_trusted',
+    });
+    expect(serveCalled).toBe(false);
+  });
+
+  test('the Tailscale check runs before the already-trusted probe, no server opened either way', async () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    await keygen('myserver', { yes: true }, configPath);
+
+    let probeReachableCalled = false;
+    const result = await install(
+      'myserver',
+      { yes: true },
+      configPath,
+      fakeInstallDeps({
+        peekBanner: async () => true,
+        probeReachable: async () => {
+          probeReachableCalled = true;
+          return true;
+        },
+      }),
+    );
+
+    expect(result.error?.code).toBe('TAILSCALE_SSH_DETECTED');
+    expect(probeReachableCalled).toBe(false);
+  });
 });

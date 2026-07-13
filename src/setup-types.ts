@@ -34,6 +34,9 @@ export interface SetupErrorInfo {
  * `SSHPASS_NOT_FOUND`/`INSTALL_TIMED_OUT`/`INSTALL_FAILED` are `setup ssh-alias install`'s
  * codes (agent-invocable install phase) — `INSTALL_FAILED` also covers the precondition
  * failure where `install` is run before `keygen` (no public key to install).
+ * `TAILSCALE_SSH_DETECTED` is also `install`'s code — its pre-check found the target
+ * fronted by Tailscale SSH, which never uses `authorized_keys`, before ever opening the
+ * browser form.
  */
 export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
@@ -49,7 +52,8 @@ export type SetupErrorCode =
   | 'RECIPE_EXISTS'
   | 'SSHPASS_NOT_FOUND'
   | 'INSTALL_TIMED_OUT'
-  | 'INSTALL_FAILED';
+  | 'INSTALL_FAILED'
+  | 'TAILSCALE_SSH_DETECTED';
 
 export interface BuildSetupResultInput<T> {
   command: string;
