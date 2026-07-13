@@ -10,6 +10,11 @@ import {
   splitLines,
   writeTextSecure,
 } from './setup-file-io.ts';
+import {
+  type InstallServerDeps,
+  type InstallTarget,
+  runInstallServer,
+} from './setup-ssh-alias-install-server.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 
 const DEFAULT_PORT = 22;
@@ -47,6 +52,17 @@ export interface RemoveData {
   alias: string;
   configRemoved: boolean;
   keyRemoved: boolean;
+}
+
+export interface InstallOptions {
+  yes: boolean;
+}
+
+export interface InstallData {
+  alias: string;
+  host: string;
+  user: string;
+  port: number;
 }
 
 /** Overridable via `SSHEPHERD_SSH_CONFIG_PATH` (or an explicit path param) for tests — mirrors
@@ -145,6 +161,41 @@ function upsertIdentityFile(
       ? [...block, identityLine]
       : block.map((line, i) => (i === identityIndex ? identityLine : line));
   return [...lines.slice(0, stanza.startIndex), ...newBlock, ...lines.slice(stanza.endIndex + 1)];
+}
+
+function stanzaPropertyValue(block: string[], property: string): string | undefined {
+  const line = block.find((entry) => entry.trim().startsWith(`${property} `));
+  return line
+    ?.trim()
+    .slice(property.length + 1)
+    .trim();
+}
+
+/** Reads the `install`-relevant fields (`HostName`/`User`/`Port`/`IdentityFile`) straight out
+ *  of the already-located managed stanza — the same block `upsertIdentityFile` rewrites —
+ *  rather than re-parsing the whole file with a second pass. Returns `undefined` when the
+ *  stanza has no `IdentityFile` yet (i.e. `keygen` hasn't run), since `install` has nothing
+ *  to install in that case. */
+function stanzaInstallTarget(
+  lines: string[],
+  stanza: { startIndex: number; endIndex: number },
+): { host: string; user: string; port: number; publicKeyPath: string } | undefined {
+  const block = lines.slice(stanza.startIndex, stanza.endIndex + 1);
+  const host = stanzaPropertyValue(block, 'HostName');
+  const user = stanzaPropertyValue(block, 'User');
+  const portRaw = stanzaPropertyValue(block, 'Port');
+  const identityFile = stanzaPropertyValue(block, 'IdentityFile');
+
+  if (!host || !user || !identityFile) {
+    return undefined;
+  }
+
+  return {
+    host,
+    user,
+    port: portRaw ? Number(portRaw) : DEFAULT_PORT,
+    publicKeyPath: `${identityFile}.pub`,
+  };
 }
 
 /**
@@ -353,4 +404,107 @@ export async function remove(
 
   auditMutating({ alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({ command, data: { alias, configRemoved: true, keyRemoved } });
+}
+
+/**
+ * Installs the alias's already-generated public key onto the real remote via a one-shot
+ * local browser form (`setup-ssh-alias-install-server.ts`): the CLI/agent triggers and
+ * waits, a human types the password into the form, and the password never reaches this
+ * function, the CLI's stdout, the audit log, or the returned `SetupResult` — only
+ * `runInstallServer`'s typed `InstallOutcome` crosses back over. Refuses with
+ * `ALIAS_NOT_FOUND`/`PARSE_MISMATCH` the same way `keygen`/`remove` do, and with
+ * `INSTALL_FAILED` when `keygen` hasn't been run yet (no public key to install).
+ */
+export async function install(
+  alias: string,
+  options: InstallOptions,
+  configPath: string = defaultSshConfigPath(),
+  serverDeps: Partial<InstallServerDeps> = {},
+): Promise<SetupResult<InstallData>> {
+  const command = 'setup ssh-alias install';
+  const argsSummary = {};
+
+  if (!confirmGate({ mutating: true, yes: options.yes })) {
+    auditMutating({ alias, command, argsSummary, outcome: 'refused' });
+    return buildSetupResult({
+      command,
+      error: { code: 'CONFIRMATION_REQUIRED', message: 'install requires --yes' },
+    });
+  }
+
+  const lines = splitLines(readTextOrEmpty(configPath));
+  const found = findManagedStanza(lines, alias);
+  if (found.kind === 'not_found') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'ALIAS_NOT_FOUND',
+        message: `alias '${alias}' is not registered via setup ssh-alias register`,
+      },
+    });
+  }
+  if (found.kind === 'mismatch') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+
+  const connection = stanzaInstallTarget(lines, found);
+  if (!connection) {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INSTALL_FAILED',
+        message: `alias '${alias}' has no generated key yet; run 'setup ssh-alias keygen ${alias}' first`,
+      },
+    });
+  }
+
+  const target: InstallTarget = { alias, ...connection };
+  const outcome = await runInstallServer(target, serverDeps);
+
+  if (outcome.kind === 'sshpass_not_found') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'SSHPASS_NOT_FOUND',
+        message:
+          "sshpass is not installed; install it (macOS: 'brew install sshpass', Debian/Ubuntu: 'apt install sshpass') and retry",
+      },
+    });
+  }
+  if (outcome.kind === 'timed_out') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INSTALL_TIMED_OUT',
+        message: `no password was submitted for alias '${alias}' before the form timed out`,
+      },
+    });
+  }
+  if (outcome.kind === 'ssh_failed') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INSTALL_FAILED',
+        message: `ssh exited with code ${outcome.exitCode} while installing the key for alias '${alias}' (likely a wrong password)`,
+      },
+    });
+  }
+
+  auditMutating({ alias, command, argsSummary, outcome: 'ok' });
+  return buildSetupResult({
+    command,
+    data: { alias, host: connection.host, user: connection.user, port: connection.port },
+  });
 }

@@ -31,6 +31,9 @@ export interface SetupErrorInfo {
  * `PARSE_MISMATCH`/`KEYGEN_FAILED` are `setup ssh-alias`'s codes (Phase 2).
  * `VALIDATION_ERROR`/`TARGET_EXISTS` are `setup db-target`'s codes (Phase 3).
  * `RECIPE_EXISTS` is `setup deploy-recipe`'s code (Phase 5), mirroring `TARGET_EXISTS`.
+ * `SSHPASS_NOT_FOUND`/`INSTALL_TIMED_OUT`/`INSTALL_FAILED` are `setup ssh-alias install`'s
+ * codes (agent-invocable install phase) — `INSTALL_FAILED` also covers the precondition
+ * failure where `install` is run before `keygen` (no public key to install).
  */
 export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
@@ -43,7 +46,10 @@ export type SetupErrorCode =
   | 'KEYGEN_FAILED'
   | 'VALIDATION_ERROR'
   | 'TARGET_EXISTS'
-  | 'RECIPE_EXISTS';
+  | 'RECIPE_EXISTS'
+  | 'SSHPASS_NOT_FOUND'
+  | 'INSTALL_TIMED_OUT'
+  | 'INSTALL_FAILED';
 
 export interface BuildSetupResultInput<T> {
   command: string;

@@ -2,7 +2,7 @@ import { getFlag, hasFlag, parseArgv } from './cli.ts';
 import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts';
 import { scaffold } from './setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
-import { keygen, register, remove } from './setup-ssh-alias.ts';
+import { install, keygen, register, remove } from './setup-ssh-alias.ts';
 import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
 
 /**
@@ -22,8 +22,8 @@ export interface SetupSubGroupSpec {
 export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
   {
     name: 'ssh-alias',
-    summary: 'Register, generate a keypair for, or remove a ~/.ssh/config alias.',
-    actions: ['register', 'keygen', 'remove'],
+    summary: 'Register, generate a keypair for, install a key on, or remove a ~/.ssh/config alias.',
+    actions: ['register', 'keygen', 'remove', 'install'],
   },
   {
     name: 'db-target',
@@ -136,6 +136,8 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
     }
   } else if (action === 'keygen') {
     result = await keygen(alias, { yes });
+  } else if (action === 'install') {
+    result = await install(alias, { yes });
   } else {
     result = await remove(alias, { yes });
   }
