@@ -110,11 +110,13 @@ skill definition:
 Output is JSON to stdout by default (add `--pretty` for a human table/key-value view).
 
 A separate `setup` group writes sshepherd's own local config files instead of you
-hand-authoring them — `setup ssh-alias register/keygen/remove` for `~/.ssh/config`, `setup
-db-target` for `targets.toml`, `setup config-allowlist` for `config-allowlist.toml`, and
-`setup deploy-recipe` for a starter recipe TOML. It's not counted in the nine groups above
-and is human-only: run it yourself in your own terminal, never through an agent — `SKILL.md`
-tells every agent session to treat it as off-limits.
+hand-authoring them — `setup ssh-alias register/keygen/install/remove` for `~/.ssh/config`,
+`setup db-target` for `targets.toml`, `setup config-allowlist` for `config-allowlist.toml`,
+and `setup deploy-recipe` for a starter recipe TOML. It's not counted in the nine groups
+above, but every action in it is agent-invocable — same `--yes` confirm gate as everything
+else. The one exception is `setup ssh-alias install`: it opens a one-shot local browser form
+that only a human can type a password into, so the agent can trigger and wait on it but
+never sees, logs, or relays the password itself — see `SKILL.md` gotcha 9.
 
 ## What sshepherd NEVER does
 

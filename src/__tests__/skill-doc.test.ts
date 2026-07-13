@@ -85,7 +85,7 @@ describe('SKILL.md — setup section has no drift against SETUP_SUB_GROUPS', () 
 
   test("Quick reference heading's counts match listOps()/SETUP_SUB_GROUPS (no stale numbers)", () => {
     const headingMatch = skillMd.match(
-      /## Quick reference — (\d+) registry-driven groups \((\d+) ops\) \+ 1 human-only `setup` group \((\d+) sub-groups, (\d+) actions\)/,
+      /## Quick reference — (\d+) registry-driven groups \((\d+) ops\) \+ 1 `setup` group \((\d+) sub-groups, (\d+) actions\)/,
     );
     expect(headingMatch).not.toBeNull();
     const [, groupsCount, opsCount, setupSubGroupsCount, setupActionsCount] =
