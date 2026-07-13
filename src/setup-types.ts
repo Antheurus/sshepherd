@@ -29,6 +29,7 @@ export interface SetupErrorInfo {
  * `INVALID_ARGS` covers CLI-level argument validation (missing/malformed flags) before a
  * sub-module is even called. `CONFIRMATION_REQUIRED`/`ALIAS_EXISTS`/`ALIAS_NOT_FOUND`/
  * `PARSE_MISMATCH`/`KEYGEN_FAILED` are `setup ssh-alias`'s codes (Phase 2).
+ * `VALIDATION_ERROR`/`TARGET_EXISTS` are `setup db-target`'s codes (Phase 3).
  */
 export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
@@ -38,7 +39,9 @@ export type SetupErrorCode =
   | 'ALIAS_EXISTS'
   | 'ALIAS_NOT_FOUND'
   | 'PARSE_MISMATCH'
-  | 'KEYGEN_FAILED';
+  | 'KEYGEN_FAILED'
+  | 'VALIDATION_ERROR'
+  | 'TARGET_EXISTS';
 
 export interface BuildSetupResultInput<T> {
   command: string;

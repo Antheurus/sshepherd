@@ -1,4 +1,5 @@
 import { getFlag, hasFlag, parseArgv } from './cli.ts';
+import { scaffold } from './setup-db-target.ts';
 import { keygen, register, remove } from './setup-ssh-alias.ts';
 import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
 
@@ -161,6 +162,61 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
 }
 
 /**
+ * `db-target` is the second setup sub-group to leave stub status (Phase 3) — real scaffold
+ * logic lives in `setup-db-target.ts`. `db-target` only ever has one action (`scaffold`), so
+ * unlike `runSshAliasAction` there is no action-name branching here.
+ */
+function runDbTargetAction(argTail: string[]): void {
+  const command = 'setup db-target scaffold';
+  const { positionals, flags } = parseArgv(argTail);
+  const pretty = hasFlag(flags, 'pretty');
+  const yes = hasFlag(flags, 'yes');
+  const name = positionals[0];
+
+  if (name === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: missing required positional argument 'name'`,
+      },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const alias = getFlag(flags, 'alias');
+  const user = getFlag(flags, 'user');
+  const database = getFlag(flags, 'database');
+  if (alias === undefined || user === undefined || database === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: --alias, --user, and --database are required`,
+      },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const result = scaffold(name, {
+    alias,
+    user,
+    database,
+    composeFile: getFlag(flags, 'compose-file'),
+    service: getFlag(flags, 'service'),
+    container: getFlag(flags, 'container'),
+    yes,
+  });
+
+  printSetupResult(result, pretty);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+/**
  * `setup`'s own dispatcher — a fully separate path from `run()`'s `OpSpec`/`executeOp`
  * flow (see research.md, why `runLocal` can't express `setup`). `cli.ts` intercepts
  * `first === 'setup'` and hands the remaining argv (everything after `setup`) to this
@@ -192,6 +248,11 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (subGroup.name === 'ssh-alias') {
     await runSshAliasAction(actionOrHelp, argTail);
+    return;
+  }
+
+  if (subGroup.name === 'db-target') {
+    runDbTargetAction(argTail);
     return;
   }
 
