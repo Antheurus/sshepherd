@@ -1,5 +1,16 @@
 # sshepherd Changelog
 
+## v0.2.1 — `files download` now writes to disk instead of returning file contents
+
+- Fixed: `files download` was silently returning the entire downloaded file's contents
+  (base64-encoded) in its response instead of writing it to a local path — meaning secrets
+  files (`.env`, credentials) downloaded this way could end up visible wherever that
+  response was read. `files download` now requires a local destination path as a second
+  argument and writes the file straight to disk; the response only confirms the write
+  succeeded and never contains the file's contents.
+- Action required: if you use `files download`, add a local destination path as the second
+  argument, e.g. `sshepherd files download myserver /opt/lms/backup.sql ./backup.sql`.
+
 ## v0.2.0 — `setup`: onboard a new server without hand-editing config files
 
 - New: `sshepherd setup`, a separate command group you run yourself in your own terminal —

@@ -55,6 +55,9 @@ key through sshepherd — not as an argument, not in a response.
 - `hosts list` returns alias *names* only, never `HostName`/`User`/`Port`.
 - `.env`-shaped files (`files cat`) are masked by default (`KEY=***MASKED***`); an agent
   must pass `--reveal KEY1,KEY2` to unmask specific keys.
+- `files download` writes the remote file straight to a local destination path and never
+  returns its content in the JSON envelope — the safe way to pull any secrets-bearing file
+  to disk (see Gotchas #10 for the incident this closed).
 - Every mutating op writes an audit line (`~/.local/state/sshepherd/audit.jsonl`) —
   timestamp, alias, command, an arg hash (not raw args), and outcome — success or failure.
 
@@ -134,7 +137,7 @@ sshepherd services systemctl-reload lms-server nginx --yes
 sshepherd files ls lms-server /opt/lms
 sshepherd files cat lms-server /opt/lms/.env --reveal DB_HOST
 sshepherd files tail lms-server /var/log/syslog --n 100
-sshepherd files download lms-server /opt/lms/backup.sql
+sshepherd files download lms-server /opt/lms/backup.sql ./backup.sql
 sshepherd files disk-usage lms-server /var/lib/docker
 sshepherd files upload lms-server ./local.conf /opt/lms/local.conf --yes
 
@@ -220,6 +223,33 @@ sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app 
    the browser submission into `sshpass`'s stdin and never crosses back into the agent's
    context; the agent only ever receives the resulting `SetupResult` (success or a typed
    error code), never the password itself.
+10. **`files download` used to inline the whole file as base64 in the JSON envelope —
+    fixed, but treat any `dist/sshepherd` built before this fix as unsafe on secrets.** A
+    real incident: an
+    agent ran `files download <alias> <remote .env.docker path> /tmp/dest.tmp` expecting
+    scp-like behavior (write to `/tmp/dest.tmp`, never see the bytes). The old
+    implementation took only one positional (`<path>`, remote-only) — the local
+    destination the agent typed was silently discarded (`mapArgsToCtx` ignores extra
+    positionals with no error), and the entire file was base64-encoded into
+    `data.content_base64` in the envelope printed to stdout, i.e. straight into the
+    agent's tool-result context, in a trivially-reversible encoding (`base64 -d`, no
+    special access needed). Unlike `files cat`, the old `files download` applied **no**
+    `.env` masking at all — it inlined any file's raw bytes regardless of shape, up to the
+    10 MiB `DOWNLOAD_MAX_BYTES` guard (above that it refused with `truncated: true`, not a
+    partial leak). This defeated the zero-knowledge promise for exactly the op whose name
+    most strongly implies "goes to disk, not to you." Fixed in `src/registry.ts`
+    (`filesDownload`): the op now takes **two** required positionals — `<path>` (remote
+    source) `<local_path>` (local destination) — and `shape()` decodes the base64 and
+    `writeFileSync`s it straight to `local_path` inside the CLI process; the envelope's
+    `data` is now `{found, truncated, size_bytes, written, local_path}` with **no**
+    `content_base64` field, ever. The raw bytes still transit the ssh channel and briefly
+    sit in local process memory to decode — that's the same local-process exposure
+    `files cat` already has before masking runs, not a new one; what changed is that the
+    content never crosses back into the envelope the agent reads. If a script or an older
+    compiled `dist/sshepherd` binary predates this fix, do not point `files download` at
+    any `.env`-shaped, key, or credential file until confirmed rebuilt — check the
+    envelope's `data` keys: `content_base64` present means the vulnerable version is
+    running.
 
 ## Errors
 
