@@ -1645,6 +1645,97 @@ describe('security fail2ban — degrades to {available:false} when fail2ban-clie
   });
 });
 
+describe('files download — writes straight to local disk, never inlines content in the envelope', () => {
+  const SECRET_CONTENT = ['DB_PASSWORD=s3cr3t-value', 'JWT_SECRET=abcd1234', ''].join('\n');
+
+  test('decoded content lands on local disk, and the raw bytes never appear in the envelope JSON', async () => {
+    const op = getOp('files', 'download');
+    if (!op) {
+      throw new Error('files download op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-download-test-'));
+    const localPath = join(dir, 'downloaded.env');
+    const contentBase64 = Buffer.from(SECRET_CONTENT, 'utf8').toString('base64');
+    const runner = scriptedRunner(
+      connectedRunOutcomes(`__OK__:${SECRET_CONTENT.length}\n${contentBase64}`),
+    );
+
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { path: '/opt/app/.env', local_path: localPath } },
+      { transport: { runner } },
+    );
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({
+      found: true,
+      truncated: false,
+      size_bytes: SECRET_CONTENT.length,
+      written: true,
+      local_path: localPath,
+    });
+    expect(readFileSync(localPath, 'utf8')).toBe(SECRET_CONTENT);
+
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain('content_base64');
+    expect(serialized).not.toContain('s3cr3t-value');
+    expect(serialized).not.toContain('abcd1234');
+    expect(serialized).not.toContain(contentBase64);
+  });
+
+  test('a not-found remote path writes nothing locally and echoes a null local_path', async () => {
+    const op = getOp('files', 'download');
+    if (!op) {
+      throw new Error('files download op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-download-notfound-test-'));
+    const localPath = join(dir, 'never-written.txt');
+    const runner = scriptedRunner(connectedRunOutcomes('__NOT_FOUND__'));
+
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { path: '/opt/app/missing.txt', local_path: localPath } },
+      { transport: { runner } },
+    );
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({
+      found: false,
+      truncated: false,
+      size_bytes: null,
+      written: false,
+      local_path: null,
+    });
+    expect(existsSync(localPath)).toBe(false);
+  });
+
+  test('a too-large remote file writes nothing locally and reports truncated', async () => {
+    const op = getOp('files', 'download');
+    if (!op) {
+      throw new Error('files download op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-download-toolarge-test-'));
+    const localPath = join(dir, 'never-written.bin');
+    const runner = scriptedRunner(connectedRunOutcomes('__TOO_LARGE__:99999999'));
+
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: { path: '/opt/app/huge.bin', local_path: localPath } },
+      { transport: { runner } },
+    );
+
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({
+      found: true,
+      truncated: true,
+      size_bytes: 99999999,
+      written: false,
+      local_path: null,
+    });
+    expect(existsSync(localPath)).toBe(false);
+  });
+});
+
 describe('files upload — base64-over-ssh, no scp/sftp, no backup, gated like every mutating op', () => {
   test('a missing local file fails locally with a clear error before any transport', () => {
     const op = getOp('files', 'upload');

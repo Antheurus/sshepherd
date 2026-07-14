@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { auditMutating, confirmGate } from './audit.ts';
@@ -1068,14 +1068,35 @@ interface FilesDownloadResult {
   found: boolean;
   truncated: boolean;
   size_bytes: number | null;
-  content_base64: string | null;
+  written: boolean;
+  local_path: string | null;
+}
+
+/** Writes the decoded bytes straight to local disk and never returns them — this is the
+ *  zero-knowledge boundary for `files download`. Earlier versions inlined the whole file
+ *  as `content_base64` in the JSON envelope (the caller's tool-result/context), which
+ *  defeated `files cat`'s masking for any file downloaded this way, `.env`-shaped or not
+ *  (see SKILL.md Gotchas #10). Base64 still transits the ssh channel and briefly lives in
+ *  this process's memory to decode — that's the same local-process exposure `files cat`
+ *  already has before masking runs, not a new one; the fix is that raw content never
+ *  crosses back into the envelope that reaches the agent. */
+function writeDownloadedFile(localPath: string, contentBase64: string): void {
+  try {
+    writeFileSync(localPath, Buffer.from(contentBase64, 'base64'));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`files download: could not write local file '${localPath}': ${reason}`);
+  }
 }
 
 const filesDownload: OpSpec<FilesDownloadResult> = {
   group: 'files',
   name: 'download',
-  summary: `Read a file as base64 over the existing ssh channel (size-guarded at ${DOWNLOAD_MAX_BYTES} bytes) — no separate scp/sftp process.`,
-  args: [arg('path', 'positional', true, 'Remote file path.')],
+  summary: `Read a file as base64 over the existing ssh channel (size-guarded at ${DOWNLOAD_MAX_BYTES} bytes) and write it straight to a local path — no separate scp/sftp process, and the raw content never enters the JSON envelope.`,
+  args: [
+    arg('path', 'positional', true, 'Remote file path.'),
+    arg('local_path', 'positional', true, 'Local destination path to write the file to.'),
+  ],
   mutating: false,
   timeoutSec: DOWNLOAD_TIMEOUT_SEC,
   output: 'raw',
@@ -1089,13 +1110,14 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
     ].join('; ');
     return shellJoin(['sh', '-c', script]);
   },
-  shape: (parsed) => {
+  shape: (parsed, ctx) => {
     const text = parsed as string;
+    const localPath = reqStr(ctx, 'local_path');
     const newlineIndex = text.indexOf('\n');
     const firstLine = (newlineIndex === -1 ? text : text.slice(0, newlineIndex)).trim();
 
     if (firstLine === '__NOT_FOUND__') {
-      return { found: false, truncated: false, size_bytes: null, content_base64: null };
+      return { found: false, truncated: false, size_bytes: null, written: false, local_path: null };
     }
     const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(firstLine);
     if (tooLarge) {
@@ -1104,16 +1126,20 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
         found: true,
         truncated: true,
         size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
-        content_base64: null,
+        written: false,
+        local_path: null,
       };
     }
     const ok = /^__OK__:(\d+)/.exec(firstLine);
     const size = ok?.[1];
+    const contentBase64 = newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim();
+    writeDownloadedFile(localPath, contentBase64);
     return {
       found: true,
       truncated: false,
       size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
-      content_base64: newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim(),
+      written: true,
+      local_path: localPath,
     };
   },
 };
