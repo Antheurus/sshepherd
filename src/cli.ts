@@ -9,7 +9,7 @@ import { buildDbOpContext } from './targets.ts';
 import { closeMaster } from './transport.ts';
 import type { ArgSpec, OpContext, OpSpec } from './types.ts';
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 
 /** Flags declared as booleans across the registry's ArgSpecs (`ArgSpec` carries no type
  *  field, so this is the CLI's own small lookup — every other flag is a string value). */

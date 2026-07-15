@@ -90,6 +90,15 @@ follows the same rule: a pg-target resolves to *how* to reach `psql` on a host, 
 database password — `psql` runs inside the target container, authenticated by
 peer/trust/`.pgpass` that already lives on the remote.
 
+The `files` group follows the same allowlist-first rule `config` already used: every op
+(`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) refuses any remote path not
+pre-declared per-alias in `~/.config/sshepherd/files-allowlist.toml` — fail-closed, missing
+file means every path is refused. `files cat --reveal` layers a second gate on top: each
+key must clear a hardcoded, non-overridable secret-pattern denylist (`PASSWORD`, `SECRET`,
+`TOKEN`, `PRIVATE_KEY`, `CREDENTIAL`, `API_KEY`, ...) and be declared in
+`~/.config/sshepherd/reveal-allowlist.toml` — the denylist wins even over a mistaken
+allowlist entry.
+
 ## Usage
 
 ```
@@ -112,11 +121,13 @@ Output is JSON to stdout by default (add `--pretty` for a human table/key-value 
 A separate `setup` group writes sshepherd's own local config files instead of you
 hand-authoring them — `setup ssh-alias register/keygen/install/remove` for `~/.ssh/config`,
 `setup db-target` for `targets.toml`, `setup config-allowlist` for `config-allowlist.toml`,
-and `setup deploy-recipe` for a starter recipe TOML. It's not counted in the nine groups
-above, but every action in it is agent-invocable — same `--yes` confirm gate as everything
-else. The one exception is `setup ssh-alias install`: it opens a one-shot local browser form
-that only a human can type a password into, so the agent can trigger and wait on it but
-never sees, logs, or relays the password itself — see `SKILL.md` gotcha 9.
+`setup deploy-recipe` for a starter recipe TOML, and `setup files-allowlist`/
+`setup reveal-allowlist` for `files-allowlist.toml`/`reveal-allowlist.toml`. It's not
+counted in the nine groups above, but every action in it is agent-invocable — same `--yes`
+confirm gate as everything else. The one exception is `setup ssh-alias install`: it opens a
+one-shot local browser form that only a human can type a password into, so the agent can
+trigger and wait on it but never sees, logs, or relays the password itself — see `SKILL.md`
+gotcha 9.
 
 ## What sshepherd NEVER does
 
@@ -169,7 +180,7 @@ for setup, the pre-PR checklist, and where things live.
 ## Roadmap
 
 sshepherd is under active development. This is a real roadmap, not a wishlist — items move
-🔵 Planned → 🟡 In Progress → 🟢 Shipped as they land. Currently at `v0.2.1`.
+🔵 Planned → 🟡 In Progress → 🟢 Shipped as they land. Currently at `v0.2.2`.
 
 | Version | Status | Focus | What's in it |
 |---|---|---|---|

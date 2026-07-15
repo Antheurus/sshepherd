@@ -53,8 +53,16 @@ key through sshepherd — not as an argument, not in a response.
   into a small error enum instead, because OpenSSH's stderr phrasing varies by
   version/locale and can leak a hostname no redaction allowlist would catch.
 - `hosts list` returns alias *names* only, never `HostName`/`User`/`Port`.
+- Every `files` op (`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) refuses any remote
+  path not pre-declared for that alias in `~/.config/sshepherd/files-allowlist.toml` —
+  fail-closed, same rule as `config get`/`put`/`validate` and `config-allowlist.toml`. See
+  Gotchas #11.
 - `.env`-shaped files (`files cat`) are masked by default (`KEY=***MASKED***`); an agent
-  must pass `--reveal KEY1,KEY2` to unmask specific keys.
+  must pass `--reveal KEY1,KEY2` to unmask specific keys, and each key must clear a
+  hardcoded secret-pattern denylist (`PASSWORD`, `SECRET`, `TOKEN`, `PRIVATE_KEY`,
+  `CREDENTIAL`, `API_KEY`, ...) *and* be pre-declared in
+  `~/.config/sshepherd/reveal-allowlist.toml` — the denylist wins even over a mistaken
+  allowlist entry. See Gotchas #11.
 - `files download` writes the remote file straight to a local destination path and never
   returns its content in the JSON envelope — the safe way to pull any secrets-bearing file
   to disk (see Gotchas #10 for the incident this closed).
@@ -97,7 +105,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 9 registry-driven groups (52 ops) + 1 `setup` group (4 sub-groups, 7 actions)
+## Quick reference — 9 registry-driven groups (52 ops) + 1 `setup` group (6 sub-groups, 9 actions)
 
 ```bash
 # hosts
@@ -179,6 +187,8 @@ sshepherd setup ssh-alias remove myserver --yes
 sshepherd setup db-target scaffold prod --alias myserver --user app --database appdb --container app_db --yes
 sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf,/opt/app/.env --yes
 sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app --yes
+sshepherd setup files-allowlist scaffold myserver --paths /opt/app/backup.sql,/opt/app/.env --yes
+sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --yes
 ```
 
 ## Gotchas
@@ -250,6 +260,23 @@ sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app 
     any `.env`-shaped, key, or credential file until confirmed rebuilt — check the
     envelope's `data` keys: `content_base64` present means the vulnerable version is
     running.
+11. **`files` and `--reveal` are fail-closed as of v0.2.2 — a fresh install can't `files
+    ls`/`cat`/`download`/`upload`/etc. anywhere until an allowlist exists.** Before v0.2.2,
+    `files download`/`upload` had no allowlist at all (any remote path, in or out) and
+    `--reveal` could unmask any key name the agent typed, including an actually-secret one
+    (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`) — flagged by an external code review and
+    closed the same way `config`'s allowlist already worked. Now every `files` op checks
+    the path against `~/.config/sshepherd/files-allowlist.toml` (missing file = every path
+    refused, same fail-closed rule as `config-allowlist.toml`), and `files cat --reveal`
+    additionally checks each key against a hardcoded, non-overridable secret-pattern
+    denylist (`PASSWORD`, `PASSWD`, `SECRET`, `TOKEN`, `PRIVATE_KEY`, `CREDENTIAL`,
+    `API_KEY`, trailing `_KEY`/`_PASS`) *before* checking
+    `~/.config/sshepherd/reveal-allowlist.toml` — the denylist wins even if a key was
+    mistakenly added to the allowlist. Run `setup files-allowlist scaffold` and, if
+    `--reveal` is needed, `setup reveal-allowlist scaffold` before using the `files` group
+    on a fresh alias. The gate lives in exactly one place — `enforceAllowlist()` in
+    `registry.ts`, called from `executeOp()` before any op's `buildRemote` runs — not
+    hand-copied per op.
 
 ## Errors
 

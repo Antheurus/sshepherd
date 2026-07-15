@@ -143,6 +143,7 @@ file = "docker-compose.yml"
 EOF
 export SSHEPHERD_TARGETS_PATH="$WORKDIR/targets.toml"
 export SSHEPHERD_RECIPE_PATH="$WORKDIR/deploy.smoke.toml"
+export SSHEPHERD_FILES_ALLOWLIST_PATH="$WORKDIR/files-allowlist.toml"
 pass "fixture config written"
 
 # -- CLI drive helpers ------------------------------------------------------------------------
@@ -195,6 +196,11 @@ step "logs docker (app container)"
 run_cli logs_docker logs docker "$ALIAS" sshepherd-fixture-app --tail 5
 assert_json "logs docker: LogsResult shape present" logs_docker \
   "d['ok'] is True and 'lines' in d['data'] and 'next_since' in d['data']"
+
+step "setup files-allowlist scaffold (real scaffold path, not a hand-written TOML)"
+run_cli setup_files_allowlist setup files-allowlist scaffold "$ALIAS" --paths /root --yes
+assert_json "files-allowlist scaffolded for /root" setup_files_allowlist \
+  "d['ok'] is True and '/root' in d['data']['paths']"
 
 step "files ls"
 run_cli files_ls files ls "$ALIAS" /root

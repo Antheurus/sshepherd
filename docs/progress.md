@@ -1,5 +1,49 @@
 # sshepherd Progress
 
+## Session — 2026-07-16 — v0.2.2 (files-allowlist + reveal-allowlist, registry-driven allowlist enforcement)
+
+Closed two real security gaps flagged by CodeRabbit during an external code-review pass on
+a PR that copied sshepherd's SKILL.md into rohitg00/awesome-claude-code-toolkit: `files
+download`/`upload` (and, by extension, `ls`/`cat`/`tail`/`disk-usage`) had no allowlist at
+all — any remote path could be read or written, unlike `config get`/`put`, which already
+refuse an undeclared path via `config-allowlist.toml` — and `files cat --reveal` could
+unmask any key name the agent typed, including a genuinely secret one (`DB_PASSWORD`,
+`AWS_SECRET_ACCESS_KEY`), since masking only checked whether a key was in the requested
+`--reveal` list, never whether the key itself looked like a secret. Fixed both by
+generalizing the allowlist mechanism instead of adding two more copy-pasted per-op checks:
+added a declarative `allowlist?: AllowlistPolicy[]` field to `OpSpec` (`src/types.ts`) and
+moved enforcement into one place, `enforceAllowlist()` called from `executeOp()` in
+`registry.ts` right before `buildRemote` runs — the same "one gate, not per-op bespoke
+logic" pattern the file already used for `confirmGate`. `config get`/`validate`/`put`
+migrated to the same declarative mechanism (their inline `assertConfigPathAllowed` calls
+are gone, replaced by an `allowlist` field); the six `files` ops gained `files-allowlist.toml`
+gating (same TOML shape and fail-closed rule as `config-allowlist.toml` — missing file
+refuses everything); `files cat --reveal` gained a second gate, a hardcoded
+non-overridable secret-pattern denylist (`PASSWORD`, `SECRET`, `TOKEN`, `PRIVATE_KEY`,
+`CREDENTIAL`, `API_KEY`, trailing `_KEY`/`_PASS`) checked before a per-alias
+`reveal-allowlist.toml`. New `setup files-allowlist scaffold`/`setup reveal-allowlist
+scaffold` sub-groups (mirroring `setup config-allowlist scaffold` — `src/setup-files-allowlist.ts`,
+`src/setup-reveal-allowlist.ts`, wired in `src/setup.ts`) write those TOML files; the reveal
+scaffolder also refuses at scaffold time if a `--keys` entry matches the denylist, so a
+mistaken `DB_PASSWORD` never even makes it into `reveal-allowlist.toml`. This is a breaking
+change (`files`/`--reveal` were previously unrestricted) — bumped to v0.2.2 as a
+security-hardening fix, pre-1.0 so no deprecation cycle. Updated `SKILL.md` (Gotchas #11,
+zero-knowledge model bullets, Quick reference — 9 groups/52 ops unchanged, `setup` now 6
+sub-groups/9 actions) and `README.md` (zero-knowledge model section, `setup` group
+description) to document the real command surface accurately — the copied SKILL.md in the
+rohitg00 PR that triggered this had also drifted to only 39 of the 52 real ops, fixed
+separately in that PR's own branch, not this repo. Verified: `just check` clean (0
+typecheck/lint errors), `just test` 255/255 passing (added test coverage for files-allowlist
+fail-closed behavior, `files upload`'s `remote_path`-not-`local_path` check, the reveal
+denylist beating a mistaken allowlist entry, and the reveal-keys policy no-op when
+`--reveal` is absent), and `just smoke` 16/16 live E2E checks passing against a real
+disposable sshd fixture (added a `setup files-allowlist scaffold` step to the smoke script
+before the `files ls` check, using `SSHEPHERD_FILES_ALLOWLIST_PATH` the same way the
+existing fixture config uses `SSHEPHERD_TARGETS_PATH`/`SSHEPHERD_RECIPE_PATH`). Merged
+directly to `main`.
+
+---
+
 ## Session — 2026-07-14 — v0.2.1 (files download no longer inlines raw content)
 
 Fixed a zero-knowledge-breaking bug in `files download` (`src/registry.ts`), found via a

@@ -2,6 +2,8 @@ import { getFlag, hasFlag, parseArgv } from './cli.ts';
 import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts';
 import { scaffold } from './setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
+import { scaffold as scaffoldFilesAllowlist } from './setup-files-allowlist.ts';
+import { scaffold as scaffoldRevealAllowlist } from './setup-reveal-allowlist.ts';
 import { install, keygen, register, remove } from './setup-ssh-alias.ts';
 import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
 
@@ -38,6 +40,16 @@ export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
   {
     name: 'deploy-recipe',
     summary: 'Scaffold a minimal deploy recipe TOML skeleton.',
+    actions: ['scaffold'],
+  },
+  {
+    name: 'files-allowlist',
+    summary: 'Scaffold a [<alias>] entry into files-allowlist.toml (gates the files group).',
+    actions: ['scaffold'],
+  },
+  {
+    name: 'reveal-allowlist',
+    summary: 'Scaffold a [<alias>] entry into reveal-allowlist.toml (gates files cat --reveal).',
     actions: ['scaffold'],
   },
 ];
@@ -251,6 +263,100 @@ function runConfigAllowlistAction(argTail: string[]): void {
 }
 
 /**
+ * `files-allowlist` gates the `files` group's 6 ops the same way `config-allowlist` gates
+ * `config get`/`validate`/`put` — same shape as `runConfigAllowlistAction`, different target
+ * file (`setup-files-allowlist.ts`).
+ */
+function runFilesAllowlistAction(argTail: string[]): void {
+  const command = 'setup files-allowlist scaffold';
+  const { positionals, flags } = parseArgv(argTail);
+  const pretty = hasFlag(flags, 'pretty');
+  const yes = hasFlag(flags, 'yes');
+  const alias = positionals[0];
+
+  if (alias === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: missing required positional argument 'alias'`,
+      },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const pathsRaw = getFlag(flags, 'paths');
+  if (pathsRaw === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: { code: 'INVALID_ARGS', message: `${command}: --paths is required` },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const paths = pathsRaw
+    .split(',')
+    .map((path) => path.trim())
+    .filter((path) => path.length > 0);
+
+  const result = scaffoldFilesAllowlist(alias, { paths, yes });
+
+  printSetupResult(result, pretty);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+/**
+ * `reveal-allowlist` gates `files cat --reveal` the same way `config-allowlist` gates
+ * `config` ops — same shape as `runFilesAllowlistAction`, `--keys` instead of `--paths`,
+ * target file `setup-reveal-allowlist.ts`.
+ */
+function runRevealAllowlistAction(argTail: string[]): void {
+  const command = 'setup reveal-allowlist scaffold';
+  const { positionals, flags } = parseArgv(argTail);
+  const pretty = hasFlag(flags, 'pretty');
+  const yes = hasFlag(flags, 'yes');
+  const alias = positionals[0];
+
+  if (alias === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: missing required positional argument 'alias'`,
+      },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const keysRaw = getFlag(flags, 'keys');
+  if (keysRaw === undefined) {
+    const result = buildSetupResult({
+      command,
+      error: { code: 'INVALID_ARGS', message: `${command}: --keys is required` },
+    });
+    printSetupResult(result, pretty);
+    process.exitCode = 1;
+    return;
+  }
+
+  const keys = keysRaw
+    .split(',')
+    .map((key) => key.trim())
+    .filter((key) => key.length > 0);
+
+  const result = scaffoldRevealAllowlist(alias, { keys, yes });
+
+  printSetupResult(result, pretty);
+  process.exitCode = result.ok ? 0 : 1;
+}
+
+/**
  * `deploy-recipe` is the fourth setup sub-group to leave stub status (Phase 5) — real
  * scaffold logic lives in `setup-deploy-recipe.ts`. `deploy-recipe` only ever has one action
  * (`scaffold`), same shape as `runDbTargetAction`/`runConfigAllowlistAction`.
@@ -340,6 +446,16 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (subGroup.name === 'deploy-recipe') {
     runDeployRecipeAction(argTail);
+    return;
+  }
+
+  if (subGroup.name === 'files-allowlist') {
+    runFilesAllowlistAction(argTail);
+    return;
+  }
+
+  if (subGroup.name === 'reveal-allowlist') {
+    runRevealAllowlistAction(argTail);
     return;
   }
 }
