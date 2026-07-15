@@ -118,6 +118,54 @@ describe('run — alias validation', () => {
   });
 });
 
+describe('run — keepalive and kill-escalation (fixes the idle-drop / orphaned-remote-process incident)', () => {
+  test('opening a fresh ControlMaster carries ServerAliveInterval/CountMax — a long, quiet remote command must not look idle to a network middlebox', async () => {
+    const seenArgs: string[][] = [];
+    const runner: SshRunner = async (args) => {
+      seenArgs.push(args);
+      if (args.includes('-G')) {
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      }
+      if (args.includes('check')) {
+        return { code: 1, stdout: '', stderr: '', timedOut: false }; // no master yet
+      }
+      if (args.includes('exit')) {
+        return { code: 1, stdout: '', stderr: '', timedOut: false }; // stale cleanup, ignored
+      }
+      // -M -N -f master open, then the actual command
+      return { code: 0, stdout: 'ok', stderr: '', timedOut: false };
+    };
+
+    await run('lms-server', 'echo hi', 30, { runner });
+
+    const masterOpenCall = seenArgs.find((a) => a.includes('-M') && a.includes('-N'));
+    expect(masterOpenCall).toBeDefined();
+    expect(masterOpenCall).toContain('ServerAliveInterval=15');
+    expect(masterOpenCall).toContain('ServerAliveCountMax=4');
+
+    const commandCall = seenArgs[seenArgs.length - 1];
+    expect(commandCall).toContain('ServerAliveInterval=15');
+    expect(commandCall).toContain('ServerAliveCountMax=4');
+  });
+
+  test('the remote command is wrapped in `timeout --kill-after=10 <sec>` so a hung local wrapper is force-killed', async () => {
+    let commandArgs: string[] = [];
+    const runner: SshRunner = async (args) => {
+      if (args.includes('timeout')) {
+        commandArgs = args;
+      }
+      return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+    };
+
+    await run('lms-server', 'echo hi', 45, { runner });
+
+    const timeoutIndex = commandArgs.indexOf('timeout');
+    expect(timeoutIndex).toBeGreaterThanOrEqual(0);
+    expect(commandArgs[timeoutIndex + 1]).toBe('--kill-after=10');
+    expect(commandArgs[timeoutIndex + 2]).toBe('45');
+  });
+});
+
 describe('run — end to end with a fake runner', () => {
   test('a successful command produces no error and carries stdout', async () => {
     const runner = scriptedRunner([

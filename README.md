@@ -90,6 +90,15 @@ follows the same rule: a pg-target resolves to *how* to reach `psql` on a host, 
 database password — `psql` runs inside the target container, authenticated by
 peer/trust/`.pgpass` that already lives on the remote.
 
+The `files` group follows the same allowlist-first rule `config` already used: every op
+(`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) refuses any remote path not
+pre-declared per-alias in `~/.config/sshepherd/files-allowlist.toml` — fail-closed, missing
+file means every path is refused. `files cat --reveal` layers a second gate on top: each
+key must clear a hardcoded, non-overridable secret-pattern denylist (`PASSWORD`, `SECRET`,
+`TOKEN`, `PRIVATE_KEY`, `CREDENTIAL`, `API_KEY`, ...) and be declared in
+`~/.config/sshepherd/reveal-allowlist.toml` — the denylist wins even over a mistaken
+allowlist entry.
+
 ## Usage
 
 ```
@@ -112,8 +121,9 @@ Output is JSON to stdout by default (add `--pretty` for a human table/key-value 
 A separate `setup` group writes sshepherd's own local config files instead of you
 hand-authoring them — `setup ssh-alias register/keygen/install/remove/list/status/update`
 for `~/.ssh/config`, `setup db-target` for `targets.toml`, `setup config-allowlist` for
-`config-allowlist.toml`, and `setup deploy-recipe` for a starter recipe TOML (10 actions
-total). It's not counted in the nine groups above, but every action in it is
+`config-allowlist.toml`, `setup deploy-recipe` for a starter recipe TOML, and `setup
+files-allowlist`/`setup reveal-allowlist` for `files-allowlist.toml`/`reveal-allowlist.toml`
+(12 actions total). It's not counted in the nine groups above, but every action in it is
 agent-invocable — same `--yes` confirm gate as everything else. `setup ssh-alias status` is
 the one place outside `setup ssh-alias install` that isn't fully zero-knowledge: it echoes
 back the alias's own host/user/port, since the caller already supplied those to `register`
@@ -171,6 +181,19 @@ just smoke      # rebuild + run scripts/smoke.sh against a disposable sshd+postg
 it mutates); `src/transport.ts` is the one zero-knowledge execution path every op runs
 through; `src/cli.ts` parses argv and dispatches. See [`CONTRIBUTING.md`](./CONTRIBUTING.md)
 for setup, the pre-PR checklist, and where things live.
+
+## Roadmap
+
+sshepherd is under active development. This is a real roadmap, not a wishlist — items move
+🔵 Planned → 🟡 In Progress → 🟢 Shipped as they land. Currently at `v0.2.2`.
+
+| Version | Status | Focus | What's in it |
+|---|---|---|---|
+| v0.3 | 🔵 Planned | Multi-Database Foundations | Generalize the `db` group from Postgres-only to a pluggable multi-engine model. MySQL/MariaDB read-only introspection: query (SELECT-only, dialect-aware advisory check), schema browse, table stats — same pattern as `db query` today. |
+| v0.4 | 🔵 Planned | Redis Support | Read-only introspection: pattern-scoped key browsing (no `KEYS *`), TTL/type inspection, memory stats, slowlog tail. Dangerous commands (`FLUSHALL`, `CONFIG SET`, ...) hard-blocked at the registry level, not just advisory. |
+| v0.5 | 🔵 Planned | MongoDB Support | Read-only introspection: collection stats, guarded find queries, index inspection. |
+| v0.6 | 🔵 Planned | Local Web Dashboard | Localhost-only server (`127.0.0.1`, random port + session token), a lightweight Termius-inspired view of the same live health/service/log state the CLI already produces. Both human and agent can *view* session state — the agent stays zero-knowledge, reading only curated endpoints, never a raw live shell. Credentials are typed **only by a human**, via the same one-shot local browser-form pattern `setup ssh-alias install` already uses. The SSH socket is opened only by the local sshepherd process — never proxied, relayed, or exposed beyond localhost. |
+| v1.0 | 🔵 Planned | Stable Multi-Engine + Dashboard | Postgres/MySQL/Redis/MongoDB at parity — same envelope shape, same read-only guarantees, same audit trail. Dashboard hardened, threat model reviewed in [`SECURITY.md`](./SECURITY.md). Registry/envelope contract frozen — semver guarantees begin. |
 
 ## Topics
 

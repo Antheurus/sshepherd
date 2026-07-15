@@ -60,8 +60,19 @@ exception noted below.
   version/locale and can leak a hostname no redaction allowlist would catch.
 - `hosts list` and `setup ssh-alias list` return alias *names* only, never
   `HostName`/`User`/`Port`.
+- Every `files` op (`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) refuses any remote
+  path not pre-declared for that alias in `~/.config/sshepherd/files-allowlist.toml` —
+  fail-closed, same rule as `config get`/`put`/`validate` and `config-allowlist.toml`. See
+  Gotchas #11.
 - `.env`-shaped files (`files cat`) are masked by default (`KEY=***MASKED***`); an agent
-  must pass `--reveal KEY1,KEY2` to unmask specific keys.
+  must pass `--reveal KEY1,KEY2` to unmask specific keys, and each key must clear a
+  hardcoded secret-pattern denylist (`PASSWORD`, `SECRET`, `TOKEN`, `PRIVATE_KEY`,
+  `CREDENTIAL`, `API_KEY`, ...) *and* be pre-declared in
+  `~/.config/sshepherd/reveal-allowlist.toml` — the denylist wins even over a mistaken
+  allowlist entry. See Gotchas #11.
+- `files download` writes the remote file straight to a local destination path and never
+  returns its content in the JSON envelope — the safe way to pull any secrets-bearing file
+  to disk (see Gotchas #10 for the incident this closed).
 - Every mutating op writes an audit line (`~/.local/state/sshepherd/audit.jsonl`) —
   timestamp, alias, command, an arg hash (not raw args), and outcome — success or failure.
 
@@ -101,7 +112,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 9 registry-driven groups (52 ops) + 1 `setup` group (4 sub-groups, 10 actions)
+## Quick reference — 9 registry-driven groups (52 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
@@ -141,7 +152,7 @@ sshepherd services systemctl-reload lms-server nginx --yes
 sshepherd files ls lms-server /opt/lms
 sshepherd files cat lms-server /opt/lms/.env --reveal DB_HOST
 sshepherd files tail lms-server /var/log/syslog --n 100
-sshepherd files download lms-server /opt/lms/backup.sql
+sshepherd files download lms-server /opt/lms/backup.sql ./backup.sql
 sshepherd files disk-usage lms-server /var/lib/docker
 sshepherd files upload lms-server ./local.conf /opt/lms/local.conf --yes
 
@@ -186,6 +197,8 @@ sshepherd setup ssh-alias remove myserver --yes
 sshepherd setup db-target scaffold prod --alias myserver --user app --database appdb --container app_db --yes
 sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf,/opt/app/.env --yes
 sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app --yes
+sshepherd setup files-allowlist scaffold myserver --paths /opt/app/backup.sql,/opt/app/.env --yes
+sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --yes
 ```
 
 ## Gotchas
@@ -222,22 +235,67 @@ sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app 
    explicitly; the safe subset always applies.
 9. **`setup`'s only wall is `install`'s credential entry — and even that has a smart bypass
    first.** `register`, `keygen`, `remove`, `list`, `status`, `update`, `install`, and the
-   three scaffolders (`db-target`, `config-allowlist`, `deploy-recipe`) are all
-   agent-invocable, gated by `--yes` the same way as every other mutating op — none of them
-   needs a human at the keyboard, except the one narrow case below. Before `install` ever
-   opens a browser form, it runs two cheap, non-interactive pre-checks in order: a raw-socket
-   Tailscale-SSH banner peek (a Tailscale-fronted target refuses key install outright —
-   `TAILSCALE_SSH_DETECTED`, since Tailscale SSH doesn't use `authorized_keys`), then an
-   already-trusted probe with zero new credentials (if the key is already authorized,
-   `install` short-circuits with `data.method: 'already_trusted'` and no form ever opens).
-   Only when both pre-checks come back negative does `install` open a one-shot local browser
-   form, and a *human*, not the agent, supplies the credential there — either a password, or
-   a pasted existing private key (rejected with `INVALID_PRIVATE_KEY` if it doesn't parse, or
-   `PASSPHRASE_PROTECTED_KEY_UNSUPPORTED` if it's passphrase-protected). The agent may trigger
-   `install` and wait on it, but it structurally cannot see, log, or relay either credential —
-   both go straight from the browser submission into the install flow and never cross back
-   into the agent's context; the agent only ever receives the resulting `SetupResult`
-   (success or a typed error code), never the password or key itself.
+   five scaffolders (`db-target`, `config-allowlist`, `deploy-recipe`, `files-allowlist`,
+   `reveal-allowlist`) are all agent-invocable, gated by `--yes` the same way as every other
+   mutating op — none of them needs a human at the keyboard, except the one narrow case
+   below. Before `install` ever opens a browser form, it runs two cheap, non-interactive
+   pre-checks in order: a raw-socket Tailscale-SSH banner peek (a Tailscale-fronted target
+   refuses key install outright — `TAILSCALE_SSH_DETECTED`, since Tailscale SSH doesn't use
+   `authorized_keys`), then an already-trusted probe with zero new credentials (if the key
+   is already authorized, `install` short-circuits with `data.method: 'already_trusted'`
+   and no form ever opens). Only when both pre-checks come back negative does `install`
+   open a one-shot local browser form, and a *human*, not the agent, supplies the
+   credential there — either a password, or a pasted existing private key (rejected with
+   `INVALID_PRIVATE_KEY` if it doesn't parse, or `PASSPHRASE_PROTECTED_KEY_UNSUPPORTED` if
+   it's passphrase-protected). The agent may trigger `install` and wait on it, but it
+   structurally cannot see, log, or relay either credential — both go straight from the
+   browser submission into the install flow and never cross back into the agent's context;
+   the agent only ever receives the resulting `SetupResult` (success or a typed error
+   code), never the password or key itself.
+10. **`files download` used to inline the whole file as base64 in the JSON envelope —
+    fixed, but treat any `dist/sshepherd` built before this fix as unsafe on secrets.** A
+    real incident: an
+    agent ran `files download <alias> <remote .env.docker path> /tmp/dest.tmp` expecting
+    scp-like behavior (write to `/tmp/dest.tmp`, never see the bytes). The old
+    implementation took only one positional (`<path>`, remote-only) — the local
+    destination the agent typed was silently discarded (`mapArgsToCtx` ignores extra
+    positionals with no error), and the entire file was base64-encoded into
+    `data.content_base64` in the envelope printed to stdout, i.e. straight into the
+    agent's tool-result context, in a trivially-reversible encoding (`base64 -d`, no
+    special access needed). Unlike `files cat`, the old `files download` applied **no**
+    `.env` masking at all — it inlined any file's raw bytes regardless of shape, up to the
+    10 MiB `DOWNLOAD_MAX_BYTES` guard (above that it refused with `truncated: true`, not a
+    partial leak). This defeated the zero-knowledge promise for exactly the op whose name
+    most strongly implies "goes to disk, not to you." Fixed in `src/registry.ts`
+    (`filesDownload`): the op now takes **two** required positionals — `<path>` (remote
+    source) `<local_path>` (local destination) — and `shape()` decodes the base64 and
+    `writeFileSync`s it straight to `local_path` inside the CLI process; the envelope's
+    `data` is now `{found, truncated, size_bytes, written, local_path}` with **no**
+    `content_base64` field, ever. The raw bytes still transit the ssh channel and briefly
+    sit in local process memory to decode — that's the same local-process exposure
+    `files cat` already has before masking runs, not a new one; what changed is that the
+    content never crosses back into the envelope the agent reads. If a script or an older
+    compiled `dist/sshepherd` binary predates this fix, do not point `files download` at
+    any `.env`-shaped, key, or credential file until confirmed rebuilt — check the
+    envelope's `data` keys: `content_base64` present means the vulnerable version is
+    running.
+11. **`files` and `--reveal` are fail-closed as of v0.2.2 — a fresh install can't `files
+    ls`/`cat`/`download`/`upload`/etc. anywhere until an allowlist exists.** Before v0.2.2,
+    `files download`/`upload` had no allowlist at all (any remote path, in or out) and
+    `--reveal` could unmask any key name the agent typed, including an actually-secret one
+    (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`) — flagged by an external code review and
+    closed the same way `config`'s allowlist already worked. Now every `files` op checks
+    the path against `~/.config/sshepherd/files-allowlist.toml` (missing file = every path
+    refused, same fail-closed rule as `config-allowlist.toml`), and `files cat --reveal`
+    additionally checks each key against a hardcoded, non-overridable secret-pattern
+    denylist (`PASSWORD`, `PASSWD`, `SECRET`, `TOKEN`, `PRIVATE_KEY`, `CREDENTIAL`,
+    `API_KEY`, trailing `_KEY`/`_PASS`) *before* checking
+    `~/.config/sshepherd/reveal-allowlist.toml` — the denylist wins even if a key was
+    mistakenly added to the allowlist. Run `setup files-allowlist scaffold` and, if
+    `--reveal` is needed, `setup reveal-allowlist scaffold` before using the `files` group
+    on a fresh alias. The gate lives in exactly one place — `enforceAllowlist()` in
+    `registry.ts`, called from `executeOp()` before any op's `buildRemote` runs — not
+    hand-copied per op.
 
 ## Errors
 

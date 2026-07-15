@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { listHostAliases } from '../parsers/ssh-config.ts';
 import { loadRecipe, resolveStepOrder } from '../recipes.ts';
-import { assertConfigPathAllowed } from '../registry.ts';
+import { assertPathAllowed } from '../registry.ts';
 import { scaffold as scaffoldConfigAllowlist } from '../setup-config-allowlist.ts';
 import { scaffold as scaffoldDbTarget } from '../setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from '../setup-deploy-recipe.ts';
@@ -82,7 +82,7 @@ describe('setup cross-sub-command integration', () => {
         yes: true,
       });
       expect(allowlistResult.ok).toBe(true);
-      expect(() => assertConfigPathAllowed(ctxFor(alias), '/opt/app/.env')).not.toThrow();
+      expect(() => assertPathAllowed('config', ctxFor(alias), '/opt/app/.env')).not.toThrow();
 
       // Step 5: deploy-recipe scaffold — the recipe's alias is the same ssh alias too.
       const recipeResult = scaffoldDeployRecipe('demo', { alias, workdir: '/opt/app', yes: true });

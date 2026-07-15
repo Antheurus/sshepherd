@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { STEP_FAILURE_MARKER } from '../recipes.ts';
-import { executeOp, getOp, listOps } from '../registry.ts';
+import { enforceAllowlist, executeOp, getOp, listOps } from '../registry.ts';
 import { buildDbOpContext } from '../targets.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
 
@@ -429,22 +429,30 @@ describe('files cat — env file masking', () => {
     if (!op) {
       throw new Error('files cat op missing');
     }
-    const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
-    const envelope = await executeOp(
-      op,
-      { alias: 'lms-server', args: { path: '/srv/app/.env' } },
-      { transport: { runner } },
-    );
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-cat-mask-test-'));
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/srv/app/.env"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/srv/app/.env' } },
+        { transport: { runner } },
+      );
 
-    expect(envelope.ok).toBe(true);
-    const data = envelope.data as { masked: boolean; content: string | null };
-    expect(data.masked).toBe(true);
-    expect(data.content).toContain('DB_PASSWORD=***MASKED***');
-    expect(data.content).toContain('API_KEY=***MASKED***');
-    expect(data.content).toContain('NODE_ENV=***MASKED***');
-    const serialized = JSON.stringify(envelope);
-    expect(serialized).not.toContain('s3cr3t-value');
-    expect(serialized).not.toContain('abcd1234');
+      expect(envelope.ok).toBe(true);
+      const data = envelope.data as { masked: boolean; content: string | null };
+      expect(data.masked).toBe(true);
+      expect(data.content).toContain('DB_PASSWORD=***MASKED***');
+      expect(data.content).toContain('API_KEY=***MASKED***');
+      expect(data.content).toContain('NODE_ENV=***MASKED***');
+      const serialized = JSON.stringify(envelope);
+      expect(serialized).not.toContain('s3cr3t-value');
+      expect(serialized).not.toContain('abcd1234');
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
   });
 
   test('an explicit --reveal key unmasks only that key, others stay masked', async () => {
@@ -452,17 +460,58 @@ describe('files cat — env file masking', () => {
     if (!op) {
       throw new Error('files cat op missing');
     }
-    const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
-    const envelope = await executeOp(
-      op,
-      { alias: 'lms-server', args: { path: '/srv/app/.env', reveal: 'DB_PASSWORD' } },
-      { transport: { runner } },
-    );
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-cat-reveal-test-'));
+    const filesAllowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(filesAllowlistPath, '[lms-server]\npaths = ["/srv/app/.env"]\n');
+    const revealAllowlistPath = join(dir, 'reveal-allowlist.toml');
+    writeFileSync(revealAllowlistPath, '[lms-server]\nkeys = ["NODE_ENV"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = filesAllowlistPath;
+    process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = revealAllowlistPath;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/srv/app/.env', reveal: 'NODE_ENV' } },
+        { transport: { runner } },
+      );
 
-    const data = envelope.data as { masked: boolean; content: string | null };
-    expect(data.masked).toBe(true);
-    expect(data.content).toContain('DB_PASSWORD=s3cr3t-value');
-    expect(data.content).toContain('API_KEY=***MASKED***');
+      const data = envelope.data as { masked: boolean; content: string | null };
+      expect(data.masked).toBe(true);
+      expect(data.content).toContain('NODE_ENV=production');
+      expect(data.content).toContain('DB_PASSWORD=***MASKED***');
+      expect(data.content).toContain('API_KEY=***MASKED***');
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+      delete process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH;
+    }
+  });
+
+  test('a --reveal key matching the hardcoded secret-pattern denylist is refused even if allowlisted', async () => {
+    const op = getOp('files', 'cat');
+    if (!op) {
+      throw new Error('files cat op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-cat-reveal-denylist-test-'));
+    const filesAllowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(filesAllowlistPath, '[lms-server]\npaths = ["/srv/app/.env"]\n');
+    const revealAllowlistPath = join(dir, 'reveal-allowlist.toml');
+    // Mistakenly allowlisted anyway — the hardcoded denylist must still win.
+    writeFileSync(revealAllowlistPath, '[lms-server]\nkeys = ["DB_PASSWORD"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = filesAllowlistPath;
+    process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = revealAllowlistPath;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
+      await expect(
+        executeOp(
+          op,
+          { alias: 'lms-server', args: { path: '/srv/app/.env', reveal: 'DB_PASSWORD' } },
+          { transport: { runner } },
+        ),
+      ).rejects.toThrow(/hard-denied secret pattern/);
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+      delete process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH;
+    }
   });
 
   test('a non-.env path is never masked', async () => {
@@ -470,16 +519,24 @@ describe('files cat — env file masking', () => {
     if (!op) {
       throw new Error('files cat op missing');
     }
-    const runner = scriptedRunner(connectedRunOutcomes('plain config content\n'));
-    const envelope = await executeOp(
-      op,
-      { alias: 'lms-server', args: { path: '/srv/app/config.yml' } },
-      { transport: { runner } },
-    );
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-cat-plain-test-'));
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/srv/app/config.yml"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes('plain config content\n'));
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/srv/app/config.yml' } },
+        { transport: { runner } },
+      );
 
-    const data = envelope.data as { masked: boolean; content: string | null };
-    expect(data.masked).toBe(false);
-    expect(data.content).toBe('plain config content\n');
+      const data = envelope.data as { masked: boolean; content: string | null };
+      expect(data.masked).toBe(false);
+      expect(data.content).toBe('plain config content\n');
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
   });
 });
 
@@ -895,6 +952,88 @@ describe('executeOp — mutating gate: the ONE path every mutating op goes throu
       delete process.env.SSHEPHERD_RECIPE_PATH;
     }
   });
+
+  test('deploy run --timeout overrides the default whole-recipe budget passed to the transport', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const seenTimeouts: number[] = [];
+      const runner: SshRunner = async (_args, timeoutMs) => {
+        seenTimeouts.push(timeoutMs);
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+      await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo', timeout: '900', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true },
+      );
+
+      // Last call is the actual command run, wrapped as `timeout <sec> ...` — its
+      // local timeoutMs budget must reflect the override, not DEPLOY_TIMEOUT_SEC (300s).
+      const lastTimeout = seenTimeouts[seenTimeouts.length - 1];
+      expect(lastTimeout).toBeGreaterThan(900_000);
+      expect(lastTimeout).toBeLessThan(905_000);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('deploy run without --timeout keeps the default (300s) budget', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const seenTimeouts: number[] = [];
+      const runner: SshRunner = async (_args, timeoutMs) => {
+        seenTimeouts.push(timeoutMs);
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+      await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true },
+      );
+
+      const lastTimeout = seenTimeouts[seenTimeouts.length - 1];
+      expect(lastTimeout).toBeGreaterThan(300_000);
+      expect(lastTimeout).toBeLessThan(305_000);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('deploy run --timeout above the 3600s ceiling is clamped, not passed through raw', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const seenTimeouts: number[] = [];
+      const runner: SshRunner = async (_args, timeoutMs) => {
+        seenTimeouts.push(timeoutMs);
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+      await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo', timeout: '999999', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true },
+      );
+
+      const lastTimeout = seenTimeouts[seenTimeouts.length - 1];
+      expect(lastTimeout).toBeLessThanOrEqual(3_600_000 + 2_000);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
 });
 
 describe('deploy run — non-dry-run executes the combined resolved script (LMS gotcha: migrate after up)', () => {
@@ -1160,11 +1299,14 @@ describe('config get/put — allowlist refuses an undeclared path before ssh', (
     writeFileSync(allowlistPath, '[lms-server]\npaths = ["/etc/nginx/nginx.conf"]\n');
     process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = allowlistPath;
     try {
-      expect(() => op.buildRemote({ alias: 'lms-server', args: { path: '/etc/shadow' } })).toThrow(
-        /not on the allowlist/,
-      );
       expect(() =>
-        op.buildRemote({ alias: 'lms-server', args: { path: '/etc/nginx/nginx.conf' } }),
+        enforceAllowlist(op.allowlist, { alias: 'lms-server', args: { path: '/etc/shadow' } }),
+      ).toThrow(/not on the allowlist/);
+      expect(() =>
+        enforceAllowlist(op.allowlist, {
+          alias: 'lms-server',
+          args: { path: '/etc/nginx/nginx.conf' },
+        }),
       ).not.toThrow();
     } finally {
       delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
@@ -1183,10 +1325,145 @@ describe('config get/put — allowlist refuses an undeclared path before ssh', (
     );
     try {
       expect(() =>
-        op.buildRemote({ alias: 'lms-server', args: { path: '/etc/nginx/nginx.conf' } }),
+        enforceAllowlist(op.allowlist, {
+          alias: 'lms-server',
+          args: { path: '/etc/nginx/nginx.conf' },
+        }),
       ).toThrow(/not on the allowlist/);
     } finally {
       delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+    }
+  });
+});
+
+describe('files group — allowlist refuses an undeclared path before ssh', () => {
+  test('a path not declared for this alias is refused', () => {
+    const op = getOp('files', 'ls');
+    if (!op) {
+      throw new Error('files ls op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-allow-test-'));
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/opt/lms"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      expect(() =>
+        enforceAllowlist(op.allowlist, { alias: 'lms-server', args: { path: '/etc/shadow' } }),
+      ).toThrow(/not on the allowlist/);
+      expect(() =>
+        enforceAllowlist(op.allowlist, { alias: 'lms-server', args: { path: '/opt/lms' } }),
+      ).not.toThrow();
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
+  });
+
+  test('a missing allowlist file refuses every path (fail closed)', () => {
+    const op = getOp('files', 'ls');
+    if (!op) {
+      throw new Error('files ls op missing');
+    }
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = join(
+      tmpdir(),
+      'sshepherd-does-not-exist',
+      'files-allowlist.toml',
+    );
+    try {
+      expect(() =>
+        enforceAllowlist(op.allowlist, { alias: 'lms-server', args: { path: '/opt/lms' } }),
+      ).toThrow(/not on the allowlist/);
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
+  });
+
+  test('files upload checks remote_path (not local_path) against the allowlist', () => {
+    const op = getOp('files', 'upload');
+    if (!op) {
+      throw new Error('files upload op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-upload-allow-test-'));
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/opt/app/config.yml"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      expect(() =>
+        enforceAllowlist(op.allowlist, {
+          alias: 'lms-server',
+          args: { local_path: '/anywhere/on/disk.txt', remote_path: '/etc/shadow' },
+        }),
+      ).toThrow(/not on the allowlist/);
+      expect(() =>
+        enforceAllowlist(op.allowlist, {
+          alias: 'lms-server',
+          args: { local_path: '/anywhere/on/disk.txt', remote_path: '/opt/app/config.yml' },
+        }),
+      ).not.toThrow();
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
+  });
+});
+
+describe('files cat --reveal — hard denylist and per-alias reveal-allowlist', () => {
+  // These two isolate to just the reveal-keys policy (not op.allowlist, which also carries
+  // the files path policy) — they're about --reveal's own gate, not the path gate.
+  const REVEAL_ONLY_POLICY = [{ kind: 'reveal-keys' as const, argName: 'reveal' }];
+
+  test('a key not on the reveal-allowlist is refused even though it is not secret-shaped', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-reveal-allow-test-'));
+    const revealAllowlistPath = join(dir, 'reveal-allowlist.toml');
+    writeFileSync(revealAllowlistPath, '[lms-server]\nkeys = ["NODE_ENV"]\n');
+    process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = revealAllowlistPath;
+    try {
+      expect(() =>
+        enforceAllowlist(REVEAL_ONLY_POLICY, { alias: 'lms-server', args: { reveal: 'REGION' } }),
+      ).toThrow(/not on the reveal-allowlist/);
+      expect(() =>
+        enforceAllowlist(REVEAL_ONLY_POLICY, {
+          alias: 'lms-server',
+          args: { reveal: 'NODE_ENV' },
+        }),
+      ).not.toThrow();
+    } finally {
+      delete process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH;
+    }
+  });
+
+  test('a denylisted-pattern key is refused even when explicitly on the reveal-allowlist', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-reveal-denylist-test-'));
+    const revealAllowlistPath = join(dir, 'reveal-allowlist.toml');
+    writeFileSync(revealAllowlistPath, '[lms-server]\nkeys = ["AWS_SECRET_ACCESS_KEY"]\n');
+    process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = revealAllowlistPath;
+    try {
+      expect(() =>
+        enforceAllowlist(REVEAL_ONLY_POLICY, {
+          alias: 'lms-server',
+          args: { reveal: 'AWS_SECRET_ACCESS_KEY' },
+        }),
+      ).toThrow(/hard-denied secret pattern/);
+    } finally {
+      delete process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH;
+    }
+  });
+
+  test('no --reveal flag is a no-op — the reveal-keys policy never fires', () => {
+    // Isolated to just the reveal-keys policy (not op.allowlist, which also carries the
+    // files path policy) — this test is about --reveal being absent, not about the path.
+    process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = join(
+      tmpdir(),
+      'sshepherd-does-not-exist',
+      'reveal-allowlist.toml',
+    );
+    try {
+      expect(() =>
+        enforceAllowlist([{ kind: 'reveal-keys', argName: 'reveal' }], {
+          alias: 'lms-server',
+          args: {},
+        }),
+      ).not.toThrow();
+    } finally {
+      delete process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH;
     }
   });
 });
@@ -1645,6 +1922,118 @@ describe('security fail2ban — degrades to {available:false} when fail2ban-clie
   });
 });
 
+describe('files download — writes straight to local disk, never inlines content in the envelope', () => {
+  const SECRET_CONTENT = ['DB_PASSWORD=s3cr3t-value', 'JWT_SECRET=abcd1234', ''].join('\n');
+
+  test('decoded content lands on local disk, and the raw bytes never appear in the envelope JSON', async () => {
+    const op = getOp('files', 'download');
+    if (!op) {
+      throw new Error('files download op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-download-test-'));
+    const localPath = join(dir, 'downloaded.env');
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/opt/app/.env"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const contentBase64 = Buffer.from(SECRET_CONTENT, 'utf8').toString('base64');
+      const runner = scriptedRunner(
+        connectedRunOutcomes(`__OK__:${SECRET_CONTENT.length}\n${contentBase64}`),
+      );
+
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/opt/app/.env', local_path: localPath } },
+        { transport: { runner } },
+      );
+
+      expect(envelope.ok).toBe(true);
+      expect(envelope.data).toEqual({
+        found: true,
+        truncated: false,
+        size_bytes: SECRET_CONTENT.length,
+        written: true,
+        local_path: localPath,
+      });
+      expect(readFileSync(localPath, 'utf8')).toBe(SECRET_CONTENT);
+
+      const serialized = JSON.stringify(envelope);
+      expect(serialized).not.toContain('content_base64');
+      expect(serialized).not.toContain('s3cr3t-value');
+      expect(serialized).not.toContain('abcd1234');
+      expect(serialized).not.toContain(contentBase64);
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
+  });
+
+  test('a not-found remote path writes nothing locally and echoes a null local_path', async () => {
+    const op = getOp('files', 'download');
+    if (!op) {
+      throw new Error('files download op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-download-notfound-test-'));
+    const localPath = join(dir, 'never-written.txt');
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/opt/app/missing.txt"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes('__NOT_FOUND__'));
+
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/opt/app/missing.txt', local_path: localPath } },
+        { transport: { runner } },
+      );
+
+      expect(envelope.ok).toBe(true);
+      expect(envelope.data).toEqual({
+        found: false,
+        truncated: false,
+        size_bytes: null,
+        written: false,
+        local_path: null,
+      });
+      expect(existsSync(localPath)).toBe(false);
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
+  });
+
+  test('a too-large remote file writes nothing locally and reports truncated', async () => {
+    const op = getOp('files', 'download');
+    if (!op) {
+      throw new Error('files download op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-download-toolarge-test-'));
+    const localPath = join(dir, 'never-written.bin');
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/opt/app/huge.bin"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes('__TOO_LARGE__:99999999'));
+
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/opt/app/huge.bin', local_path: localPath } },
+        { transport: { runner } },
+      );
+
+      expect(envelope.ok).toBe(true);
+      expect(envelope.data).toEqual({
+        found: true,
+        truncated: true,
+        size_bytes: 99999999,
+        written: false,
+        local_path: null,
+      });
+      expect(existsSync(localPath)).toBe(false);
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
+  });
+});
+
 describe('files upload — base64-over-ssh, no scp/sftp, no backup, gated like every mutating op', () => {
   test('a missing local file fails locally with a clear error before any transport', () => {
     const op = getOp('files', 'upload');
@@ -1722,13 +2111,24 @@ describe('files upload — base64-over-ssh, no scp/sftp, no backup, gated like e
     const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-upload-gate-ok-test-'));
     const localPath = join(dir, 'source.txt');
     writeFileSync(localPath, 'content\n');
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/opt/app/config.yml"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
     const auditLogPath = tempAuditLogPath();
-    const runner = scriptedRunner(connectedRunOutcomes(''));
-    const envelope = await executeOp(
-      op,
-      { alias: 'lms-server', args: { local_path: localPath, remote_path: '/opt/app/config.yml' } },
-      { transport: { runner }, yes: true, auditLogPath },
-    );
+    let envelope: Awaited<ReturnType<typeof executeOp>>;
+    try {
+      const runner = scriptedRunner(connectedRunOutcomes(''));
+      envelope = await executeOp(
+        op,
+        {
+          alias: 'lms-server',
+          args: { local_path: localPath, remote_path: '/opt/app/config.yml' },
+        },
+        { transport: { runner }, yes: true, auditLogPath },
+      );
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
 
     expect(envelope.ok).toBe(true);
     expect(envelope.data).toEqual({ written: true, remote_path: '/opt/app/config.yml' });

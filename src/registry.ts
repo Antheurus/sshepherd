@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { auditMutating, confirmGate } from './audit.ts';
@@ -47,7 +47,15 @@ import {
 } from './recipes.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
 import { errorInfo, run, type TransportDeps } from './transport.ts';
-import type { ArgSpec, Envelope, OpContext, OpSpec, OutputMode, RawResult } from './types.ts';
+import type {
+  AllowlistPolicy,
+  ArgSpec,
+  Envelope,
+  OpContext,
+  OpSpec,
+  OutputMode,
+  RawResult,
+} from './types.ts';
 
 const DEFAULT_TIMEOUT_SEC = 12;
 const LOG_TIMEOUT_SEC = 20;
@@ -85,6 +93,26 @@ function optStrOrNull(ctx: OpContext, key: string): string | null {
 function optBool(ctx: OpContext, key: string, fallback: boolean): boolean {
   const value = ctx.args[key];
   return typeof value === 'boolean' ? value : fallback;
+}
+
+/** Ceiling for any `--timeout` override — generous enough for a genuinely slow one-off
+ *  migration/build, low enough that a typo (`--timeout 9999999999`) can't wedge a
+ *  session open indefinitely. */
+const MAX_TIMEOUT_OVERRIDE_SEC = 3_600;
+
+/** `op.timeoutSec` is the static per-op default; ops that declare a `timeout` ArgSpec
+ *  (currently `deploy run`/`deploy migrate`) let the caller raise it for a known-slow
+ *  step instead of retrying blind against the same fixed budget every time. */
+function effectiveTimeoutSec(op: OpSpec, ctx: OpContext): number {
+  const raw = ctx.args.timeout;
+  if (typeof raw !== 'string') {
+    return op.timeoutSec;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return op.timeoutSec;
+  }
+  return Math.min(parsed, MAX_TIMEOUT_OVERRIDE_SEC);
 }
 
 function arg(name: string, kind: ArgSpec['kind'], required: boolean, description: string): ArgSpec {
@@ -942,10 +970,13 @@ const filesLs: OpSpec<ReturnType<typeof parseLs>> = {
   group: 'files',
   name: 'ls',
   summary: 'Directory listing (structured, byte sizes).',
-  args: [arg('path', 'positional', true, 'Remote directory path.')],
+  args: [
+    arg('path', 'positional', true, 'Remote directory path — must be on files-allowlist.toml.'),
+  ],
   mutating: false,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
   buildRemote: (ctx) => shellJoin(['ls', '-la', '--time-style=long-iso', reqStr(ctx, 'path')]),
   shape: (parsed) => parseLs(parsed as string),
 };
@@ -986,12 +1017,21 @@ const filesCat: OpSpec<FilesCatResult> = {
   name: 'cat',
   summary: `Read a file (size-guarded at ${FILE_CAT_MAX_BYTES} bytes); .env-shaped files are masked unless --reveal names the key.`,
   args: [
-    arg('path', 'positional', true, 'Remote file path.'),
-    arg('reveal', 'flag', false, 'Comma-separated key names to unmask (env files only).'),
+    arg('path', 'positional', true, 'Remote file path — must be on files-allowlist.toml.'),
+    arg(
+      'reveal',
+      'flag',
+      false,
+      'Comma-separated key names to unmask (env files only) — each must clear the hardcoded secret-pattern denylist and be on reveal-allowlist.toml.',
+    ),
   ],
   mutating: false,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [
+    { kind: 'path', scope: 'files', argName: 'path' },
+    { kind: 'reveal-keys', argName: 'reveal' },
+  ],
   buildRemote: (ctx) => {
     const path = reqStr(ctx, 'path');
     const script = [
@@ -1047,12 +1087,13 @@ const filesTail: OpSpec<FilesTailResult> = {
   name: 'tail',
   summary: 'Tail N lines of a file.',
   args: [
-    arg('path', 'positional', true, 'Remote file path.'),
+    arg('path', 'positional', true, 'Remote file path — must be on files-allowlist.toml.'),
     arg('n', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
   ],
   mutating: false,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
   buildRemote: (ctx) =>
     shellJoin(['tail', '-n', optStr(ctx, 'n', String(DEFAULT_LOG_TAIL)), reqStr(ctx, 'path')]),
   shape: (parsed) => {
@@ -1068,17 +1109,39 @@ interface FilesDownloadResult {
   found: boolean;
   truncated: boolean;
   size_bytes: number | null;
-  content_base64: string | null;
+  written: boolean;
+  local_path: string | null;
+}
+
+/** Writes the decoded bytes straight to local disk and never returns them — this is the
+ *  zero-knowledge boundary for `files download`. Earlier versions inlined the whole file
+ *  as `content_base64` in the JSON envelope (the caller's tool-result/context), which
+ *  defeated `files cat`'s masking for any file downloaded this way, `.env`-shaped or not
+ *  (see SKILL.md Gotchas #10). Base64 still transits the ssh channel and briefly lives in
+ *  this process's memory to decode — that's the same local-process exposure `files cat`
+ *  already has before masking runs, not a new one; the fix is that raw content never
+ *  crosses back into the envelope that reaches the agent. */
+function writeDownloadedFile(localPath: string, contentBase64: string): void {
+  try {
+    writeFileSync(localPath, Buffer.from(contentBase64, 'base64'));
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(`files download: could not write local file '${localPath}': ${reason}`);
+  }
 }
 
 const filesDownload: OpSpec<FilesDownloadResult> = {
   group: 'files',
   name: 'download',
-  summary: `Read a file as base64 over the existing ssh channel (size-guarded at ${DOWNLOAD_MAX_BYTES} bytes) — no separate scp/sftp process.`,
-  args: [arg('path', 'positional', true, 'Remote file path.')],
+  summary: `Read a file as base64 over the existing ssh channel (size-guarded at ${DOWNLOAD_MAX_BYTES} bytes) and write it straight to a local path — no separate scp/sftp process, and the raw content never enters the JSON envelope.`,
+  args: [
+    arg('path', 'positional', true, 'Remote file path — must be on files-allowlist.toml.'),
+    arg('local_path', 'positional', true, 'Local destination path to write the file to.'),
+  ],
   mutating: false,
   timeoutSec: DOWNLOAD_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
   buildRemote: (ctx) => {
     const path = reqStr(ctx, 'path');
     const script = [
@@ -1089,13 +1152,14 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
     ].join('; ');
     return shellJoin(['sh', '-c', script]);
   },
-  shape: (parsed) => {
+  shape: (parsed, ctx) => {
     const text = parsed as string;
+    const localPath = reqStr(ctx, 'local_path');
     const newlineIndex = text.indexOf('\n');
     const firstLine = (newlineIndex === -1 ? text : text.slice(0, newlineIndex)).trim();
 
     if (firstLine === '__NOT_FOUND__') {
-      return { found: false, truncated: false, size_bytes: null, content_base64: null };
+      return { found: false, truncated: false, size_bytes: null, written: false, local_path: null };
     }
     const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(firstLine);
     if (tooLarge) {
@@ -1104,16 +1168,20 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
         found: true,
         truncated: true,
         size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
-        content_base64: null,
+        written: false,
+        local_path: null,
       };
     }
     const ok = /^__OK__:(\d+)/.exec(firstLine);
     const size = ok?.[1];
+    const contentBase64 = newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim();
+    writeDownloadedFile(localPath, contentBase64);
     return {
       found: true,
       truncated: false,
       size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
-      content_base64: newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim(),
+      written: true,
+      local_path: localPath,
     };
   },
 };
@@ -1127,10 +1195,11 @@ const filesDiskUsage: OpSpec<FilesDiskUsageResult> = {
   group: 'files',
   name: 'disk-usage',
   summary: 'Total size in bytes of a remote path (du -sb).',
-  args: [arg('path', 'positional', true, 'Remote path.')],
+  args: [arg('path', 'positional', true, 'Remote path — must be on files-allowlist.toml.')],
   mutating: false,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
   buildRemote: (ctx) => shellJoin(['du', '-sb', reqStr(ctx, 'path')]),
   shape: (parsed, ctx) => {
     const entries = parseDu(parsed as string);
@@ -1159,14 +1228,20 @@ const filesUpload: OpSpec<FilesUploadResult> = {
   group: 'files',
   name: 'upload',
   summary:
-    'Upload a local file to a remote path over the existing ssh channel (base64, no scp/sftp) — no allowlist, no backup, gated by --yes like every other mutating op.',
+    'Upload a local file to a remote path over the existing ssh channel (base64, no scp/sftp) — destination must be on files-allowlist.toml, no backup, gated by --yes like every other mutating op.',
   args: [
     arg('local_path', 'positional', true, 'Local file path to read and upload.'),
-    arg('remote_path', 'positional', true, 'Destination path on the remote.'),
+    arg(
+      'remote_path',
+      'positional',
+      true,
+      'Destination path on the remote — must be on files-allowlist.toml.',
+    ),
   ],
   mutating: true,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'remote_path' }],
   buildRemote: (ctx) => {
     const localPath = reqStr(ctx, 'local_path');
     const remotePath = reqStr(ctx, 'remote_path');
@@ -1189,16 +1264,34 @@ interface ConfigAllowlist {
   [alias: string]: string[];
 }
 
-function defaultConfigAllowlistPath(): string {
-  const override = process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
+/**
+ * `scope` picks both the env override key (`SSHEPHERD_CONFIG_ALLOWLIST_PATH` /
+ * `SSHEPHERD_FILES_ALLOWLIST_PATH`) and the default filename (`<scope>-allowlist.toml`) —
+ * one function instead of a copy per scope, per coding-standard.md rule 5/17.
+ */
+function defaultPathAllowlistPath(scope: 'config' | 'files'): string {
+  const envKey =
+    scope === 'config' ? 'SSHEPHERD_CONFIG_ALLOWLIST_PATH' : 'SSHEPHERD_FILES_ALLOWLIST_PATH';
+  const override = process.env[envKey];
   if (override && override.length > 0) {
     return override;
   }
-  return join(homedir(), '.config', 'sshepherd', 'config-allowlist.toml');
+  return join(homedir(), '.config', 'sshepherd', `${scope}-allowlist.toml`);
+}
+
+function defaultConfigAllowlistPath(): string {
+  return defaultPathAllowlistPath('config');
+}
+
+function defaultFilesAllowlistPath(): string {
+  return defaultPathAllowlistPath('files');
 }
 
 /** Missing file yields an empty allowlist (mirrors targets.ts's missing-config behavior) — every path refused until declared. */
-function loadConfigAllowlist(path: string = defaultConfigAllowlistPath()): ConfigAllowlist {
+function loadPathAllowlist(
+  scope: 'config' | 'files',
+  path: string = defaultPathAllowlistPath(scope),
+): ConfigAllowlist {
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
@@ -1215,12 +1308,108 @@ function loadConfigAllowlist(path: string = defaultConfigAllowlistPath()): Confi
   return allowlist;
 }
 
-/** Local refusal, before ssh — a path not declared for this alias never reaches the remote. */
-function assertConfigPathAllowed(ctx: OpContext, path: string): void {
-  const allowlist = loadConfigAllowlist();
+function loadConfigAllowlist(path: string = defaultConfigAllowlistPath()): ConfigAllowlist {
+  return loadPathAllowlist('config', path);
+}
+
+function loadFilesAllowlist(path: string = defaultFilesAllowlistPath()): ConfigAllowlist {
+  return loadPathAllowlist('files', path);
+}
+
+/** Local refusal, before ssh — a path not declared for this alias never reaches the remote.
+ *  Shared by both `config` and `files` ops; which scope's allowlist file to check comes from
+ *  the op's declarative `allowlist` policy, not a per-op call site (see `executeOp`). */
+function assertPathAllowed(scope: 'config' | 'files', ctx: OpContext, path: string): void {
+  const allowlist = loadPathAllowlist(scope);
   const allowed = allowlist[ctx.alias] ?? [];
   if (!allowed.includes(path)) {
-    throw new Error(`config path '${path}' is not on the allowlist for alias '${ctx.alias}'`);
+    throw new Error(`${scope} path '${path}' is not on the allowlist for alias '${ctx.alias}'`);
+  }
+}
+
+interface RevealAllowlist {
+  [alias: string]: string[];
+}
+
+function defaultRevealAllowlistPath(): string {
+  const override = process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH;
+  if (override && override.length > 0) {
+    return override;
+  }
+  return join(homedir(), '.config', 'sshepherd', 'reveal-allowlist.toml');
+}
+
+/** Missing file yields an empty allowlist — every `--reveal` key refused until declared,
+ *  same fail-closed rule as `loadPathAllowlist`. */
+function loadRevealAllowlist(path: string = defaultRevealAllowlistPath()): RevealAllowlist {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return {};
+  }
+  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  const allowlist: RevealAllowlist = {};
+  for (const [alias, raw] of Object.entries(parsed)) {
+    const record = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+    const keys = Array.isArray(record.keys) ? record.keys : [];
+    allowlist[alias] = keys.filter((k): k is string => typeof k === 'string');
+  }
+  return allowlist;
+}
+
+/** Hardcoded, non-overridable — checked before the per-alias reveal-allowlist, so a key
+ *  matching one of these patterns can never be revealed even if it was mistakenly added to
+ *  reveal-allowlist.toml. Case-insensitive substring/suffix match against the key name only
+ *  (never the value, which `files cat` never sees unmasked until this check passes). */
+const REVEAL_DENYLIST_PATTERNS: RegExp[] = [
+  /PASSWORD/i,
+  /PASSWD/i,
+  /SECRET/i,
+  /TOKEN/i,
+  /PRIVATE[_-]?KEY/i,
+  /CREDENTIAL/i,
+  /API[_-]?KEY/i,
+  /_KEY$/i,
+  /_PASS$/i,
+];
+
+/** Local refusal, before ssh — every requested `--reveal` key must clear the hardcoded
+ *  denylist first, then be declared on the alias's reveal-allowlist.toml entry. */
+function assertRevealKeysAllowed(ctx: OpContext, keys: Set<string>): void {
+  const allowlist = loadRevealAllowlist();
+  const allowedForAlias = new Set(allowlist[ctx.alias] ?? []);
+  for (const key of keys) {
+    if (REVEAL_DENYLIST_PATTERNS.some((pattern) => pattern.test(key))) {
+      throw new Error(
+        `reveal key '${key}' matches a hard-denied secret pattern and can never be revealed`,
+      );
+    }
+    if (!allowedForAlias.has(key)) {
+      throw new Error(
+        `reveal key '${key}' is not on the reveal-allowlist for alias '${ctx.alias}'`,
+      );
+    }
+  }
+}
+
+/** The one place an `OpSpec.allowlist` policy is enforced — called from `executeOp` before
+ *  `buildRemote` runs, so no op implements its own allowlist check (coding-standard.md rule
+ *  17). Throws the same way the old per-op `assertConfigPathAllowed` calls did; the CLI's
+ *  top-level `main()` catch converts the throw into a printed error + exit code 2. */
+function enforceAllowlist(policies: AllowlistPolicy[] | undefined, ctx: OpContext): void {
+  for (const policy of policies ?? []) {
+    if (policy.kind === 'path') {
+      assertPathAllowed(policy.scope, ctx, reqStr(ctx, policy.argName));
+      continue;
+    }
+    const keys = new Set(
+      optStr(ctx, policy.argName, '')
+        .split(',')
+        .map((key) => key.trim())
+        .filter((key) => key.length > 0),
+    );
+    assertRevealKeysAllowed(ctx, keys);
   }
 }
 
@@ -1241,9 +1430,9 @@ const configGet: OpSpec<ConfigGetResult> = {
   mutating: false,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'config', argName: 'path' }],
   buildRemote: (ctx) => {
     const path = reqStr(ctx, 'path');
-    assertConfigPathAllowed(ctx, path);
     const script = [
       `p=${shq(path)}`,
       'if [ ! -f "$p" ]; then echo __NOT_FOUND__; exit 0; fi',
@@ -1304,11 +1493,8 @@ const configValidate: OpSpec<{ valid: boolean }> = {
   mutating: false,
   timeoutSec: DEFAULT_TIMEOUT_SEC,
   output: 'raw',
-  buildRemote: (ctx) => {
-    const path = reqStr(ctx, 'path');
-    assertConfigPathAllowed(ctx, path);
-    return buildConfigValidateCommand(path);
-  },
+  allowlist: [{ kind: 'path', scope: 'config', argName: 'path' }],
+  buildRemote: (ctx) => buildConfigValidateCommand(reqStr(ctx, 'path')),
   shape: () => ({ valid: true }),
 };
 
@@ -1339,9 +1525,9 @@ const configPut: OpSpec<{ written: boolean }> = {
   mutating: true,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'config', argName: 'path' }],
   buildRemote: (ctx) => {
     const path = reqStr(ctx, 'path');
-    assertConfigPathAllowed(ctx, path);
     const contentBase64 = reqStr(ctx, 'content-base64');
     return buildConfigPutScript(path, contentBase64);
   },
@@ -1671,6 +1857,15 @@ const deployRun: OpSpec<DeployPlan | { output: string }> = {
       false,
       'Print the resolved plan; execute nothing, no confirmation needed.',
     ),
+    arg(
+      'timeout',
+      'flag',
+      false,
+      `Override the whole-recipe timeout in seconds (default ${DEPLOY_TIMEOUT_SEC}). ` +
+        'A recipe with a known-slow step (a big SQL migration, a slow build) hits the ' +
+        'default budget as a flat SSH_TRANSPORT_ERROR/COMMAND_TIMEOUT with no signal ' +
+        "it was 'almost done' — raise this instead of retrying blind.",
+    ),
   ],
   mutating: true,
   timeoutSec: DEPLOY_TIMEOUT_SEC,
@@ -1744,7 +1939,15 @@ const deployMigrate: OpSpec<{ output: string }> = {
   group: 'deploy',
   name: 'migrate',
   summary: 'Run only the migrate-kind steps of a recipe, in resolved order.',
-  args: [arg('recipe', 'positional', true, 'Recipe name.')],
+  args: [
+    arg('recipe', 'positional', true, 'Recipe name.'),
+    arg(
+      'timeout',
+      'flag',
+      false,
+      `Override the timeout in seconds (default ${DEPLOY_TIMEOUT_SEC}).`,
+    ),
+  ],
   mutating: true,
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   output: 'raw',
@@ -2128,6 +2331,7 @@ export async function executeOp(
     });
   }
 
+  enforceAllowlist(op.allowlist, ctx);
   const remoteCmd = op.buildRemote(ctx);
 
   if (remoteCmd === null) {
@@ -2145,7 +2349,7 @@ export async function executeOp(
     return envelope;
   }
 
-  const result = await run(ctx.alias, remoteCmd, op.timeoutSec, deps.transport);
+  const result = await run(ctx.alias, remoteCmd, effectiveTimeoutSec(op, ctx), deps.transport);
   if (result.error) {
     if (requiresConfirm) {
       auditFor(deps, ctx.alias, command, ctx, 'error');
@@ -2168,11 +2372,20 @@ export async function executeOp(
 }
 
 // Re-exported for parser unit tests and future CLI --help rendering.
-// Re-exported for setup config-allowlist scaffolding and its round-trip tests (mirrors
-// targets.ts's exported loadTargets/defaultTargetsPath — see setup-config-allowlist.ts).
+// Re-exported for setup config-allowlist/files-allowlist/reveal-allowlist scaffolding and
+// their round-trip tests (mirrors targets.ts's exported loadTargets/defaultTargetsPath —
+// see setup-config-allowlist.ts, setup-files-allowlist.ts, setup-reveal-allowlist.ts).
 export {
-  assertConfigPathAllowed,
+  assertPathAllowed,
+  assertRevealKeysAllowed,
   defaultConfigAllowlistPath,
+  defaultFilesAllowlistPath,
+  defaultRevealAllowlistPath,
+  enforceAllowlist,
   loadConfigAllowlist,
+  loadFilesAllowlist,
+  loadPathAllowlist,
+  loadRevealAllowlist,
   parseHumanBytes,
+  REVEAL_DENYLIST_PATTERNS,
 };

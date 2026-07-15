@@ -64,6 +64,19 @@ export interface ArgSpec {
 }
 
 /**
+ * Declarative allowlist gate, enforced once in `executeOp` before `buildRemote` runs —
+ * no op's `buildRemote` calls an assert function itself (see `coding-standard.md` rule 17,
+ * "Centralized by Default"). `path` covers `config`/`files` ops whose named arg is a
+ * remote path that must be pre-declared per-alias in that scope's `<scope>-allowlist.toml`.
+ * `reveal-keys` covers `files cat --reveal`: the named arg is a comma-separated key list,
+ * each checked against a hardcoded secret-pattern denylist first (never overridable), then
+ * against the per-alias `reveal-allowlist.toml`.
+ */
+export type AllowlistPolicy =
+  | { kind: 'path'; scope: 'config' | 'files'; argName: string }
+  | { kind: 'reveal-keys'; argName: string };
+
+/**
  * One registry row per op (registry-dispatch pattern — coding-standard.md rule 5/17).
  * `buildRemote` returns `null` for the handful of host-local ops (e.g. `hosts list`)
  * that never open an ssh connection; those ops must supply `runLocal` instead.
@@ -85,4 +98,6 @@ export interface OpSpec<T = unknown> {
    *  Returns `undefined` when nothing to add, in which case `data` stays `null`. */
   shapeError?: (raw: RawResult, ctx: OpContext) => Record<string, unknown> | undefined;
   runLocal?: (ctx: OpContext, sshConfigPath: string) => T;
+  /** Optional: one or more allowlist gates `executeOp` enforces before `buildRemote`. */
+  allowlist?: AllowlistPolicy[];
 }

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertConfigPathAllowed } from '../registry.ts';
+import { assertPathAllowed } from '../registry.ts';
 import { scaffold } from '../setup-config-allowlist.ts';
 import type { OpContext } from '../types.ts';
 
@@ -16,7 +16,7 @@ function ctxFor(alias: string): OpContext {
 }
 
 describe('scaffold', () => {
-  test('a new alias round-trips through the real assertConfigPathAllowed for every listed path', () => {
+  test('a new alias round-trips through the real assertPathAllowed for every listed path', () => {
     const path = tempAllowlistPath();
     const result = scaffold(
       'lms-server',
@@ -34,10 +34,12 @@ describe('scaffold', () => {
     process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = path;
     try {
       expect(() =>
-        assertConfigPathAllowed(ctxFor('lms-server'), '/etc/nginx/nginx.conf'),
+        assertPathAllowed('config', ctxFor('lms-server'), '/etc/nginx/nginx.conf'),
       ).not.toThrow();
-      expect(() => assertConfigPathAllowed(ctxFor('lms-server'), '/opt/lms/.env')).not.toThrow();
-      expect(() => assertConfigPathAllowed(ctxFor('lms-server'), '/etc/shadow')).toThrow();
+      expect(() =>
+        assertPathAllowed('config', ctxFor('lms-server'), '/opt/lms/.env'),
+      ).not.toThrow();
+      expect(() => assertPathAllowed('config', ctxFor('lms-server'), '/etc/shadow')).toThrow();
     } finally {
       if (previousEnv === undefined) {
         delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;
@@ -90,9 +92,9 @@ describe('scaffold', () => {
     process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = path;
     try {
       expect(() =>
-        assertConfigPathAllowed(ctxFor('lms-server'), '/etc/nginx/nginx.conf'),
+        assertPathAllowed('config', ctxFor('lms-server'), '/etc/nginx/nginx.conf'),
       ).not.toThrow();
-      expect(() => assertConfigPathAllowed(ctxFor('staging-1'), '/opt/app/.env')).not.toThrow();
+      expect(() => assertPathAllowed('config', ctxFor('staging-1'), '/opt/app/.env')).not.toThrow();
     } finally {
       if (previousEnv === undefined) {
         delete process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH;

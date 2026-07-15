@@ -1,5 +1,32 @@
 # sshepherd Changelog
 
+## v0.2.2 — `files` and `--reveal` now require an allowlist (breaking change)
+
+- Fixed: the `files` group (`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) had no
+  restriction on which remote paths it could touch — any path was readable or writable.
+  Every `files` op now refuses a path that isn't pre-declared for that alias in
+  `~/.config/sshepherd/files-allowlist.toml`, the same rule `config get`/`put` already
+  followed.
+- Fixed: `files cat --reveal` could unmask any key name, including a genuinely secret one
+  (`DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`). Each requested key is now checked against a
+  hardcoded list of secret-looking patterns (refused unconditionally, no override) and must
+  also be pre-declared in `~/.config/sshepherd/reveal-allowlist.toml`.
+- Action required: run `sshepherd setup files-allowlist scaffold <alias> --paths
+  <path1,path2> --yes` before using any `files` op on that alias, and — only if you use
+  `--reveal` — `sshepherd setup reveal-allowlist scaffold <alias> --keys <key1,key2> --yes`
+  for the specific env keys you need unmasked.
+
+## v0.2.1 — `files download` now writes to disk instead of returning file contents
+
+- Fixed: `files download` was silently returning the entire downloaded file's contents
+  (base64-encoded) in its response instead of writing it to a local path — meaning secrets
+  files (`.env`, credentials) downloaded this way could end up visible wherever that
+  response was read. `files download` now requires a local destination path as a second
+  argument and writes the file straight to disk; the response only confirms the write
+  succeeded and never contains the file's contents.
+- Action required: if you use `files download`, add a local destination path as the second
+  argument, e.g. `sshepherd files download myserver /opt/lms/backup.sql ./backup.sql`.
+
 ## v0.2.0 — `setup`: onboard a new server without hand-editing config files
 
 - New: `sshepherd setup`, a separate command group you run yourself in your own terminal —
