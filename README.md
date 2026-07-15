@@ -171,38 +171,13 @@ for setup, the pre-PR checklist, and where things live.
 sshepherd is under active development. This is a real roadmap, not a wishlist — items move
 🔵 Planned → 🟡 In Progress → 🟢 Shipped as they land. Currently at `v0.2.1`.
 
-**v0.3 — Multi-Database Foundations** 🔵
-- Generalize the `db` group from Postgres-only to a pluggable multi-engine model
-- MySQL/MariaDB read-only introspection: query (SELECT-only, dialect-aware advisory check),
-  schema browse, table stats — same pattern as `db query` today
-
-**v0.4 — Redis Support** 🔵
-- Read-only Redis introspection: pattern-scoped key browsing (no `KEYS *`), TTL/type
-  inspection, memory stats, slowlog tail
-- Dangerous commands (`FLUSHALL`, `CONFIG SET`, ...) hard-blocked at the registry level,
-  not just advisory
-
-**v0.5 — MongoDB Support** 🔵
-- Read-only Mongo introspection: collection stats, guarded find queries, index inspection
-
-**v0.6 — Local Web Dashboard** 🔵
-- Localhost-only web server (`127.0.0.1`, random port + session token) — a lightweight,
-  Termius-inspired visual layer, reachable from a browser instead of raw CLI output
-- Renders the same live health/service/log state the CLI already produces, as a dashboard
-  instead of raw JSON
-- Both a human and an agent can *view* session state — the agent reads it the same
-  zero-knowledge way it always has, through curated endpoints, never a raw live shell
-- Credentials are typed **only by a human**, via the same one-shot local browser-form
-  pattern `setup ssh-alias install` already uses — the agent can trigger "open this
-  session" but never sees, logs, or relays a password
-- The SSH socket is opened only by the local sshepherd process on the user's own machine —
-  never proxied, relayed, or exposed beyond localhost
-
-**v1.0 — Stable Multi-Engine + Dashboard** 🔵
-- Postgres/MySQL/Redis/MongoDB at parity — same envelope shape, same read-only guarantees,
-  same audit trail
-- Dashboard hardened, threat model reviewed in [`SECURITY.md`](./SECURITY.md)
-- Registry/envelope contract frozen — semver guarantees begin
+| Version | Status | Focus | What's in it |
+|---|---|---|---|
+| v0.3 | 🔵 Planned | Multi-Database Foundations | Generalize the `db` group from Postgres-only to a pluggable multi-engine model. MySQL/MariaDB read-only introspection: query (SELECT-only, dialect-aware advisory check), schema browse, table stats — same pattern as `db query` today. |
+| v0.4 | 🔵 Planned | Redis Support | Read-only introspection: pattern-scoped key browsing (no `KEYS *`), TTL/type inspection, memory stats, slowlog tail. Dangerous commands (`FLUSHALL`, `CONFIG SET`, ...) hard-blocked at the registry level, not just advisory. |
+| v0.5 | 🔵 Planned | MongoDB Support | Read-only introspection: collection stats, guarded find queries, index inspection. |
+| v0.6 | 🔵 Planned | Local Web Dashboard | Localhost-only server (`127.0.0.1`, random port + session token), a lightweight Termius-inspired view of the same live health/service/log state the CLI already produces. Both human and agent can *view* session state — the agent stays zero-knowledge, reading only curated endpoints, never a raw live shell. Credentials are typed **only by a human**, via the same one-shot local browser-form pattern `setup ssh-alias install` already uses. The SSH socket is opened only by the local sshepherd process — never proxied, relayed, or exposed beyond localhost. |
+| v1.0 | 🔵 Planned | Stable Multi-Engine + Dashboard | Postgres/MySQL/Redis/MongoDB at parity — same envelope shape, same read-only guarantees, same audit trail. Dashboard hardened, threat model reviewed in [`SECURITY.md`](./SECURITY.md). Registry/envelope contract frozen — semver guarantees begin. |
 
 ## Topics
 
