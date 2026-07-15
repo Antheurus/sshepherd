@@ -895,6 +895,88 @@ describe('executeOp — mutating gate: the ONE path every mutating op goes throu
       delete process.env.SSHEPHERD_RECIPE_PATH;
     }
   });
+
+  test('deploy run --timeout overrides the default whole-recipe budget passed to the transport', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const seenTimeouts: number[] = [];
+      const runner: SshRunner = async (_args, timeoutMs) => {
+        seenTimeouts.push(timeoutMs);
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+      await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo', timeout: '900', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true },
+      );
+
+      // Last call is the actual command run, wrapped as `timeout <sec> ...` — its
+      // local timeoutMs budget must reflect the override, not DEPLOY_TIMEOUT_SEC (300s).
+      const lastTimeout = seenTimeouts[seenTimeouts.length - 1];
+      expect(lastTimeout).toBeGreaterThan(900_000);
+      expect(lastTimeout).toBeLessThan(905_000);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('deploy run without --timeout keeps the default (300s) budget', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const seenTimeouts: number[] = [];
+      const runner: SshRunner = async (_args, timeoutMs) => {
+        seenTimeouts.push(timeoutMs);
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+      await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true },
+      );
+
+      const lastTimeout = seenTimeouts[seenTimeouts.length - 1];
+      expect(lastTimeout).toBeGreaterThan(300_000);
+      expect(lastTimeout).toBeLessThan(305_000);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
+
+  test('deploy run --timeout above the 3600s ceiling is clamped, not passed through raw', async () => {
+    const op = getOp('deploy', 'run');
+    if (!op) {
+      throw new Error('deploy run op missing');
+    }
+    const auditLogPath = tempAuditLogPath();
+    process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+    try {
+      const seenTimeouts: number[] = [];
+      const runner: SshRunner = async (_args, timeoutMs) => {
+        seenTimeouts.push(timeoutMs);
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+      await executeOp(
+        op,
+        { alias: 'lms-server', args: { recipe: 'demo', timeout: '999999', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true },
+      );
+
+      const lastTimeout = seenTimeouts[seenTimeouts.length - 1];
+      expect(lastTimeout).toBeLessThanOrEqual(3_600_000 + 2_000);
+    } finally {
+      delete process.env.SSHEPHERD_RECIPE_PATH;
+    }
+  });
 });
 
 describe('deploy run — non-dry-run executes the combined resolved script (LMS gotcha: migrate after up)', () => {

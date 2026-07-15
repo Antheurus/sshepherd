@@ -12,6 +12,15 @@ const CONTROL_COMMAND_TIMEOUT_MS = 5_000;
 const VALIDATE_TIMEOUT_MS = 5_000;
 const MASTER_OPEN_TIMEOUT_MS = (CONNECT_TIMEOUT_S + 5) * 1_000;
 const LOCAL_TIMEOUT_BUFFER_MS = 2_000;
+/** A long-running remote command (a slow SQL DELETE, a big docker build) that produces no
+ *  stdout/stderr for minutes leaves the TCP session looking idle. Idle-timeout middleboxes
+ *  (cloud NAT/LB/stateful firewalls — commonly 120-150s) silently drop it; ssh then exits
+ *  255 with no useful stderr, misclassified as a generic SSH_TRANSPORT_ERROR at a suspicious
+ *  ~140s clustering that has nothing to do with any timeout sshepherd itself sets. Sending a
+ *  keepalive on the ControlMaster every 15s (x4 missed = 60s tolerance) keeps the session
+ *  looking active so it survives genuinely long, quiet remote commands. */
+const KEEPALIVE_INTERVAL_S = 15;
+const KEEPALIVE_COUNT_MAX = 4;
 
 /** What a single `ssh` invocation returns — captured stdout/stderr as one opaque stream. */
 export interface SpawnOutcome {
@@ -135,6 +144,10 @@ async function ensureMaster(alias: string, runner: SshRunner): Promise<string> {
       '-o',
       'LogLevel=ERROR',
       '-o',
+      `ServerAliveInterval=${KEEPALIVE_INTERVAL_S}`,
+      '-o',
+      `ServerAliveCountMax=${KEEPALIVE_COUNT_MAX}`,
+      '-o',
       'ControlMaster=auto',
       '-o',
       `ControlPath=${sock}`,
@@ -181,10 +194,23 @@ export async function run(
       '-o',
       'LogLevel=ERROR',
       '-o',
+      `ServerAliveInterval=${KEEPALIVE_INTERVAL_S}`,
+      '-o',
+      `ServerAliveCountMax=${KEEPALIVE_COUNT_MAX}`,
+      '-o',
       `ControlPath=${sock}`,
       alias,
       '--',
       'timeout',
+      // --kill-after: GNU `timeout` with no escalation sends a single SIGTERM to its
+      // direct child and gives up — a `sh -c` wrapper (or anything inside it that
+      // ignores SIGTERM, e.g. a `docker exec` whose signal never reaches the exec'd
+      // process inside the container) can survive that indefinitely. Escalating to
+      // SIGKILL 10s later guarantees the LOCAL process tree actually goes away, even
+      // though it still can't reach a process already running inside a container —
+      // see recipes.md for the docker-exec caveat and the recommended workaround
+      // (set a statement_timeout / equivalent server-side, don't rely on this).
+      '--kill-after=10',
       String(timeoutSec),
       remoteCmd,
     ],
