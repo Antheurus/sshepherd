@@ -119,15 +119,20 @@ skill definition:
 Output is JSON to stdout by default (add `--pretty` for a human table/key-value view).
 
 A separate `setup` group writes sshepherd's own local config files instead of you
-hand-authoring them — `setup ssh-alias register/keygen/install/remove` for `~/.ssh/config`,
-`setup db-target` for `targets.toml`, `setup config-allowlist` for `config-allowlist.toml`,
-`setup deploy-recipe` for a starter recipe TOML, and `setup files-allowlist`/
-`setup reveal-allowlist` for `files-allowlist.toml`/`reveal-allowlist.toml`. It's not
-counted in the nine groups above, but every action in it is agent-invocable — same `--yes`
-confirm gate as everything else. The one exception is `setup ssh-alias install`: it opens a
-one-shot local browser form that only a human can type a password into, so the agent can
-trigger and wait on it but never sees, logs, or relays the password itself — see `SKILL.md`
-gotcha 9.
+hand-authoring them — `setup ssh-alias register/keygen/install/remove/list/status/update`
+for `~/.ssh/config`, `setup db-target` for `targets.toml`, `setup config-allowlist` for
+`config-allowlist.toml`, `setup deploy-recipe` for a starter recipe TOML, and `setup
+files-allowlist`/`setup reveal-allowlist` for `files-allowlist.toml`/`reveal-allowlist.toml`
+(12 actions total). It's not counted in the nine groups above, but every action in it is
+agent-invocable — same `--yes` confirm gate as everything else. `setup ssh-alias status` is
+the one place outside `setup ssh-alias install` that isn't fully zero-knowledge: it echoes
+back the alias's own host/user/port, since the caller already supplied those to `register`
+in the first place. The one credential exception is `setup ssh-alias install`: before it
+ever asks a human for anything, it tries an already-trusted short-circuit and a
+Tailscale-fronted detection, both non-interactive; only if neither applies does it open a
+one-shot local browser form, where a human — never the agent — supplies either a password or
+a pasted private key. The agent can trigger `install` and wait on it, but never sees, logs,
+or relays either credential — see `SKILL.md` gotcha 9.
 
 ## What sshepherd NEVER does
 

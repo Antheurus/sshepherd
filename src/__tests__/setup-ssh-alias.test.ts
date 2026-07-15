@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { listHostAliases } from '../parsers/ssh-config.ts';
-import { keygen, register, remove } from '../setup-ssh-alias.ts';
+import { keygen, list, register, remove, status, update } from '../setup-ssh-alias.ts';
 
 function tempConfigPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'sshepherd-ssh-alias-test-'));
@@ -246,5 +246,244 @@ describe('remove', () => {
     expect(result.ok).toBe(false);
     expect(result.error?.code).toBe('PARSE_MISMATCH');
     expect(readFileSync(configPath, 'utf8')).toBe(before);
+  });
+});
+
+describe('list', () => {
+  test('returns an empty aliases array when no managed stanza exists', () => {
+    const configPath = tempConfigPath();
+
+    const result = list(configPath);
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ aliases: [] });
+  });
+
+  test('does not require --yes; a bare no-args call succeeds immediately', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+
+    const result = list(configPath);
+
+    expect(result.ok).toBe(true);
+  });
+
+  test('enumerates every sshepherd-managed alias by name only, ignoring hand-written stanzas', () => {
+    const configPath = tempConfigPath();
+    writeFileSync(
+      configPath,
+      ['Host handwritten', '    HostName 9.9.9.9', '    User root', ''].join('\n'),
+    );
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    register('otheralias', { host: '5.6.7.8', user: 'ops', yes: true }, configPath);
+
+    const result = list(configPath);
+
+    expect(result.ok).toBe(true);
+    expect((result.data as { aliases: string[] }).aliases.sort()).toEqual([
+      'myserver',
+      'otheralias',
+    ]);
+  });
+
+  test('output contains zero host/user/port fields — exactly one key: aliases', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', port: 2222, yes: true }, configPath);
+
+    const result = list(configPath);
+
+    expect(Object.keys(result.data as object)).toEqual(['aliases']);
+  });
+});
+
+describe('status', () => {
+  test('fails with ALIAS_NOT_FOUND on an unregistered alias', () => {
+    const configPath = tempConfigPath();
+
+    const result = status('myserver', configPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('ALIAS_NOT_FOUND');
+  });
+
+  test('fails with PARSE_MISMATCH rather than guessing when the marker is malformed', () => {
+    const configPath = tempConfigPath();
+    writeFileSync(
+      configPath,
+      ['# sshepherd-managed: myserver', 'Host something-else', '    HostName 1.2.3.4', ''].join(
+        '\n',
+      ),
+    );
+
+    const result = status('myserver', configPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('PARSE_MISMATCH');
+  });
+
+  test('does not require --yes; a bare call with only the alias succeeds immediately', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+
+    const result = status('myserver', configPath);
+
+    expect(result.ok).toBe(true);
+  });
+
+  test('reports hasKey: false and default port 22 before keygen has run', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+
+    const result = status('myserver', configPath);
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({
+      alias: 'myserver',
+      host: '1.2.3.4',
+      user: 'deploy',
+      port: 22,
+      hasKey: false,
+      managed: true,
+    });
+  });
+
+  test('reports the registered port and hasKey: true once keygen has run', async () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', port: 2222, yes: true }, configPath);
+    await keygen('myserver', { yes: true }, configPath);
+
+    const result = status('myserver', configPath);
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({
+      alias: 'myserver',
+      host: '1.2.3.4',
+      user: 'deploy',
+      port: 2222,
+      hasKey: true,
+      managed: true,
+    });
+  }, 15_000);
+
+  test('reports hasKey: false when the stanza references key files that were manually deleted', async () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    const keygenResult = await keygen('myserver', { yes: true }, configPath);
+    const { privateKeyPath, publicKeyPath } = keygenResult.data as {
+      privateKeyPath: string;
+      publicKeyPath: string;
+    };
+    unlinkSync(privateKeyPath);
+    unlinkSync(publicKeyPath);
+
+    const result = status('myserver', configPath);
+
+    expect(result.ok).toBe(true);
+    expect((result.data as { hasKey: boolean }).hasKey).toBe(false);
+  }, 15_000);
+});
+
+describe('update', () => {
+  test('fails with CONFIRMATION_REQUIRED when --yes is omitted, no file touched', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    const before = readFileSync(configPath, 'utf8');
+
+    const result = update('myserver', { host: '5.6.7.8', yes: false }, configPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('CONFIRMATION_REQUIRED');
+    expect(readFileSync(configPath, 'utf8')).toBe(before);
+  });
+
+  test('fails with ALIAS_NOT_FOUND when no managed stanza exists', () => {
+    const configPath = tempConfigPath();
+
+    const result = update('myserver', { host: '5.6.7.8', yes: true }, configPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('ALIAS_NOT_FOUND');
+  });
+
+  test('fails with PARSE_MISMATCH rather than guessing when the marker is malformed', () => {
+    const configPath = tempConfigPath();
+    writeFileSync(
+      configPath,
+      ['# sshepherd-managed: myserver', 'Host something-else', '    HostName 1.2.3.4', ''].join(
+        '\n',
+      ),
+    );
+    const before = readFileSync(configPath, 'utf8');
+
+    const result = update('myserver', { host: '5.6.7.8', yes: true }, configPath);
+
+    expect(result.ok).toBe(false);
+    expect(result.error?.code).toBe('PARSE_MISMATCH');
+    expect(readFileSync(configPath, 'utf8')).toBe(before);
+  });
+
+  test('updating only --port leaves HostName/User untouched and returns the full current state', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+
+    const result = update('myserver', { port: 2222, yes: true }, configPath);
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ alias: 'myserver', host: '1.2.3.4', user: 'deploy', port: 2222 });
+    const lines = readFileSync(configPath, 'utf8').split('\n');
+    expect(lines[2]).toBe('    HostName 1.2.3.4');
+    expect(lines[3]).toBe('    User deploy');
+    expect(lines[4]).toBe('    Port 2222');
+  });
+
+  test('updating --host on an alias that already has a key leaves IdentityFile untouched (key not regenerated)', async () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    const keygenResult = await keygen('myserver', { yes: true }, configPath);
+    const { privateKeyPath } = keygenResult.data as { privateKeyPath: string };
+
+    const result = update('myserver', { host: '5.6.7.8', yes: true }, configPath);
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({
+      alias: 'myserver',
+      host: '5.6.7.8',
+      user: 'deploy',
+      port: 22,
+    });
+    const text = readFileSync(configPath, 'utf8');
+    expect(text).toContain(`    IdentityFile ${privateKeyPath}`);
+    expect(existsSync(privateKeyPath)).toBe(true);
+  }, 15_000);
+
+  test('updating host, user, and port together rewrites all three, in place', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', port: 2222, yes: true }, configPath);
+
+    const result = update(
+      'myserver',
+      { host: '5.6.7.8', user: 'ops', port: 2200, yes: true },
+      configPath,
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ alias: 'myserver', host: '5.6.7.8', user: 'ops', port: 2200 });
+    const lines = readFileSync(configPath, 'utf8').split('\n');
+    expect(lines[0]).toBe('# sshepherd-managed: myserver');
+    expect(lines[1]).toBe('Host myserver');
+    expect(lines[2]).toBe('    HostName 5.6.7.8');
+    expect(lines[3]).toBe('    User ops');
+    expect(lines[4]).toBe('    Port 2200');
+  });
+
+  test('updating --port on an alias registered with the default port appends a new Port line', () => {
+    const configPath = tempConfigPath();
+    register('myserver', { host: '1.2.3.4', user: 'deploy', yes: true }, configPath);
+    expect(readFileSync(configPath, 'utf8')).not.toContain('Port');
+
+    const result = update('myserver', { port: 2222, yes: true }, configPath);
+
+    expect(result.ok).toBe(true);
+    expect(result.data).toEqual({ alias: 'myserver', host: '1.2.3.4', user: 'deploy', port: 2222 });
   });
 });

@@ -38,7 +38,8 @@ bare `sshepherd` name for brevity; substitute the absolute path when invoking.
 ## The zero-knowledge model
 
 The agent never types, sees, or passes a hostname, IP, username, port, password, or private
-key through sshepherd — not as an argument, not in a response.
+key through sshepherd — not as an argument, not in a response — with one narrow, scoped
+exception noted below.
 
 - The agent passes only a **name**: an ssh alias (`lms-server`), a pg-target name (`prod`),
   or a recipe name (`demo`). Every alias/target/recipe is declared once, ahead of time, in
@@ -49,10 +50,16 @@ key through sshepherd — not as an argument, not in a response.
   library) so credential handling stays entirely inside OpenSSH's own trusted code path.
 - Every response `Envelope` echoes back only the `alias` it was given — there is no
   host/user/port/ip field anywhere in the response shape, structurally.
+- The one scoped exception: `setup ssh-alias status <alias>` echoes that alias's own
+  `host`/`user`/`port` (plus `hasKey`) back in `data` — not new exposure, since the caller
+  already supplied those same values to `register` in the first place. `setup ssh-alias
+  list` stays name-only, and every other command in the tool, including all 9 registry
+  groups, still returns only the alias/target/recipe name.
 - ssh's own stderr is discarded entirely (never surfaced, never logged) — it's classified
   into a small error enum instead, because OpenSSH's stderr phrasing varies by
   version/locale and can leak a hostname no redaction allowlist would catch.
-- `hosts list` returns alias *names* only, never `HostName`/`User`/`Port`.
+- `hosts list` and `setup ssh-alias list` return alias *names* only, never
+  `HostName`/`User`/`Port`.
 - Every `files` op (`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) refuses any remote
   path not pre-declared for that alias in `~/.config/sshepherd/files-allowlist.toml` —
   fail-closed, same rule as `config get`/`put`/`validate` and `config-allowlist.toml`. See
@@ -105,7 +112,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 9 registry-driven groups (52 ops) + 1 `setup` group (6 sub-groups, 9 actions)
+## Quick reference — 9 registry-driven groups (52 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
@@ -179,10 +186,13 @@ sshepherd security listeners lms-server
 sshepherd security authorized-keys lms-server
 sshepherd security fail2ban lms-server
 
-# setup — agent-invocable; install's password boundary is the one exception (see Gotchas #9)
+# setup — agent-invocable; install's credential boundary is the one exception (see Gotchas #9)
 sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes
 sshepherd setup ssh-alias keygen myserver --yes
 sshepherd setup ssh-alias install myserver --yes
+sshepherd setup ssh-alias list
+sshepherd setup ssh-alias status myserver
+sshepherd setup ssh-alias update myserver --host 5.6.7.8 --port 2222 --yes
 sshepherd setup ssh-alias remove myserver --yes
 sshepherd setup db-target scaffold prod --alias myserver --user app --database appdb --container app_db --yes
 sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf,/opt/app/.env --yes
@@ -223,16 +233,25 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
    that could disable the session's own auth method (`PermitRootLogin`,
    `PasswordAuthentication`) are only applied when `--keep-session=false` is passed
    explicitly; the safe subset always applies.
-9. **`setup`'s only wall is `install`'s password.** `register`, `keygen`, `remove`,
-   `install`, and the three scaffolders (`db-target`, `config-allowlist`, `deploy-recipe`)
-   are all agent-invocable, gated by `--yes` the same way as every other mutating op — none
-   of them needs a human at the keyboard. The one narrow exception is
-   `ssh-alias install`: it opens a one-shot local browser form and a *human*, not the agent,
-   types the password into it. The agent may trigger `install` and wait on it, but it
-   structurally cannot see, log, or relay that password — the password goes straight from
-   the browser submission into `sshpass`'s stdin and never crosses back into the agent's
-   context; the agent only ever receives the resulting `SetupResult` (success or a typed
-   error code), never the password itself.
+9. **`setup`'s only wall is `install`'s credential entry — and even that has a smart bypass
+   first.** `register`, `keygen`, `remove`, `list`, `status`, `update`, `install`, and the
+   five scaffolders (`db-target`, `config-allowlist`, `deploy-recipe`, `files-allowlist`,
+   `reveal-allowlist`) are all agent-invocable, gated by `--yes` the same way as every other
+   mutating op — none of them needs a human at the keyboard, except the one narrow case
+   below. Before `install` ever opens a browser form, it runs two cheap, non-interactive
+   pre-checks in order: a raw-socket Tailscale-SSH banner peek (a Tailscale-fronted target
+   refuses key install outright — `TAILSCALE_SSH_DETECTED`, since Tailscale SSH doesn't use
+   `authorized_keys`), then an already-trusted probe with zero new credentials (if the key
+   is already authorized, `install` short-circuits with `data.method: 'already_trusted'`
+   and no form ever opens). Only when both pre-checks come back negative does `install`
+   open a one-shot local browser form, and a *human*, not the agent, supplies the
+   credential there — either a password, or a pasted existing private key (rejected with
+   `INVALID_PRIVATE_KEY` if it doesn't parse, or `PASSPHRASE_PROTECTED_KEY_UNSUPPORTED` if
+   it's passphrase-protected). The agent may trigger `install` and wait on it, but it
+   structurally cannot see, log, or relay either credential — both go straight from the
+   browser submission into the install flow and never cross back into the agent's context;
+   the agent only ever receives the resulting `SetupResult` (success or a typed error
+   code), never the password or key itself.
 10. **`files download` used to inline the whole file as base64 in the JSON envelope —
     fixed, but treat any `dist/sshepherd` built before this fix as unsafe on secrets.** A
     real incident: an

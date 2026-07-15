@@ -4,7 +4,7 @@ import { scaffold } from './setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
 import { scaffold as scaffoldFilesAllowlist } from './setup-files-allowlist.ts';
 import { scaffold as scaffoldRevealAllowlist } from './setup-reveal-allowlist.ts';
-import { install, keygen, register, remove } from './setup-ssh-alias.ts';
+import { install, keygen, list, register, remove, status, update } from './setup-ssh-alias.ts';
 import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
 
 /**
@@ -25,7 +25,7 @@ export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
   {
     name: 'ssh-alias',
     summary: 'Register, generate a keypair for, install a key on, or remove a ~/.ssh/config alias.',
-    actions: ['register', 'keygen', 'remove', 'install'],
+    actions: ['register', 'keygen', 'remove', 'install', 'list', 'status', 'update'],
   },
   {
     name: 'db-target',
@@ -114,6 +114,14 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
   const { positionals, flags } = parseArgv(argTail);
   const pretty = hasFlag(flags, 'pretty');
   const yes = hasFlag(flags, 'yes');
+
+  if (action === 'list') {
+    const result = list();
+    printSetupResult(result, pretty);
+    process.exitCode = result.ok ? 0 : 1;
+    return;
+  }
+
   const alias = positionals[0];
 
   if (alias === undefined) {
@@ -152,6 +160,29 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
     result = await keygen(alias, { yes });
   } else if (action === 'install') {
     result = await install(alias, { yes });
+  } else if (action === 'status') {
+    result = status(alias);
+  } else if (action === 'update') {
+    const host = getFlag(flags, 'host');
+    const user = getFlag(flags, 'user');
+    const portRaw = getFlag(flags, 'port');
+    const port = portRaw === undefined ? undefined : Number(portRaw);
+    if (host === undefined && user === undefined && port === undefined) {
+      result = buildSetupResult({
+        command,
+        error: {
+          code: 'INVALID_ARGS',
+          message: `${command}: at least one of --host, --user, --port is required`,
+        },
+      });
+    } else if (port !== undefined && !Number.isInteger(port)) {
+      result = buildSetupResult({
+        command,
+        error: { code: 'INVALID_ARGS', message: `${command}: --port must be an integer` },
+      });
+    } else {
+      result = update(alias, { host, user, port, yes });
+    }
   } else {
     result = await remove(alias, { yes });
   }

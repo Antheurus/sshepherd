@@ -11,6 +11,8 @@ import {
   writeTextSecure,
 } from './setup-file-io.ts';
 import {
+  defaultInstallServerDeps,
+  type InstallOutcome,
   type InstallServerDeps,
   type InstallTarget,
   runInstallServer,
@@ -63,6 +65,37 @@ export interface InstallData {
   host: string;
   user: string;
   port: number;
+  /** Only ever present when the already-trusted pre-check short-circuited the whole
+   *  password-form flow — omitted entirely (not just `undefined`) on a normal password
+   *  install, so the existing success shape is unchanged for that path. */
+  method?: 'already_trusted';
+}
+
+export interface ListData {
+  aliases: string[];
+}
+
+export interface StatusData {
+  alias: string;
+  host: string;
+  user: string;
+  port: number;
+  hasKey: boolean;
+  managed: true;
+}
+
+export interface UpdateOptions {
+  host?: string;
+  user?: string;
+  port?: number;
+  yes: boolean;
+}
+
+export interface UpdateData {
+  alias: string;
+  host: string;
+  user: string;
+  port: number;
 }
 
 /** Overridable via `SSHEPHERD_SSH_CONFIG_PATH` (or an explicit path param) for tests — mirrors
@@ -76,8 +109,12 @@ export function defaultSshConfigPath(): string {
   return join(homedir(), '.ssh', 'config');
 }
 
+/** Shared with `list`'s marker scan so the prefix used to write a stanza and the prefix used to
+ *  enumerate them can never drift apart. */
+const MANAGED_MARKER_PREFIX = '# sshepherd-managed: ';
+
 function markerLine(alias: string): string {
-  return `# sshepherd-managed: ${alias}`;
+  return `${MANAGED_MARKER_PREFIX}${alias}`;
 }
 
 function keyPathFor(alias: string, configPath: string): string {
@@ -148,19 +185,34 @@ function removeStanzaLines(
   return [...lines.slice(0, removeStart), ...lines.slice(removeEnd + 1)];
 }
 
+/**
+ * Rewrites (or appends, if absent) a single `    <property> <value>` line inside the located
+ * managed stanza — the general form `upsertIdentityFile` used to hand-roll for `IdentityFile`
+ * alone. Shared by `keygen` (IdentityFile) and `update` (HostName/User/Port) so the "find the
+ * property line, replace it in place, else append" rule lives in exactly one place.
+ */
+function upsertStanzaProperty(
+  lines: string[],
+  stanza: { startIndex: number; endIndex: number },
+  property: string,
+  value: string,
+): string[] {
+  const propertyLine = `    ${property} ${value}`;
+  const block = lines.slice(stanza.startIndex, stanza.endIndex + 1);
+  const propertyIndex = block.findIndex((line) => line.trim().startsWith(`${property} `));
+  const newBlock =
+    propertyIndex === -1
+      ? [...block, propertyLine]
+      : block.map((line, i) => (i === propertyIndex ? propertyLine : line));
+  return [...lines.slice(0, stanza.startIndex), ...newBlock, ...lines.slice(stanza.endIndex + 1)];
+}
+
 function upsertIdentityFile(
   lines: string[],
   stanza: { startIndex: number; endIndex: number },
   keyPath: string,
 ): string[] {
-  const identityLine = `    IdentityFile ${keyPath}`;
-  const block = lines.slice(stanza.startIndex, stanza.endIndex + 1);
-  const identityIndex = block.findIndex((line) => line.trim().startsWith('IdentityFile '));
-  const newBlock =
-    identityIndex === -1
-      ? [...block, identityLine]
-      : block.map((line, i) => (i === identityIndex ? identityLine : line));
-  return [...lines.slice(0, stanza.startIndex), ...newBlock, ...lines.slice(stanza.endIndex + 1)];
+  return upsertStanzaProperty(lines, stanza, 'IdentityFile', keyPath);
 }
 
 function stanzaPropertyValue(block: string[], property: string): string | undefined {
@@ -414,6 +466,13 @@ export async function remove(
  * `runInstallServer`'s typed `InstallOutcome` crosses back over. Refuses with
  * `ALIAS_NOT_FOUND`/`PARSE_MISMATCH` the same way `keygen`/`remove` do, and with
  * `INSTALL_FAILED` when `keygen` hasn't been run yet (no public key to install).
+ *
+ * Before ever opening the browser form, two cheap pre-checks run in order: first a raw-socket
+ * Tailscale banner peek (fast — a password/key probe against a Tailscale-SSH-fronted target
+ * hangs instead of failing, so this must run first to give an accurate diagnosis instead of
+ * eating the second check's own timeout), then a non-interactive already-trusted probe with
+ * zero new credentials. Either short-circuit skips `runInstallServer` entirely — no server
+ * opened, no password ever requested.
  */
 export async function install(
   alias: string,
@@ -468,8 +527,40 @@ export async function install(
   }
 
   const target: InstallTarget = { alias, ...connection };
-  const outcome = await runInstallServer(target, serverDeps);
+  const deps: InstallServerDeps = { ...defaultInstallServerDeps(), ...serverDeps };
 
+  let outcome: InstallOutcome;
+  if (await deps.peekBanner(target)) {
+    outcome = { kind: 'tailscale_detected' };
+  } else if (await deps.probeReachable(target)) {
+    outcome = { kind: 'already_trusted' };
+  } else {
+    outcome = await runInstallServer(target, serverDeps);
+  }
+
+  if (outcome.kind === 'tailscale_detected') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'TAILSCALE_SSH_DETECTED',
+        message: `alias '${alias}' is fronted by Tailscale SSH, which does not use authorized_keys — install cannot place a key here; the target must already be authorized via Tailscale's own ACL/identity, or reached over a non-Tailscale network path`,
+      },
+    });
+  }
+  if (outcome.kind === 'already_trusted') {
+    auditMutating({ alias, command, argsSummary, outcome: 'ok' });
+    return buildSetupResult({
+      command,
+      data: {
+        alias,
+        host: connection.host,
+        user: connection.user,
+        port: connection.port,
+        method: 'already_trusted',
+      },
+    });
+  }
   if (outcome.kind === 'sshpass_not_found') {
     auditMutating({ alias, command, argsSummary, outcome: 'error' });
     return buildSetupResult({
@@ -501,10 +592,220 @@ export async function install(
       },
     });
   }
+  if (outcome.kind === 'key_ssh_failed') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INSTALL_FAILED',
+        message: `ssh exited with code ${outcome.exitCode} while installing the key for alias '${alias}' — check the pasted key and try again`,
+      },
+    });
+  }
+  if (outcome.kind === 'invalid_private_key') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_PRIVATE_KEY',
+        message: 'the pasted text does not look like a valid private key',
+      },
+    });
+  }
+  if (outcome.kind === 'passphrase_protected_key') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PASSPHRASE_PROTECTED_KEY_UNSUPPORTED',
+        message:
+          "the pasted key is passphrase-protected, which sshepherd's install cannot supply non-interactively; use an unencrypted key or the password method instead",
+      },
+    });
+  }
 
   auditMutating({ alias, command, argsSummary, outcome: 'ok' });
   return buildSetupResult({
     command,
     data: { alias, host: connection.host, user: connection.user, port: connection.port },
+  });
+}
+
+/**
+ * Enumerates every sshepherd-managed alias by name only, via a fresh scan of `configPath` for
+ * `# sshepherd-managed: <name>` marker lines. Deliberately not a loop over `findManagedStanza`
+ * (which locates one alias at a time) nor a reuse of `listHostAliases` (which enumerates every
+ * `Host` entry, including hand-written ones sshepherd didn't write) — this is name-only and
+ * sshepherd-managed-only by design. Non-mutating: no `confirmGate`/`auditMutating`, no `--yes`,
+ * same `mutating: false` precedent as `hosts test`.
+ */
+export function list(configPath: string = defaultSshConfigPath()): SetupResult<ListData> {
+  const command = 'setup ssh-alias list';
+  const lines = splitLines(readTextOrEmpty(configPath));
+  const aliases = lines
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(MANAGED_MARKER_PREFIX))
+    .map((line) => line.slice(MANAGED_MARKER_PREFIX.length));
+
+  return buildSetupResult({ command, data: { aliases } });
+}
+
+/**
+ * Reports one alias's full local state (host/user/port/hasKey) — a deliberate, user-approved
+ * exception to `list`'s name-only rule, since the caller already supplied host/user/port to
+ * `register` in the first place. Stays local/config-only: no live reachability check (that's
+ * `hosts test <alias>`). `hasKey` requires BOTH an `IdentityFile` line in the stanza AND both key
+ * files actually existing on disk, since a stanza can reference a path whose files were manually
+ * deleted. Refuses with `ALIAS_NOT_FOUND`/`PARSE_MISMATCH` the same way `keygen`/`remove` do.
+ * Non-mutating: no `confirmGate`/`auditMutating`, no `--yes`.
+ */
+export function status(
+  alias: string,
+  configPath: string = defaultSshConfigPath(),
+): SetupResult<StatusData> {
+  const command = 'setup ssh-alias status';
+
+  const lines = splitLines(readTextOrEmpty(configPath));
+  const found = findManagedStanza(lines, alias);
+  if (found.kind === 'not_found') {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'ALIAS_NOT_FOUND',
+        message: `alias '${alias}' is not registered via setup ssh-alias register`,
+      },
+    });
+  }
+  if (found.kind === 'mismatch') {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+
+  const block = lines.slice(found.startIndex, found.endIndex + 1);
+  const host = stanzaPropertyValue(block, 'HostName');
+  const user = stanzaPropertyValue(block, 'User');
+  if (!host || !user) {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+
+  const portRaw = stanzaPropertyValue(block, 'Port');
+  const port = portRaw ? Number(portRaw) : DEFAULT_PORT;
+  const identityFile = stanzaPropertyValue(block, 'IdentityFile');
+  const hasKey =
+    identityFile !== undefined && existsSync(identityFile) && existsSync(`${identityFile}.pub`);
+
+  return buildSetupResult({
+    command,
+    data: { alias, host, user, port, hasKey, managed: true },
+  });
+}
+
+/**
+ * Rewrites HostName/User/Port in place on an already-registered alias's managed stanza — the
+ * generated key (`IdentityFile`) and everything else in the stanza is left completely untouched,
+ * and `update` never regenerates or reinstalls a key; that stays a separate, explicit
+ * `keygen`/`install` step. At least one of `host`/`user`/`port` is required, enforced at the CLI
+ * layer (`runSshAliasAction`) as `INVALID_ARGS`, mirroring how `register` validates its own
+ * required flags. Refuses with `ALIAS_NOT_FOUND`/`PARSE_MISMATCH` the same way
+ * `keygen`/`remove`/`install` do.
+ */
+export function update(
+  alias: string,
+  options: UpdateOptions,
+  configPath: string = defaultSshConfigPath(),
+): SetupResult<UpdateData> {
+  const command = 'setup ssh-alias update';
+  const argsSummary: Record<string, string | boolean> = {};
+  if (options.host !== undefined) {
+    argsSummary.host = options.host;
+  }
+  if (options.user !== undefined) {
+    argsSummary.user = options.user;
+  }
+  if (options.port !== undefined) {
+    argsSummary.port = String(options.port);
+  }
+
+  if (!confirmGate({ mutating: true, yes: options.yes })) {
+    auditMutating({ alias, command, argsSummary, outcome: 'refused' });
+    return buildSetupResult({
+      command,
+      error: { code: 'CONFIRMATION_REQUIRED', message: 'update requires --yes' },
+    });
+  }
+
+  const lines = splitLines(readTextOrEmpty(configPath));
+  const found = findManagedStanza(lines, alias);
+  if (found.kind === 'not_found') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'ALIAS_NOT_FOUND',
+        message: `alias '${alias}' is not registered via setup ssh-alias register`,
+      },
+    });
+  }
+  if (found.kind === 'mismatch') {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+
+  let newLines = lines;
+  let stanza: { startIndex: number; endIndex: number } = found;
+  const edits: Array<[string, string | undefined]> = [
+    ['HostName', options.host],
+    ['User', options.user],
+    ['Port', options.port === undefined ? undefined : String(options.port)],
+  ];
+  for (const [property, value] of edits) {
+    if (value === undefined) {
+      continue;
+    }
+    newLines = upsertStanzaProperty(newLines, stanza, property, value);
+    const refound = findManagedStanza(newLines, alias);
+    if (refound.kind === 'found') {
+      stanza = refound;
+    }
+  }
+  writeTextSecure(configPath, joinLines(newLines));
+
+  const block = newLines.slice(stanza.startIndex, stanza.endIndex + 1);
+  const host = stanzaPropertyValue(block, 'HostName');
+  const user = stanzaPropertyValue(block, 'User');
+  if (!host || !user) {
+    auditMutating({ alias, command, argsSummary, outcome: 'error' });
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'PARSE_MISMATCH',
+        message: `alias '${alias}' has a sshepherd-managed marker that doesn't match the expected stanza shape; refusing to guess`,
+      },
+    });
+  }
+  const portRaw = stanzaPropertyValue(block, 'Port');
+  const port = portRaw ? Number(portRaw) : DEFAULT_PORT;
+
+  auditMutating({ alias, command, argsSummary, outcome: 'ok' });
+  return buildSetupResult({
+    command,
+    data: { alias, host, user, port },
   });
 }

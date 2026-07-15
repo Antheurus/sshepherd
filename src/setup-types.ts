@@ -34,6 +34,14 @@ export interface SetupErrorInfo {
  * `SSHPASS_NOT_FOUND`/`INSTALL_TIMED_OUT`/`INSTALL_FAILED` are `setup ssh-alias install`'s
  * codes (agent-invocable install phase) — `INSTALL_FAILED` also covers the precondition
  * failure where `install` is run before `keygen` (no public key to install).
+ * `TAILSCALE_SSH_DETECTED` is also `install`'s code — its pre-check found the target
+ * fronted by Tailscale SSH, which never uses `authorized_keys`, before ever opening the
+ * browser form.
+ * `INVALID_PRIVATE_KEY`/`PASSPHRASE_PROTECTED_KEY_UNSUPPORTED` are `install`'s codes for its
+ * pasted-private-key credential method (Phase 4) — `INVALID_PRIVATE_KEY` covers pasted text
+ * that doesn't parse as a private key at all, `PASSPHRASE_PROTECTED_KEY_UNSUPPORTED` covers a
+ * pasted key that does parse but is passphrase-protected, which install cannot supply
+ * non-interactively.
  */
 export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
@@ -49,7 +57,10 @@ export type SetupErrorCode =
   | 'RECIPE_EXISTS'
   | 'SSHPASS_NOT_FOUND'
   | 'INSTALL_TIMED_OUT'
-  | 'INSTALL_FAILED';
+  | 'INSTALL_FAILED'
+  | 'TAILSCALE_SSH_DETECTED'
+  | 'INVALID_PRIVATE_KEY'
+  | 'PASSPHRASE_PROTECTED_KEY_UNSUPPORTED';
 
 export interface BuildSetupResultInput<T> {
   command: string;
