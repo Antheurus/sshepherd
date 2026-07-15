@@ -166,3 +166,59 @@ is what makes "migrations need a rebuild first" actually safe to automate: `depl
 on the recipe above still runs after `up` because the dependency order was resolved once,
 at load time, and both `deploy run` and `deploy migrate` reuse it. A recipe with zero
 `migrate` steps makes `deploy migrate` refuse (`buildMigrateScript` throws).
+
+## `--timeout` — overriding the whole-recipe budget
+
+`deploy run`/`deploy migrate` default to a 300s whole-recipe timeout (`DEPLOY_TIMEOUT_SEC`
+in `src/registry.ts`), wrapped as a remote `timeout <N> --kill-after=10 <script>`. That
+budget covers **the entire recipe**, not per-step — a multi-step recipe with one slow
+statement (a big migration, a slow build) can eat the whole thing on that one step. When a
+step is known to be slow ahead of time, pass `--timeout <seconds>` to raise the ceiling
+(clamped to 3600s) instead of retrying the same fixed budget blind:
+
+```bash
+sshepherd deploy run big-migration --timeout 900 --yes
+```
+
+A `SSH_TRANSPORT_ERROR`/`COMMAND_TIMEOUT` on a `deploy run` carries **zero signal** about
+how close the step was to finishing — treat it as "raise `--timeout` and look at what's
+actually happening server-side," not as "the recipe is broken."
+
+## Idle-connection drops (`SSH_TRANSPORT_ERROR` around ~140s) and orphaned remote processes
+
+Two related gotchas, both caused real incidents before the fix:
+
+**Idle timeout.** A long remote command that produces no stdout/stderr for minutes (a quiet
+SQL `DELETE`, a slow build with no output) can look "idle" to network middleboxes (cloud
+NAT gateways, load balancers, stateful firewalls — commonly a 120–150s idle window) even
+though it's actively working. The middlebox silently drops the TCP session; `ssh` then
+exits 255 with no useful stderr, which `classify()` reports as a generic
+`SSH_TRANSPORT_ERROR` that has nothing to do with any timeout sshepherd itself set. Fixed
+as of the version that added `ServerAliveInterval=15`/`ServerAliveCountMax=4` to the
+ControlMaster — a keepalive every 15s (60s tolerance) keeps the session looking active
+through a genuinely long, quiet command. If you still see this on an older build, that's
+the missing keepalive, not a real network fault.
+
+**A client-side timeout does not stop the remote process.** GNU `timeout <N> <cmd>` with no
+escalation sends one SIGTERM to its direct child and gives up if that child (or something
+inside it) ignores the signal. Critically: **`docker exec` does not forward signals into
+the exec'd process inside the container** under sshepherd's non-tty invocation — a step
+like `docker exec postgres psql -c "<slow DELETE>"` wrapped in `timeout 300 ...` can hit
+the 300s wall, sshepherd reports `COMMAND_TIMEOUT`/exit 124, and the `psql` statement
+**keeps running inside the container regardless**, fully unaware anything timed out.
+`--kill-after=10` (added alongside the fix above) guarantees the *local* `ssh`/`sh`/`timeout`
+process tree actually dies, but it structurally cannot reach a process already running
+inside a container's own namespace.
+
+**What this means in practice:**
+- Before retrying a `deploy run`/`deploy migrate` that just failed with a timeout-shaped
+  error, check server-side for an orphaned process (e.g. `SELECT pid, query, now()-query_start
+  FROM pg_stat_activity WHERE state != 'idle'` for a DB step) before running the recipe
+  again — retrying blind piles up multiple orphaned attempts all competing for the same
+  I/O, which makes the *next* attempt slower too, not faster.
+- For a recipe step that runs something genuinely long and quiet inside a container, set a
+  server-side timeout of its own (e.g. `SET statement_timeout = '120s'` before the SQL, or
+  an application-level cancellation) — don't rely on sshepherd's wrapper to reach inside the
+  container, because it can't.
+- If a step really did just need more time and isn't stuck, `--timeout <seconds>` (above) is
+  the fix, not a retry loop.

@@ -87,6 +87,26 @@ function optBool(ctx: OpContext, key: string, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
 }
 
+/** Ceiling for any `--timeout` override — generous enough for a genuinely slow one-off
+ *  migration/build, low enough that a typo (`--timeout 9999999999`) can't wedge a
+ *  session open indefinitely. */
+const MAX_TIMEOUT_OVERRIDE_SEC = 3_600;
+
+/** `op.timeoutSec` is the static per-op default; ops that declare a `timeout` ArgSpec
+ *  (currently `deploy run`/`deploy migrate`) let the caller raise it for a known-slow
+ *  step instead of retrying blind against the same fixed budget every time. */
+function effectiveTimeoutSec(op: OpSpec, ctx: OpContext): number {
+  const raw = ctx.args.timeout;
+  if (typeof raw !== 'string') {
+    return op.timeoutSec;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return op.timeoutSec;
+  }
+  return Math.min(parsed, MAX_TIMEOUT_OVERRIDE_SEC);
+}
+
 function arg(name: string, kind: ArgSpec['kind'], required: boolean, description: string): ArgSpec {
   return { name, kind, required, description };
 }
@@ -1697,6 +1717,15 @@ const deployRun: OpSpec<DeployPlan | { output: string }> = {
       false,
       'Print the resolved plan; execute nothing, no confirmation needed.',
     ),
+    arg(
+      'timeout',
+      'flag',
+      false,
+      `Override the whole-recipe timeout in seconds (default ${DEPLOY_TIMEOUT_SEC}). ` +
+        'A recipe with a known-slow step (a big SQL migration, a slow build) hits the ' +
+        'default budget as a flat SSH_TRANSPORT_ERROR/COMMAND_TIMEOUT with no signal ' +
+        "it was 'almost done' — raise this instead of retrying blind.",
+    ),
   ],
   mutating: true,
   timeoutSec: DEPLOY_TIMEOUT_SEC,
@@ -1770,7 +1799,15 @@ const deployMigrate: OpSpec<{ output: string }> = {
   group: 'deploy',
   name: 'migrate',
   summary: 'Run only the migrate-kind steps of a recipe, in resolved order.',
-  args: [arg('recipe', 'positional', true, 'Recipe name.')],
+  args: [
+    arg('recipe', 'positional', true, 'Recipe name.'),
+    arg(
+      'timeout',
+      'flag',
+      false,
+      `Override the timeout in seconds (default ${DEPLOY_TIMEOUT_SEC}).`,
+    ),
+  ],
   mutating: true,
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   output: 'raw',
@@ -2171,7 +2208,7 @@ export async function executeOp(
     return envelope;
   }
 
-  const result = await run(ctx.alias, remoteCmd, op.timeoutSec, deps.transport);
+  const result = await run(ctx.alias, remoteCmd, effectiveTimeoutSec(op, ctx), deps.transport);
   if (result.error) {
     if (requiresConfirm) {
       auditFor(deps, ctx.alias, command, ctx, 'error');
