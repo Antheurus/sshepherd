@@ -28,11 +28,11 @@
 
 # Compose-hosted Postgres — `docker compose -f <compose_file> exec -T <service> psql ...`
 [prod]
-alias = "lms-server"                        # ssh alias this pg-target rides on
-compose_file = "/opt/lms/docker-compose.yml" # path to the compose file ON THE REMOTE
+alias = "web-01"                        # ssh alias this pg-target rides on
+compose_file = "/opt/myapp/docker-compose.yml" # path to the compose file ON THE REMOTE
 service = "db"                               # compose service name for the db container
 user = "sshepherd_ro"                        # read-only role (see above)
-database = "lms"
+database = "myapp"
 
 # Plain-container Postgres — `docker exec -i <container> psql ...`
 [staging]

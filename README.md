@@ -76,7 +76,7 @@ against a disposable local sshd + Postgres fixture — see [`CONTRIBUTING.md`](.
 
 ## The zero-knowledge model
 
-The agent passes only a **name**: an ssh alias (`lms-server`), a pg-target name (`prod`),
+The agent passes only a **name**: an ssh alias (`web-01`), a pg-target name (`prod`),
 or a recipe name (`demo`). Every alias/target/recipe is declared once, ahead of time —
 `~/.ssh/config`, `~/.config/sshepherd/targets.toml`, or a recipe TOML — never on the
 command line and never inside a prompt an agent constructs.
@@ -113,7 +113,7 @@ skill definition:
 ```bash
 ./dist/sshepherd --help                 # list groups
 ./dist/sshepherd check --help           # list actions + flags for one group
-./dist/sshepherd check overview lms-server
+./dist/sshepherd check overview web-01
 ```
 
 Output is JSON to stdout by default (add `--pretty` for a human table/key-value view).

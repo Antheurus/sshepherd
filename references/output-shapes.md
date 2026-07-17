@@ -65,7 +65,7 @@ text, not line-shaped) — check the op's own summary via `--help` before assumi
 
 ```ts
 interface LogsResult {
-  source: string;             // e.g. "docker:lms-app", "service:nginx"
+  source: string;             // e.g. "docker:myapp", "service:nginx"
   lines_returned: number;
   truncated: boolean;         // true when the line count hit the requested tail limit
   lines: Array<{ ts: string | null; stream: 'stdout' | 'stderr'; text: string }>;

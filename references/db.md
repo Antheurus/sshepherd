@@ -12,11 +12,11 @@ resolves to *how* to reach `psql` on a host — never a database password.
 ```toml
 # Compose-hosted Postgres:
 [prod]
-alias = "lms-server"                        # ssh alias this pg-target rides on
-compose_file = "/opt/lms/docker-compose.yml" # path to the compose file ON THE REMOTE
+alias = "web-01"                        # ssh alias this pg-target rides on
+compose_file = "/opt/myapp/docker-compose.yml" # path to the compose file ON THE REMOTE
 service = "db"                               # compose service name for the db container
 user = "sshepherd_ro"                        # read-only role — see below
-database = "lms"
+database = "myapp"
 
 # Plain-container Postgres:
 [staging]

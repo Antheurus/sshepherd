@@ -16,10 +16,10 @@ Two-tier lookup, resolved in `resolveRecipePath`:
 ## Top-level fields
 
 ```toml
-name = "lms-prod"                 # defaults to the lookup name if omitted
-alias = "lms-server"              # required — the ssh alias this recipe deploys to
-workdir = "/opt/lms"              # required — cwd on the remote for every step
-description = "Laravel LMS — code baked into image, migrate needs rebuild"
+name = "myapp-prod"                 # defaults to the lookup name if omitted
+alias = "web-01"              # required — the ssh alias this recipe deploys to
+workdir = "/opt/myapp"              # required — cwd on the remote for every step
+description = "Laravel app — code baked into image, migrate needs rebuild"
 ```
 
 `buildDeployOpContext(recipeName, extraArgs)` loads the recipe fresh and returns
@@ -59,7 +59,7 @@ gated behind one `--yes`, per-step).
 
 `resolveStepOrder` is a declared-order-preserving topological sort: a step with
 `depends_on` is placed immediately after its dependency resolves; independent steps keep
-their file order otherwise. This is the direct fix for the real-world LMS gotcha
+their file order otherwise. This is the direct fix for a real-world gotcha
 ("migrations need a rebuild, not just artisan migrate") — a `migrate` step can be
 *declared* early in the file (for readability) while still *running* after `up`:
 
@@ -125,15 +125,15 @@ and returns the fully resolved plan as the envelope's `data`:
 ```json
 {
   "recipe": "demo",
-  "alias": "lms-server",
-  "workdir": "/opt/lms",
+  "alias": "web-01",
+  "workdir": "/opt/myapp",
   "steps": [
     {
       "name": "pull-code",
       "kind": "shell",
       "mutates": true,
       "depends_on": null,
-      "remote_command": "'sh' '-c' 'cd '\\''/opt/lms'\\'' && git pull --ff-only'"
+      "remote_command": "'sh' '-c' 'cd '\\''/opt/myapp'\\'' && git pull --ff-only'"
     }
   ]
 }

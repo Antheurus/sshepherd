@@ -41,7 +41,7 @@ The agent never types, sees, or passes a hostname, IP, username, port, password,
 key through sshepherd — not as an argument, not in a response — with one narrow, scoped
 exception noted below.
 
-- The agent passes only a **name**: an ssh alias (`lms-server`), a pg-target name (`prod`),
+- The agent passes only a **name**: an ssh alias (`web-01`), a pg-target name (`prod`),
   or a recipe name (`demo`). Every alias/target/recipe is declared once, ahead of time, in
   `~/.ssh/config`, `~/.config/sshepherd/targets.toml`, or a recipe TOML — never on the
   command line.
@@ -117,50 +117,50 @@ argument — no ssh connection was attempted).
 ```bash
 # hosts
 sshepherd hosts list
-sshepherd hosts test lms-server
-sshepherd hosts info lms-server
+sshepherd hosts test web-01
+sshepherd hosts info web-01
 
 # check
-sshepherd check overview lms-server
-sshepherd check mem lms-server
-sshepherd check disk lms-server
-sshepherd check cpu lms-server
-sshepherd check ports lms-server
-sshepherd check oom-history lms-server
-sshepherd check kernel lms-server
+sshepherd check overview web-01
+sshepherd check mem web-01
+sshepherd check disk web-01
+sshepherd check cpu web-01
+sshepherd check ports web-01
+sshepherd check oom-history web-01
+sshepherd check kernel web-01
 
 # logs
-sshepherd logs docker lms-server lms-app --tail 100
-sshepherd logs service lms-server nginx --tail 100
-sshepherd logs docker-daemon lms-server --tail 100
-sshepherd logs nginx lms-server error --tail 100
+sshepherd logs docker web-01 myapp --tail 100
+sshepherd logs service web-01 nginx --tail 100
+sshepherd logs docker-daemon web-01 --tail 100
+sshepherd logs nginx web-01 error --tail 100
 
 # services
-sshepherd services ps lms-server
-sshepherd services stats lms-server
-sshepherd services inspect lms-server lms-app
-sshepherd services compose-ps lms-server /opt/lms/docker-compose.yml
-sshepherd services healthcheck lms-server lms-app
-sshepherd services systemctl-status lms-server nginx
-sshepherd services restart lms-server lms-app --yes
-sshepherd services systemctl-start lms-server nginx --yes
-sshepherd services systemctl-stop lms-server nginx --yes
-sshepherd services systemctl-restart lms-server nginx --yes
-sshepherd services systemctl-reload lms-server nginx --yes
+sshepherd services ps web-01
+sshepherd services stats web-01
+sshepherd services inspect web-01 myapp
+sshepherd services compose-ps web-01 /opt/myapp/docker-compose.yml
+sshepherd services healthcheck web-01 myapp
+sshepherd services systemctl-status web-01 nginx
+sshepherd services restart web-01 myapp --yes
+sshepherd services systemctl-start web-01 nginx --yes
+sshepherd services systemctl-stop web-01 nginx --yes
+sshepherd services systemctl-restart web-01 nginx --yes
+sshepherd services systemctl-reload web-01 nginx --yes
 
 # files
-sshepherd files ls lms-server /opt/lms
-sshepherd files cat lms-server /opt/lms/.env --reveal DB_HOST
-sshepherd files tail lms-server /var/log/syslog --n 100
-sshepherd files download lms-server /opt/lms/backup.sql ./backup.sql
-sshepherd files disk-usage lms-server /var/lib/docker
-sshepherd files upload lms-server ./local.conf /opt/lms/local.conf --yes
+sshepherd files ls web-01 /opt/myapp
+sshepherd files cat web-01 /opt/myapp/.env --reveal DB_HOST
+sshepherd files tail web-01 /var/log/syslog --n 100
+sshepherd files download web-01 /opt/myapp/backup.sql ./backup.sql
+sshepherd files disk-usage web-01 /var/lib/docker
+sshepherd files upload web-01 ./local.conf /opt/myapp/local.conf --yes
 
 # config
-sshepherd config get lms-server /etc/nginx/nginx.conf
-sshepherd config validate lms-server /etc/nginx/nginx.conf
-sshepherd config put lms-server /etc/nginx/nginx.conf --from ./nginx.conf --yes
-sshepherd config reload lms-server nginx --yes
+sshepherd config get web-01 /etc/nginx/nginx.conf
+sshepherd config validate web-01 /etc/nginx/nginx.conf
+sshepherd config put web-01 /etc/nginx/nginx.conf --from ./nginx.conf --yes
+sshepherd config reload web-01 nginx --yes
 
 # db
 sshepherd db list
@@ -180,11 +180,11 @@ sshepherd deploy logs demo --tail 100
 sshepherd deploy migrate demo --yes
 
 # security
-sshepherd security harden lms-server --yes
-sshepherd security ssh-audit lms-server
-sshepherd security listeners lms-server
-sshepherd security authorized-keys lms-server
-sshepherd security fail2ban lms-server
+sshepherd security harden web-01 --yes
+sshepherd security ssh-audit web-01
+sshepherd security listeners web-01
+sshepherd security authorized-keys web-01
+sshepherd security fail2ban web-01
 
 # setup — agent-invocable; install's credential boundary is the one exception (see Gotchas #9)
 sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes
