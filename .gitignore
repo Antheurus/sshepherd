@@ -25,3 +25,9 @@ dist
 
 # smoke fixture — ephemeral keypair generated per `just smoke` run
 scripts/sshd-fixture/.smoke-keys/
+
+# personal agent notes — never shipped to the public repo
+CLAUDE.local.md
+
+# historical development planning docs — local only, not shipped
+docs/plan/
