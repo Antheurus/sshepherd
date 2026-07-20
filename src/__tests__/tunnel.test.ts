@@ -391,6 +391,66 @@ describe('listTunnels / closeTunnel', () => {
     expect(() => process.kill(proc.pid, 0)).toThrow();
   });
 
+  test('closeTunnel group-kills the supervisor AND its inherited child, not just the leader PID', async () => {
+    // A real TWO-process group: `sh` is the detached group leader (the PID we record, standing in
+    // for the supervisor), and it backgrounds a `sleep` child that inherits sh's process group.
+    // This is the only test that distinguishes a negative-PID group kill from a plain positive-PID
+    // kill of the leader alone: a positive-PID kill would leave the child orphaned (reparented to
+    // init, still running) — exactly the orphaned-ssh bug `killProcessGroup`'s `-pid` prevents.
+    const parent = Bun.spawn(['sh', '-c', 'sleep 30 & wait'], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: true,
+    });
+    parent.unref();
+    const parentPid = parent.pid;
+
+    // The shell needs a moment to fork the backgrounded sleep; poll for the child PID.
+    let childPid = 0;
+    for (let i = 0; i < 200 && childPid === 0; i++) {
+      const out = Bun.spawnSync(['pgrep', '-P', String(parentPid)], { stdout: 'pipe' })
+        .stdout.toString()
+        .trim();
+      if (out.length > 0) {
+        childPid = Number.parseInt(out.split('\n')[0] ?? '', 10);
+      }
+      if (childPid === 0) {
+        await Bun.sleep(5);
+      }
+    }
+    expect(childPid).toBeGreaterThan(0);
+
+    const record = withTempStateDir(() => {
+      const sshConfigPath = tempSshConfig(['web-01']);
+      const rec = openTunnel(
+        { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
+        sshConfigPath,
+        { spawnSupervisor: () => ({ pid: parentPid }) },
+      );
+      expect(closeTunnel(rec.id)).toEqual({ id: rec.id, closed: true });
+      return rec;
+    });
+    expect(record.pid).toBe(parentPid);
+
+    // Reap the leader (this test's own child) so its liveness check reflects reality, not a zombie.
+    await parent.exited;
+    expect(() => process.kill(parentPid, 0)).toThrow();
+
+    // The child is NOT this test's child (sh spawned it), so it can't be reaped here — poll until
+    // it is genuinely gone. Under a naive positive-PID kill this child would survive as an orphan
+    // and this loop would exhaust with the process still alive, failing the assertion below.
+    let childAlive = true;
+    for (let i = 0; i < 300; i++) {
+      try {
+        process.kill(childPid, 0);
+      } catch {
+        childAlive = false;
+        break;
+      }
+      await Bun.sleep(10);
+    }
+    expect(childAlive).toBe(false);
+  });
+
   test('closeTunnel on an unknown id is idempotent (closed: false, no throw)', () => {
     withTempStateDir(() => {
       expect(closeTunnel('t-does-not-exist')).toEqual({ id: 't-does-not-exist', closed: false });

@@ -261,10 +261,17 @@ function killProcessGroup(pid: number): void {
   try {
     process.kill(-pid, 'SIGKILL');
   } catch {
-    // already dead
+    // swallow ESRCH (group already gone) and any other kill failure — the catch does NOT prove
+    // "already dead", it also absorbs e.g. EPERM if a reused PID now names a group we don't own;
+    // hardening against PID reuse belongs to the state schema, not here (see docs known-limitation).
   }
 }
 
+/** NOT side-effect-free despite the `list` name: as it scans, it prunes state files whose
+ *  supervisor PID is dead, AND force-kills the process group of any tunnel that is past its
+ *  expiry but whose supervisor's own timer hasn't fired yet (rather than reporting a stale entry
+ *  as active). Callers — including Task 9's `tunnel list` CLI wiring — must treat invoking this
+ *  as a mutating, potentially process-killing operation, not a pure read. */
 export function listTunnels(): TunnelListEntry[] {
   const dir = defaultTunnelStateDir();
   let files: string[];
