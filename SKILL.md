@@ -53,7 +53,7 @@ exception noted below.
 - The one scoped exception: `setup ssh-alias status <alias>` echoes that alias's own
   `host`/`user`/`port` (plus `hasKey`) back in `data` — not new exposure, since the caller
   already supplied those same values to `register` in the first place. `setup ssh-alias
-  list` stays name-only, and every other command in the tool, including all 9 registry
+  list` stays name-only, and every other command in the tool, including all 10 registry
   groups, still returns only the alias/target/recipe name.
 - ssh's own stderr is discarded entirely (never surfaced, never logged) — it's classified
   into a small error enum instead, because OpenSSH's stderr phrasing varies by
@@ -75,6 +75,10 @@ exception noted below.
   to disk (see Gotchas #10 for the incident this closed).
 - Every mutating op writes an audit line (`~/.local/state/sshepherd/audit.jsonl`) —
   timestamp, alias, command, an arg hash (not raw args), and outcome — success or failure.
+- `tunnel open`'s `--remote`/`--local` flags describe the forward target/exposed service as seen from
+  the alias's own network (almost always `localhost:<port>`) — they are NOT the alias's own connection
+  identity, so accepting them as free text doesn't weaken the zero-knowledge boundary; the response
+  still never carries `HostName`/`User`/`Port`.
 
 ## Command shape
 
@@ -83,7 +87,7 @@ sshepherd <group> <action> [positionals...] [--flag value]
 ```
 
 ```bash
-sshepherd --help                # lists 9 registry groups + the setup group
+sshepherd --help                # lists 10 registry groups + the setup group
 sshepherd <group> --help        # lists that group's actions + args/flags
 sshepherd <group> <action> --help   # shows one action's args
 ```
@@ -95,6 +99,7 @@ The **first positional** differs by group:
 | `db` (except `list`) | `<target>` — a pg-target name from `targets.toml` | `targets.ts` |
 | `deploy` (all actions) | `<recipe>` — a recipe name | `recipes.ts` |
 | `hosts list`, `db list` | *(none — host-local, no ssh)* | — |
+| `tunnel list`, `tunnel close` | *(none — `list` is host-local; `close` takes `<id>` instead)* | — |
 | every other group | `<alias>` — an ssh alias from `~/.ssh/config` | — |
 
 ## Global flags
@@ -112,7 +117,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 9 registry-driven groups (52 ops) + 1 `setup` group (6 sub-groups, 12 actions)
+## Quick reference — 10 registry-driven groups (55 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
@@ -185,6 +190,11 @@ sshepherd security ssh-audit web-01
 sshepherd security listeners web-01
 sshepherd security authorized-keys web-01
 sshepherd security fail2ban web-01
+
+# tunnel
+sshepherd tunnel open web-01 --kind local --remote localhost:5432 --duration 1800 --yes
+sshepherd tunnel list
+sshepherd tunnel close t-a1b2c3d4 --yes
 
 # setup — agent-invocable; install's credential boundary is the one exception (see Gotchas #9)
 sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes
@@ -296,6 +306,24 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
     on a fresh alias. The gate lives in exactly one place — `enforceAllowlist()` in
     `registry.ts`, called from `executeOp()` before any op's `buildRemote` runs — not
     hand-copied per op.
+12. **`tunnel open` self-expires via a re-invoked hidden supervisor process, not an external `timeout`
+    binary — and `tunnel list` is NOT side-effect-free.** GNU `timeout` isn't reliably present on macOS,
+    so `--duration` is enforced by `sshepherd` re-invoking itself in a hidden `tunnel __supervise` mode
+    that holds the expiry timer in-process and force-kills the real `ssh -N -L/-R/-D` process (and its
+    own process group) when the timer fires — no new external dependency, portable across every release
+    target. Calling `tunnel list` can itself terminate a tunnel: while scanning for active tunnels, it
+    force-kills (and removes the state record for) any tunnel that's past its expiry but whose
+    supervisor's own timer hasn't fired yet, rather than reporting a stale entry as still active — treat
+    `tunnel list` as a mutating, potentially process-killing call, not a pure read, even though it needs
+    no `--yes` (it's still `mutating: false` at the `OpSpec` level — the confirm gate the mutating flag
+    controls is a separate axis from "is idempotent"). **Known limitation, deliberately not hardened
+    against:** a tunnel's local process-tracking state is keyed on PID alone. If a tunnel's supervisor
+    process exits and, in a since-widened window, the OS reuses that same PID for an unrelated
+    process-group leader, `tunnel close`/`tunnel list`'s cleanup could in principle signal the wrong
+    process group. This requires reused-PID-happens-to-be-a-group-leader, which is a low-probability
+    edge case for a single-operator local dev tool — tracked as a known limitation of the PID-only state
+    schema rather than solved with start-time/cmdline verification, which was judged out of scope for
+    this build.
 
 ## Errors
 
