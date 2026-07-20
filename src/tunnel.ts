@@ -48,8 +48,12 @@ export function writeTunnelRecord(path: string, record: TunnelRecord): void {
 
 /** Binds an ephemeral local TCP listener, reads back the OS-assigned port, releases it
  *  immediately. There is a small window between release and ssh's own bind where another
- *  process could take the port — `openTunnel` (a later task) surfaces `TUNNEL_PORT_TAKEN` if
- *  that happens, rather than pretending this race can be closed entirely on localhost. */
+ *  process could take the port; this is NOT actively verified. If ssh's bind fails for any
+ *  reason (port taken, connection refused, auth failure), `openTunnel` still reports success —
+ *  the supervisor spawn itself succeeded — and the failure surfaces later: the next `listTunnels`
+ *  prunes a supervisor that already exited, or whatever tries to USE the forwarded port simply
+ *  fails to connect. This is deliberate: the tunnel design is fire-and-forget and self-expiring,
+ *  not synchronously verified at open time. */
 export function findFreePort(): number {
   const listener = Bun.listen({
     hostname: '127.0.0.1',

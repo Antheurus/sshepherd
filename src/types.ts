@@ -25,9 +25,7 @@ export type SshErrorCode =
   | 'COMMAND_FAILED'
   | 'COMMAND_TIMEOUT'
   | 'CONFIRMATION_REQUIRED'
-  | 'VALIDATION_ERROR'
-  | 'TUNNEL_PORT_TAKEN'
-  | 'TUNNEL_SPAWN_FAILED';
+  | 'VALIDATION_ERROR';
 
 /**
  * `message` is always a static human string looked up by `code`, never raw ssh

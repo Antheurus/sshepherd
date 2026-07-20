@@ -323,7 +323,10 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
     process group. This requires reused-PID-happens-to-be-a-group-leader, which is a low-probability
     edge case for a single-operator local dev tool — tracked as a known limitation of the PID-only state
     schema rather than solved with start-time/cmdline verification, which was judged out of scope for
-    this build.
+    this build. Also: `tunnel open` returning `ok: true` confirms only that the supervisor process was
+    spawned — NOT that `ssh` actually bound the port or that the target is reachable; a failure at that
+    stage surfaces later (the next `tunnel list` prunes the now-dead entry), not in the `open` call's own
+    response.
 
 ## Errors
 

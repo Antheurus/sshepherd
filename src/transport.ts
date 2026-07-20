@@ -55,8 +55,6 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   COMMAND_TIMEOUT: 'Remote command timed out',
   CONFIRMATION_REQUIRED: 'Mutating op refused: pass --yes (or confirm interactively) to proceed',
   VALIDATION_ERROR: 'invalid arguments',
-  TUNNEL_PORT_TAKEN: 'the selected local port is already in use',
-  TUNNEL_SPAWN_FAILED: 'failed to start the tunnel process',
 };
 
 /** Exported for the registry's mutating-op confirm gate — a `CONFIRMATION_REQUIRED`
