@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { writeTextSecure } from './setup-file-io.ts';
+import { OpRunLocalError } from './types.ts';
 
 export type TunnelKind = 'local' | 'remote' | 'dynamic';
 
@@ -58,6 +59,55 @@ export function findFreePort(): number {
   const port = listener.port;
   listener.stop(true);
   return port;
+}
+
+export const DEFAULT_DURATION_SEC = 3600;
+export const MIN_DURATION_SEC = 30;
+export const MAX_DURATION_SEC = 86_400;
+
+export interface OpenTunnelParams {
+  alias: string;
+  kind: TunnelKind;
+  remote?: string;
+  local?: string;
+  durationSec: number;
+}
+
+export function validateOpenParams(params: OpenTunnelParams): void {
+  if (params.kind !== 'local' && params.kind !== 'remote' && params.kind !== 'dynamic') {
+    throw new OpRunLocalError(
+      'VALIDATION_ERROR',
+      `kind must be 'local', 'remote', or 'dynamic', got '${params.kind}'`,
+    );
+  }
+  if ((params.kind === 'local' || params.kind === 'remote') && !params.remote) {
+    throw new OpRunLocalError('VALIDATION_ERROR', `--remote is required for kind '${params.kind}'`);
+  }
+  if (params.kind === 'remote' && !params.local) {
+    throw new OpRunLocalError('VALIDATION_ERROR', "--local is required for kind 'remote'");
+  }
+  if ((params.kind === 'local' || params.kind === 'dynamic') && params.local) {
+    throw new OpRunLocalError('VALIDATION_ERROR', `--local is not valid for kind '${params.kind}'`);
+  }
+  if (params.durationSec < MIN_DURATION_SEC || params.durationSec > MAX_DURATION_SEC) {
+    throw new OpRunLocalError(
+      'VALIDATION_ERROR',
+      `--duration must be between ${MIN_DURATION_SEC} and ${MAX_DURATION_SEC} seconds`,
+    );
+  }
+}
+
+/** `localPort` is the auto-assigned port from `findFreePort()` for kind=local/dynamic, `null`
+ *  for kind=remote (the local side there is `params.local`, an agent-supplied string, not a
+ *  port sshepherd allocates). */
+export function buildSshArgs(params: OpenTunnelParams, localPort: number | null): string[] {
+  if (params.kind === 'local') {
+    return ['-N', '-L', `${localPort}:${params.remote}`, params.alias];
+  }
+  if (params.kind === 'dynamic') {
+    return ['-N', '-D', String(localPort), params.alias];
+  }
+  return ['-N', '-R', `${params.remote}:${params.local}`, params.alias];
 }
 
 /** Returns `null` for a missing or malformed state file — a tunnel state dir behaves like

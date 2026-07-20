@@ -3,7 +3,18 @@ import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { defaultTunnelStateDir, findFreePort, readTunnelRecordFile, writeTunnelRecord } from '../tunnel.ts';
+import { OpRunLocalError } from '../types.ts';
+import {
+  buildSshArgs,
+  defaultTunnelStateDir,
+  DEFAULT_DURATION_SEC,
+  findFreePort,
+  MAX_DURATION_SEC,
+  MIN_DURATION_SEC,
+  readTunnelRecordFile,
+  validateOpenParams,
+  writeTunnelRecord,
+} from '../tunnel.ts';
 
 function tempStateDir(): string {
   return mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-test-'));
@@ -79,5 +90,73 @@ describe('findFreePort', () => {
     const a = findFreePort();
     const b = findFreePort();
     expect(a).not.toBe(b);
+  });
+});
+
+describe('validateOpenParams', () => {
+  test('accepts a valid local-kind request', () => {
+    expect(() =>
+      validateOpenParams({ alias: 'a', kind: 'local', remote: 'localhost:5432', durationSec: 60 }),
+    ).not.toThrow();
+  });
+
+  test('rejects an unknown kind', () => {
+    expect(() =>
+      // @ts-expect-error deliberately invalid kind for the test
+      validateOpenParams({ alias: 'a', kind: 'bogus', durationSec: 60 }),
+    ).toThrow(OpRunLocalError);
+  });
+
+  test('rejects local kind missing --remote', () => {
+    expect(() => validateOpenParams({ alias: 'a', kind: 'local', durationSec: 60 })).toThrow(
+      OpRunLocalError,
+    );
+  });
+
+  test('rejects remote kind missing --local', () => {
+    expect(() =>
+      validateOpenParams({ alias: 'a', kind: 'remote', remote: '0.0.0.0:8080', durationSec: 60 }),
+    ).toThrow(OpRunLocalError);
+  });
+
+  test('rejects dynamic kind carrying a --local flag', () => {
+    expect(() =>
+      validateOpenParams({ alias: 'a', kind: 'dynamic', local: 'localhost:3000', durationSec: 60 }),
+    ).toThrow(OpRunLocalError);
+  });
+
+  test('rejects a duration outside [MIN, MAX]', () => {
+    expect(() =>
+      validateOpenParams({ alias: 'a', kind: 'dynamic', durationSec: MIN_DURATION_SEC - 1 }),
+    ).toThrow(OpRunLocalError);
+    expect(() =>
+      validateOpenParams({ alias: 'a', kind: 'dynamic', durationSec: MAX_DURATION_SEC + 1 }),
+    ).toThrow(OpRunLocalError);
+  });
+});
+
+describe('buildSshArgs', () => {
+  test('local kind', () => {
+    expect(
+      buildSshArgs({ alias: 'web-01', kind: 'local', remote: 'localhost:5432', durationSec: 60 }, 54321),
+    ).toEqual(['-N', '-L', '54321:localhost:5432', 'web-01']);
+  });
+
+  test('dynamic kind', () => {
+    expect(buildSshArgs({ alias: 'web-01', kind: 'dynamic', durationSec: 60 }, 1080)).toEqual([
+      '-N',
+      '-D',
+      '1080',
+      'web-01',
+    ]);
+  });
+
+  test('remote kind', () => {
+    expect(
+      buildSshArgs(
+        { alias: 'web-01', kind: 'remote', remote: '0.0.0.0:8080', local: 'localhost:3000', durationSec: 60 },
+        null,
+      ),
+    ).toEqual(['-N', '-R', '0.0.0.0:8080:localhost:3000', 'web-01']);
   });
 });
