@@ -6,6 +6,7 @@ import { STEP_FAILURE_MARKER } from '../recipes.ts';
 import { enforceAllowlist, executeOp, getOp, listOps } from '../registry.ts';
 import { buildDbOpContext } from '../targets.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
+import { type OpSpec, OpRunLocalError } from '../types.ts';
 
 const DEMO_RECIPE_PATH = join(import.meta.dir, 'fixtures', 'deploy.demo.toml');
 const NO_ROLLBACK_RECIPE_PATH = join(import.meta.dir, 'fixtures', 'deploy.no-rollback.toml');
@@ -2157,4 +2158,28 @@ describe('files upload — base64-over-ssh, no scp/sftp, no backup, gated like e
     }
     assertShellParsesRemoteCmdSafely(remoteCmd, marker);
   });
+});
+
+test('executeOp converts a thrown OpRunLocalError into a structured Envelope error', async () => {
+  const throwingOp: OpSpec<null> = {
+    group: 'test',
+    name: 'throws',
+    summary: 'test-only op that always throws OpRunLocalError',
+    args: [],
+    mutating: false,
+    timeoutSec: 5,
+    output: 'raw',
+    buildRemote: () => null,
+    shape: () => null,
+    runLocal: () => {
+      throw new OpRunLocalError('VALIDATION_ERROR', 'kind must be one of local/remote/dynamic');
+    },
+  };
+
+  const envelope = await executeOp(throwingOp, { alias: '', args: {} }, {});
+
+  expect(envelope.ok).toBe(false);
+  expect(envelope.error?.code).toBe('VALIDATION_ERROR');
+  expect(envelope.error?.message).toBe('kind must be one of local/remote/dynamic');
+  expect(envelope.data).toBeNull();
 });

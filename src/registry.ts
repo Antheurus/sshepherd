@@ -47,14 +47,15 @@ import {
 } from './recipes.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
 import { errorInfo, run, type TransportDeps } from './transport.ts';
-import type {
-  AllowlistPolicy,
-  ArgSpec,
-  Envelope,
-  OpContext,
-  OpSpec,
-  OutputMode,
-  RawResult,
+import {
+  type AllowlistPolicy,
+  type ArgSpec,
+  type Envelope,
+  type OpContext,
+  OpRunLocalError,
+  type OpSpec,
+  type OutputMode,
+  type RawResult,
 } from './types.ts';
 
 const DEFAULT_TIMEOUT_SEC = 12;
@@ -2341,7 +2342,24 @@ export async function executeOp(
       );
     }
     const sshConfigPath = deps.sshConfigPath ?? join(homedir(), '.ssh', 'config');
-    const data = op.runLocal(ctx, sshConfigPath);
+    let data: unknown;
+    try {
+      data = op.runLocal(ctx, sshConfigPath);
+    } catch (err) {
+      if (err instanceof OpRunLocalError) {
+        if (requiresConfirm) {
+          auditFor(deps, ctx.alias, command, ctx, 'error');
+        }
+        return buildEnvelope({
+          alias: ctx.alias,
+          command,
+          startedAtMs,
+          data: null,
+          error: { code: err.code, message: err.message },
+        });
+      }
+      throw err;
+    }
     const envelope = buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
     if (requiresConfirm) {
       auditFor(deps, ctx.alias, command, ctx, 'ok');
