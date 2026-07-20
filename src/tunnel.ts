@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { listHostAliases } from './parsers/ssh-config.ts';
@@ -238,4 +238,84 @@ export function readTunnelRecordFile(path: string): TunnelRecord | null {
   } catch {
     return null;
   }
+}
+
+export interface TunnelListEntry extends TunnelRecord {
+  remainingSec: number;
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Kills the WHOLE process group (supervisor + its ssh child) via the negative PID — killing
+ *  only the supervisor's own PID would leave ssh running as an orphan, since a `timeout`-style
+ *  wrapper dying does not propagate to its own child by default. Silently no-ops if the group
+ *  is already gone. */
+function killProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    // already dead
+  }
+}
+
+export function listTunnels(): TunnelListEntry[] {
+  const dir = defaultTunnelStateDir();
+  let files: string[];
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return [];
+  }
+
+  const now = Date.now();
+  const entries: TunnelListEntry[] = [];
+  for (const file of files) {
+    if (!file.endsWith('.json')) {
+      continue;
+    }
+    const path = join(dir, file);
+    const record = readTunnelRecordFile(path);
+    if (record === null) {
+      continue;
+    }
+    const alive = isPidAlive(record.pid);
+    const expiresAtMs = Date.parse(record.expiresAt);
+    if (!alive || now >= expiresAtMs) {
+      if (alive) {
+        // Past expiry but the supervisor's own timer hasn't fired yet — force-clean rather
+        // than report a stale entry as active.
+        killProcessGroup(record.pid);
+      }
+      rmSync(path, { force: true });
+      continue;
+    }
+    entries.push({ ...record, remainingSec: Math.max(0, Math.round((expiresAtMs - now) / 1000)) });
+  }
+  return entries;
+}
+
+export interface TunnelCloseResult {
+  id: string;
+  closed: boolean;
+}
+
+/** Idempotent: closing an id with no matching state file is a success (`closed: false`), not
+ *  an error — the same "remove is a no-op on an already-gone target" precedent used elsewhere
+ *  in this codebase. */
+export function closeTunnel(id: string): TunnelCloseResult {
+  const path = tunnelRecordPath(defaultTunnelStateDir(), id);
+  const record = readTunnelRecordFile(path);
+  if (record === null) {
+    return { id, closed: false };
+  }
+  killProcessGroup(record.pid);
+  rmSync(path, { force: true });
+  return { id, closed: true };
 }

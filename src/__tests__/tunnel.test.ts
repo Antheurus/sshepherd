@@ -6,9 +6,11 @@ import { join } from 'node:path';
 import { OpRunLocalError } from '../types.ts';
 import {
   buildSshArgs,
+  closeTunnel,
   defaultTunnelStateDir,
   DEFAULT_DURATION_SEC,
   findFreePort,
+  listTunnels,
   MAX_DURATION_SEC,
   MIN_DURATION_SEC,
   openTunnel,
@@ -22,6 +24,29 @@ import {
 
 function tempStateDir(): string {
   return mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-test-'));
+}
+
+function withTempStateDir<T>(fn: () => T): T {
+  const dir = tempStateDir();
+  const original = process.env.SSHEPHERD_TUNNEL_STATE_DIR;
+  process.env.SSHEPHERD_TUNNEL_STATE_DIR = dir;
+  try {
+    return fn();
+  } finally {
+    if (original === undefined) {
+      delete process.env.SSHEPHERD_TUNNEL_STATE_DIR;
+    } else {
+      process.env.SSHEPHERD_TUNNEL_STATE_DIR = original;
+    }
+  }
+}
+
+function tempSshConfig(aliases: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-sshconfig-'));
+  const path = join(dir, 'config');
+  const text = aliases.map((a) => `Host ${a}\n    HostName example.invalid\n    User test\n`).join('\n');
+  writeFileSync(path, text);
+  return path;
 }
 
 describe('defaultTunnelStateDir', () => {
@@ -211,29 +236,6 @@ describe('runSupervisor', () => {
 });
 
 describe('openTunnel', () => {
-  function withTempStateDir<T>(fn: () => T): T {
-    const dir = tempStateDir();
-    const original = process.env.SSHEPHERD_TUNNEL_STATE_DIR;
-    process.env.SSHEPHERD_TUNNEL_STATE_DIR = dir;
-    try {
-      return fn();
-    } finally {
-      if (original === undefined) {
-        delete process.env.SSHEPHERD_TUNNEL_STATE_DIR;
-      } else {
-        process.env.SSHEPHERD_TUNNEL_STATE_DIR = original;
-      }
-    }
-  }
-
-  function tempSshConfig(aliases: string[]): string {
-    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-sshconfig-'));
-    const path = join(dir, 'config');
-    const text = aliases.map((a) => `Host ${a}\n    HostName example.invalid\n    User test\n`).join('\n');
-    writeFileSync(path, text);
-    return path;
-  }
-
   test('local kind: assigns a port, spawns via the injected fn, writes a state record', () => {
     withTempStateDir(() => {
       const sshConfigPath = tempSshConfig(['web-01']);
@@ -311,6 +313,87 @@ describe('openTunnel', () => {
       expect(caught).toBeInstanceOf(OpRunLocalError);
       expect((caught as InstanceType<typeof OpRunLocalError>).code).toBe('UNKNOWN_ALIAS');
       expect(spawnCalled).toBe(false);
+    });
+  });
+});
+
+describe('listTunnels / closeTunnel', () => {
+  // A real detached process, its own group leader — stands in for a real supervisor PID without
+  // actually re-invoking the sshepherd binary. The subprocess handle is returned (not just the
+  // pid) so a test can `await proc.exited` and REAP it: an unreaped Bun child stays a zombie in
+  // the runner's process table, and `process.kill(pid, 0)` on a zombie still reports it "alive",
+  // which would mask a genuine kill. In production the supervisor is reaped by init, so a
+  // separate list/close process sees true liveness — awaiting here reproduces that.
+  function spawnRealGroupLeader(): Bun.Subprocess {
+    const proc = Bun.spawn(['sleep', '30'], { stdio: ['ignore', 'ignore', 'ignore'], detached: true });
+    proc.unref();
+    return proc;
+  }
+
+  test('listTunnels returns an active, non-expired record with remainingSec', () => {
+    withTempStateDir(() => {
+      const proc = spawnRealGroupLeader();
+      const sshConfigPath = tempSshConfig(['web-01']);
+      const record = openTunnel(
+        { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
+        sshConfigPath,
+        { spawnSupervisor: () => ({ pid: proc.pid }) },
+      );
+
+      const active = listTunnels();
+      expect(active).toHaveLength(1);
+      expect(active[0]?.id).toBe(record.id);
+      expect(active[0]?.remainingSec).toBeGreaterThan(0);
+      expect(active[0]?.remainingSec).toBeLessThanOrEqual(120);
+
+      closeTunnel(record.id); // cleanup: kill the real sleep process
+    });
+  });
+
+  test('listTunnels prunes a record whose PID is dead', () => {
+    withTempStateDir(() => {
+      // `spawnSync` runs `true` to completion AND reaps it before returning, so its pid is a
+      // genuinely dead (non-zombie) pid the moment we read it — no retry/poll needed.
+      const deadPid = Bun.spawnSync(['true'], { stdio: ['ignore', 'ignore', 'ignore'] }).pid;
+      const sshConfigPath = tempSshConfig(['web-01']);
+      const record = openTunnel(
+        { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
+        sshConfigPath,
+        { spawnSupervisor: () => ({ pid: deadPid }) },
+      );
+
+      const path = tunnelRecordPath(defaultTunnelStateDir(), record.id);
+      const active = listTunnels();
+      expect(active).toHaveLength(0);
+      expect(readTunnelRecordFile(path)).toBeNull();
+    });
+  });
+
+  test('closeTunnel kills a real process group and removes the state file', async () => {
+    const proc = spawnRealGroupLeader();
+    const record = withTempStateDir(() => {
+      const sshConfigPath = tempSshConfig(['web-01']);
+      const rec = openTunnel(
+        { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
+        sshConfigPath,
+        { spawnSupervisor: () => ({ pid: proc.pid }) },
+      );
+
+      const result = closeTunnel(rec.id);
+      expect(result).toEqual({ id: rec.id, closed: true });
+      expect(readTunnelRecordFile(tunnelRecordPath(defaultTunnelStateDir(), rec.id))).toBeNull();
+      return rec;
+    });
+
+    // Reap the SIGKILL'd group leader, then confirm it is genuinely gone — not a zombie the
+    // kill(0) check would misread as still alive.
+    await proc.exited;
+    expect(() => process.kill(proc.pid, 0)).toThrow();
+  });
+
+  test('closeTunnel on an unknown id is idempotent (closed: false, no throw)', () => {
+    withTempStateDir(() => {
+      expect(closeTunnel('t-does-not-exist')).toEqual({ id: 't-does-not-exist', closed: false });
     });
   });
 });
