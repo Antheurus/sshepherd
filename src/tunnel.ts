@@ -123,7 +123,7 @@ export function buildSshArgs(params: OpenTunnelParams, localPort: number | null)
  *  alone IS the correct full re-invocation. */
 export function resolveSelfInvocation(): string[] {
   const scriptArg = process.argv[1];
-  if (scriptArg && scriptArg.endsWith('cli.ts')) {
+  if (scriptArg?.endsWith('cli.ts')) {
     return [process.execPath, scriptArg];
   }
   return [process.execPath];

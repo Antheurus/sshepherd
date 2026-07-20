@@ -3,12 +3,10 @@ import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { OpRunLocalError } from '../types.ts';
 import {
   buildSshArgs,
   closeTunnel,
   defaultTunnelStateDir,
-  DEFAULT_DURATION_SEC,
   findFreePort,
   listTunnels,
   MAX_DURATION_SEC,
@@ -21,6 +19,7 @@ import {
   validateOpenParams,
   writeTunnelRecord,
 } from '../tunnel.ts';
+import { OpRunLocalError } from '../types.ts';
 
 function tempStateDir(): string {
   return mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-test-'));
@@ -44,7 +43,9 @@ function withTempStateDir<T>(fn: () => T): T {
 function tempSshConfig(aliases: string[]): string {
   const dir = mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-sshconfig-'));
   const path = join(dir, 'config');
-  const text = aliases.map((a) => `Host ${a}\n    HostName example.invalid\n    User test\n`).join('\n');
+  const text = aliases
+    .map((a) => `Host ${a}\n    HostName example.invalid\n    User test\n`)
+    .join('\n');
   writeFileSync(path, text);
   return path;
 }
@@ -167,7 +168,10 @@ describe('validateOpenParams', () => {
 describe('buildSshArgs', () => {
   test('local kind', () => {
     expect(
-      buildSshArgs({ alias: 'web-01', kind: 'local', remote: 'localhost:5432', durationSec: 60 }, 54321),
+      buildSshArgs(
+        { alias: 'web-01', kind: 'local', remote: 'localhost:5432', durationSec: 60 },
+        54321,
+      ),
     ).toEqual(['-N', '-L', '54321:localhost:5432', 'web-01']);
   });
 
@@ -183,7 +187,13 @@ describe('buildSshArgs', () => {
   test('remote kind', () => {
     expect(
       buildSshArgs(
-        { alias: 'web-01', kind: 'remote', remote: '0.0.0.0:8080', local: 'localhost:3000', durationSec: 60 },
+        {
+          alias: 'web-01',
+          kind: 'remote',
+          remote: '0.0.0.0:8080',
+          local: 'localhost:3000',
+          durationSec: 60,
+        },
         null,
       ),
     ).toEqual(['-N', '-R', '0.0.0.0:8080:localhost:3000', 'web-01']);
@@ -261,7 +271,13 @@ describe('openTunnel', () => {
     withTempStateDir(() => {
       const sshConfigPath = tempSshConfig(['web-01']);
       const record = openTunnel(
-        { alias: 'web-01', kind: 'remote', remote: '0.0.0.0:8080', local: 'localhost:3000', durationSec: 120 },
+        {
+          alias: 'web-01',
+          kind: 'remote',
+          remote: '0.0.0.0:8080',
+          local: 'localhost:3000',
+          durationSec: 120,
+        },
         sshConfigPath,
         { spawnSupervisor: () => ({ pid: 424242 }) },
       );
@@ -276,16 +292,12 @@ describe('openTunnel', () => {
       const sshConfigPath = tempSshConfig(['web-01']);
       let spawnCalled = false;
       expect(() =>
-        openTunnel(
-          { alias: 'web-01', kind: 'local', durationSec: 120 },
-          sshConfigPath,
-          {
-            spawnSupervisor: () => {
-              spawnCalled = true;
-              return { pid: 1 };
-            },
+        openTunnel({ alias: 'web-01', kind: 'local', durationSec: 120 }, sshConfigPath, {
+          spawnSupervisor: () => {
+            spawnCalled = true;
+            return { pid: 1 };
           },
-        ),
+        }),
       ).toThrow(OpRunLocalError);
       expect(spawnCalled).toBe(false);
     });
@@ -325,7 +337,10 @@ describe('listTunnels / closeTunnel', () => {
   // which would mask a genuine kill. In production the supervisor is reaped by init, so a
   // separate list/close process sees true liveness — awaiting here reproduces that.
   function spawnRealGroupLeader(): Bun.Subprocess {
-    const proc = Bun.spawn(['sleep', '30'], { stdio: ['ignore', 'ignore', 'ignore'], detached: true });
+    const proc = Bun.spawn(['sleep', '30'], {
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: true,
+    });
     proc.unref();
     return proc;
   }
@@ -371,7 +386,7 @@ describe('listTunnels / closeTunnel', () => {
 
   test('closeTunnel kills a real process group and removes the state file', async () => {
     const proc = spawnRealGroupLeader();
-    const record = withTempStateDir(() => {
+    withTempStateDir(() => {
       const sshConfigPath = tempSshConfig(['web-01']);
       const rec = openTunnel(
         { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
@@ -382,7 +397,6 @@ describe('listTunnels / closeTunnel', () => {
       const result = closeTunnel(rec.id);
       expect(result).toEqual({ id: rec.id, closed: true });
       expect(readTunnelRecordFile(tunnelRecordPath(defaultTunnelStateDir(), rec.id))).toBeNull();
-      return rec;
     });
 
     // Reap the SIGKILL'd group leader, then confirm it is genuinely gone — not a zombie the

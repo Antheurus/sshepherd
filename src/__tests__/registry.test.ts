@@ -6,7 +6,7 @@ import { STEP_FAILURE_MARKER } from '../recipes.ts';
 import { enforceAllowlist, executeOp, getOp, listOps } from '../registry.ts';
 import { buildDbOpContext } from '../targets.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
-import { type OpSpec, OpRunLocalError } from '../types.ts';
+import { OpRunLocalError, type OpSpec } from '../types.ts';
 
 const DEMO_RECIPE_PATH = join(import.meta.dir, 'fixtures', 'deploy.demo.toml');
 const NO_ROLLBACK_RECIPE_PATH = join(import.meta.dir, 'fixtures', 'deploy.no-rollback.toml');
@@ -2289,7 +2289,11 @@ describe('tunnel close', () => {
   test('closing an unknown id still succeeds (idempotent)', async () => {
     const op = getOp('tunnel', 'close');
     if (!op) throw new Error('tunnel close not registered');
-    const envelope = await executeOp(op, { alias: '', args: { id: 't-does-not-exist' } }, { yes: true });
+    const envelope = await executeOp(
+      op,
+      { alias: '', args: { id: 't-does-not-exist' } },
+      { yes: true },
+    );
     expect(envelope.ok).toBe(true);
     expect(envelope.data).toEqual({ id: 't-does-not-exist', closed: false });
   });
