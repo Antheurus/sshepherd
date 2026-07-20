@@ -1,5 +1,61 @@
 # sshepherd Progress
 
+## Session — 2026-07-20 — v0.3.0 (tunnel: local/remote/dynamic SSH port forwarding)
+
+Added a new `tunnel` op group (`open`/`list`/`close`), the first Voltius-inspired feature gap
+identified during a comparison pass against that Termius-alternative GUI client — most of Voltius's
+surface (local terminal, split panes, themes) solves a different problem than sshepherd's zero-knowledge
+agent-CLI model, but port forwarding was a real, missing capability with no workaround. Every existing
+op in the registry is a one-shot blocking `ssh <alias> <command>` round trip through `transport.ts`; a
+tunnel (`ssh -N -L/-R/-D`) deliberately never exits, so it needed a genuinely new execution primitive
+rather than another `OpSpec` entry. Landed as: `tunnel open` spawns a detached, self-supervising
+subprocess — the compiled `sshepherd` binary re-invokes itself in a hidden `tunnel __supervise` mode,
+which runs the real `ssh` as its own child and holds an in-process JS timer that force-kills it when
+`--duration` elapses. This replaced the design spec's original proposal to shell out to the `timeout`
+command, rejected mid-build because GNU `timeout` isn't reliably present on macOS — the in-process timer
+is portable across every release target with no new external dependency. `tunnel close` kills the whole
+process group (supervisor + its ssh child) via a negative PID, not just the supervisor, since a
+positive-PID kill would orphan ssh — proven by an adversarial test that spawns a real parent+child
+process group, temporarily patches the kill call to positive-PID, and confirms the child survives and
+the test correctly fails, then reverts. `tunnel list` opportunistically prunes dead/expired state on
+every read and can itself force-kill a tunnel that's past expiry but whose supervisor timer hasn't fired
+yet — documented explicitly as NOT side-effect-free, since a function named `list` silently able to kill
+a process is a real principle-of-least-surprise risk for an agent-facing tool. A real security gap was
+found and closed mid-build, not in the original design spec: the tunnel path spawns ssh directly and
+never goes through `transport.ts`, so it doesn't inherit that module's existing `ssh -G <alias>`
+injection guard — `openTunnel` now validates the alias against `listHostAliases(~/.ssh/config)` (the same
+mechanism `hosts list` already uses) before ever building an ssh argv, so a leading-dash alias string
+(`-oProxyCommand=<cmd>`) can never reach ssh as a parsed option. Two more issues surfaced only in the
+final cross-task review (reading all 11 build tasks composed together, which no single task's own review
+could see): a `--duration` value that parsed to `NaN` slipped past range validation (NaN compares false
+to both bounds) and would spawn a real detached process before crashing with a raw `RangeError` —
+fixed with an explicit finite-number guard; and two error codes (`TUNNEL_PORT_TAKEN`,
+`TUNNEL_SPAWN_FAILED`) were declared with a doc-comment promise that `openTunnel` would verify the spawn
+actually succeeded, but the verification was never implemented — resolved by removing the unfulfilled
+promise rather than bolting on a synchronous liveness check that would have added real latency to every
+`tunnel open` call and required reworking the dependency-injection seam 117 existing tests already
+depend on; `tunnel open`'s `ok:true` now honestly means "the process was spawned," with `tunnel list`'s
+next call as the point where a dead tunnel actually surfaces, consistent with the feature's fire-and-forget
+design. A known, deliberately-unhardened limitation is documented rather than silently fixed: tunnel
+state is keyed on PID alone, so a since-exited supervisor's PID could in principle be reused by an
+unrelated process-group leader before its state file is pruned — judged low-probability for a
+single-operator local tool and out of scope for this build, tracked in `SKILL.md` Gotcha #12 rather than
+solved with start-time/cmdline verification. Built via `subagent-driven-development` in an isolated
+worktree (`.worktrees/feat-ssh-tunnel`, branch `feat/ssh-tunnel`) across 11 sequential tasks plus one
+final cross-task fix, each with its own implementer → spec-compliance review → code-quality review cycle
+(several review-and-fix loops along the way, all closed before moving on). Final state: 334/334 tests
+passing (28 new `tunnel.ts` unit tests, 89 registry-level tests including the two new-code paths deferred
+all the way back from Task 2's own review), `tsc --noEmit` clean, `SKILL.md` fully in sync with the real
+registry (verified by `skill-doc.test.ts`'s drift guards). A live smoke-test section was written for
+`scripts/smoke.sh` (opens a real tunnel against the disposable sshd fixture, curls through it, closes it,
+confirms the port releases) but not executed — no Docker host in the build environment — joining
+`just smoke`'s existing built-but-not-run status until run on a real machine. Two design-spec revisions
+(the `timeout`-vs-self-supervisor change, and `tunnel close`'s idempotent-success-not-error semantics for
+an unknown id) are recorded in `docs/superpowers/plans/2026-07-20-ssh-tunnel.md`'s own "Design deviations"
+section. Bumped to v0.3.0 (new capability, not a fix).
+
+---
+
 ## Session — 2026-07-16 — v0.2.2 (files-allowlist + reveal-allowlist, registry-driven allowlist enforcement)
 
 Closed two real security gaps flagged by CodeRabbit during an external code-review pass on
