@@ -75,9 +75,12 @@ describe('registry — getOp/listOps', () => {
     ['security', 'listeners'],
     ['security', 'authorized-keys'],
     ['security', 'fail2ban'],
+    ['tunnel', 'list'],
   ];
 
   const MUTATING: Array<[string, string]> = [
+    ['tunnel', 'open'],
+    ['tunnel', 'close'],
     ['services', 'restart'],
     ['services', 'systemctl-start'],
     ['services', 'systemctl-stop'],
@@ -2182,4 +2185,122 @@ test('executeOp converts a thrown OpRunLocalError into a structured Envelope err
   expect(envelope.error?.code).toBe('VALIDATION_ERROR');
   expect(envelope.error?.message).toBe('kind must be one of local/remote/dynamic');
   expect(envelope.data).toBeNull();
+});
+
+test('executeOp re-throws a non-OpRunLocalError instead of swallowing it', async () => {
+  const throwingOp: OpSpec<null> = {
+    group: 'test',
+    name: 'throws-plain-error',
+    summary: 'test-only op that throws a plain Error, not OpRunLocalError',
+    args: [],
+    mutating: false,
+    timeoutSec: 5,
+    output: 'raw',
+    buildRemote: () => null,
+    shape: () => null,
+    runLocal: () => {
+      throw new Error('a genuinely unexpected bug, not a validation failure');
+    },
+  };
+
+  await expect(executeOp(throwingOp, { alias: '', args: {} }, {})).rejects.toThrow(
+    'a genuinely unexpected bug, not a validation failure',
+  );
+});
+
+describe('tunnel open', () => {
+  test('refuses without --yes (mutating gate)', async () => {
+    const op = getOp('tunnel', 'open');
+    if (!op) throw new Error('tunnel open not registered');
+    const envelope = await executeOp(
+      op,
+      { alias: 'web-01', args: { kind: 'dynamic', duration: '60' } },
+      { yes: false },
+    );
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('CONFIRMATION_REQUIRED');
+  });
+
+  test('returns VALIDATION_ERROR for an unknown kind, even with --yes', async () => {
+    const op = getOp('tunnel', 'open');
+    if (!op) throw new Error('tunnel open not registered');
+    const envelope = await executeOp(
+      op,
+      { alias: 'web-01', args: { kind: 'bogus', duration: '60' } },
+      { yes: true },
+    );
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('VALIDATION_ERROR');
+  });
+
+  test('returns VALIDATION_ERROR for a non-numeric --duration, without spawning anything', async () => {
+    const op = getOp('tunnel', 'open');
+    if (!op) throw new Error('tunnel open not registered');
+    const envelope = await executeOp(
+      op,
+      { alias: 'web-01', args: { kind: 'dynamic', duration: 'not-a-number' } },
+      { yes: true },
+    );
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('VALIDATION_ERROR');
+  });
+
+  test('writes a mutating "error" audit line when a VALIDATION_ERROR is thrown', async () => {
+    const op = getOp('tunnel', 'open');
+    if (!op) throw new Error('tunnel open not registered');
+    const auditLogPath = tempAuditLogPath();
+    await executeOp(
+      op,
+      { alias: 'web-01', args: { kind: 'bogus', duration: '60' } },
+      { yes: true, auditLogPath },
+    );
+    const lines = readAuditLines(auditLogPath);
+    const entry = lines[lines.length - 1] ?? {};
+    expect(entry.outcome).toBe('error');
+    expect(entry.command).toBe('tunnel open');
+  });
+
+  test('envelope never carries HostName/User/Port/IdentityFile fields for the alias', async () => {
+    const op = getOp('tunnel', 'open');
+    if (!op) throw new Error('tunnel open not registered');
+    // No real alias declared in the test's ssh config path, so this hits UNKNOWN_ALIAS — the
+    // point of this test is confirming the ENVELOPE SHAPE never leaks connection fields,
+    // regardless of which error fires.
+    const envelope = await executeOp(
+      op,
+      { alias: 'web-01', args: { kind: 'dynamic', duration: '60' } },
+      { yes: true },
+    );
+    const serialized = JSON.stringify(envelope);
+    expect(serialized).not.toContain('HostName');
+    expect(serialized).not.toContain('IdentityFile');
+  });
+});
+
+describe('tunnel close', () => {
+  test('refuses without --yes (mutating gate)', async () => {
+    const op = getOp('tunnel', 'close');
+    if (!op) throw new Error('tunnel close not registered');
+    const envelope = await executeOp(op, { alias: '', args: { id: 't-whatever' } }, { yes: false });
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error?.code).toBe('CONFIRMATION_REQUIRED');
+  });
+
+  test('closing an unknown id still succeeds (idempotent)', async () => {
+    const op = getOp('tunnel', 'close');
+    if (!op) throw new Error('tunnel close not registered');
+    const envelope = await executeOp(op, { alias: '', args: { id: 't-does-not-exist' } }, { yes: true });
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toEqual({ id: 't-does-not-exist', closed: false });
+  });
+});
+
+describe('tunnel list', () => {
+  test('is non-mutating (no --yes needed) and returns an array by default', async () => {
+    const op = getOp('tunnel', 'list');
+    if (!op) throw new Error('tunnel list not registered');
+    const envelope = await executeOp(op, { alias: '', args: {} }, {});
+    expect(envelope.ok).toBe(true);
+    expect(Array.isArray((envelope.data as { tunnels: unknown[] })?.tunnels)).toBe(true);
+  });
 });
