@@ -54,6 +54,7 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   COMMAND_FAILED: 'Remote command exited with a non-zero status',
   COMMAND_TIMEOUT: 'Remote command timed out',
   CONFIRMATION_REQUIRED: 'Mutating op refused: pass --yes (or confirm interactively) to proceed',
+  VALIDATION_ERROR: 'invalid arguments',
 };
 
 /** Exported for the registry's mutating-op confirm gate — a `CONFIRMATION_REQUIRED`

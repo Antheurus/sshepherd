@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { listOps } from '../registry.ts';
 import { buildSetupResult, type SetupErrorInfo } from '../setup-types.ts';
+import { OpRunLocalError } from '../types.ts';
 
 describe('buildSetupResult', () => {
   test('defaults to ok:true, data:null, error:null when neither is supplied', () => {
@@ -45,5 +46,15 @@ describe('setup stays off the registry', () => {
   test('GROUPS derived from listOps() does not include "setup"', () => {
     const groups = new Set(listOps().map((op) => op.group));
     expect(groups.has('setup')).toBe(false);
+  });
+});
+
+describe('OpRunLocalError', () => {
+  test('OpRunLocalError carries a code and a dynamic message', () => {
+    const err = new OpRunLocalError('VALIDATION_ERROR', "--remote is required for kind 'local'");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe('OpRunLocalError');
+    expect(err.code).toBe('VALIDATION_ERROR');
+    expect(err.message).toBe("--remote is required for kind 'local'");
   });
 });

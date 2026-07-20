@@ -7,9 +7,10 @@ import { type ExecuteDeps, executeOp, getOp, listOps } from './registry.ts';
 import { runSetup } from './setup.ts';
 import { buildDbOpContext } from './targets.ts';
 import { closeMaster } from './transport.ts';
+import { runSupervisor } from './tunnel.ts';
 import type { ArgSpec, OpContext, OpSpec } from './types.ts';
 
-const VERSION = '0.2.2';
+const VERSION = '0.3.0';
 
 /** Flags declared as booleans across the registry's ArgSpecs (`ArgSpec` carries no type
  *  field, so this is the CLI's own small lookup — every other flag is a string value). */
@@ -23,6 +24,8 @@ const GROUP_FIRST_POSITIONAL_NOTE: Record<string, string> = {
   hosts: 'First positional (except `list`): <alias> — the ssh alias from ~/.ssh/config.',
   db: 'First positional (except `list`): <target> — a pg-target name declared in targets.toml.',
   deploy: 'First positional: <recipe> — a deploy recipe name (see recipes.md).',
+  tunnel:
+    'First positional (open only): <alias>. `list` takes no positional; `close` takes <id> (from `tunnel open`) instead of an alias.',
 };
 const DEFAULT_FIRST_POSITIONAL_NOTE =
   'First positional: <alias> — the ssh alias configured in ~/.ssh/config.';
@@ -136,6 +139,9 @@ function buildOpContext(
   if (group === 'db' && action === 'list') {
     return { alias: '', args: mapArgsToCtx(op, positionals, flags) };
   }
+  if (group === 'tunnel' && (action === 'list' || action === 'close')) {
+    return { alias: '', args: mapArgsToCtx(op, positionals, flags) };
+  }
   if (group === 'db') {
     const args = mapArgsToCtx(op, positionals, flags);
     const targetName = args.target;
@@ -237,6 +243,20 @@ async function run(argv: string[]): Promise<void> {
   }
   if (first === '--version' || first === '-v') {
     process.stdout.write(`sshepherd ${VERSION}\n`);
+    return;
+  }
+
+  if (first === 'tunnel' && rest[0] === '__supervise') {
+    const [, id, durationSecRaw, command, ...commandArgs] = rest;
+    if (id === undefined || durationSecRaw === undefined || command === undefined) {
+      throw new UsageError('tunnel __supervise: missing id/duration/command');
+    }
+    const durationSec = Number(durationSecRaw);
+    if (!Number.isFinite(durationSec) || durationSec <= 0) {
+      throw new UsageError('tunnel __supervise: duration must be a positive number');
+    }
+    const exitCode = await runSupervisor({ command, args: commandArgs, durationSec });
+    process.exitCode = exitCode;
     return;
   }
 

@@ -1,5 +1,20 @@
 # sshepherd Changelog
 
+## v0.3.0 — New `tunnel` command: forward a port through a server without ever seeing its address
+
+- Added: `sshepherd tunnel open <alias> --kind local --remote <host:port> --duration <seconds> --yes`
+  opens an SSH port forward (local, remote, or dynamic/SOCKS) through a declared alias — useful for
+  reaching a database or internal service that only listens on the server itself. The tunnel closes
+  itself automatically after `--duration` seconds (default 1 hour, max 24 hours) so it never needs to be
+  remembered and cleaned up by hand.
+- Added: `sshepherd tunnel list` shows every tunnel currently open, with how much time is left on each.
+- Added: `sshepherd tunnel close <id> --yes` closes a tunnel early. Closing one that's already gone is
+  not an error.
+- Note: `tunnel open` confirms the connection process started, not that it fully succeeded — if the
+  target port turns out to be unreachable, that shows up on the next `tunnel list` (the tunnel will be
+  gone) rather than in the `open` response itself.
+- No action required for existing setups — this only adds a new command, nothing existing changed.
+
 ## v0.2.2 — `files` and `--reveal` now require an allowlist (breaking change)
 
 - Fixed: the `files` group (`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) had no

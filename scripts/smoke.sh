@@ -144,6 +144,7 @@ EOF
 export SSHEPHERD_TARGETS_PATH="$WORKDIR/targets.toml"
 export SSHEPHERD_RECIPE_PATH="$WORKDIR/deploy.smoke.toml"
 export SSHEPHERD_FILES_ALLOWLIST_PATH="$WORKDIR/files-allowlist.toml"
+export SSHEPHERD_TUNNEL_STATE_DIR="$WORKDIR/tunnels"
 pass "fixture config written"
 
 # -- CLI drive helpers ------------------------------------------------------------------------
@@ -231,5 +232,61 @@ step "deploy run --dry-run"
 run_cli deploy_dry_run deploy run smoke --dry-run
 assert_json "deploy run --dry-run: plan has steps, nothing executed" deploy_dry_run \
   "d['ok'] is True and len(d['data']['steps']) == 1 and d['data']['steps'][0]['name'] == 'check-app'"
+
+# -- tunnel: live local port-forward (REQUIRES DOCKER, same as every step above) --------------
+# Opens a kind=local forward from the fixture alias to the sibling nginx `app` container,
+# reachable as `app:80` on the fixture's own docker-compose network (the sshd container resolves
+# the sibling service by name), curls through the auto-assigned local port to prove real bytes
+# traverse the tunnel, then closes it and confirms the local port is released.
+
+step "tunnel open (local forward to the fixture app container's nginx on app:80)"
+run_cli tunnel_open tunnel open "$ALIAS" --kind local --remote app:80 --duration 120 --yes
+assert_json "tunnel open: ok + local kind + auto-assigned localPort" tunnel_open \
+  "d['ok'] is True and d['data']['kind'] == 'local' and isinstance(d['data']['localPort'], int) and d['data']['id'].startswith('t-')"
+
+TUNNEL_ID="$(python3 -c "import json; print(json.load(open('$WORKDIR/tunnel_open.json'))['data']['id'])")"
+TUNNEL_PORT="$(python3 -c "import json; print(json.load(open('$WORKDIR/tunnel_open.json'))['data']['localPort'])")"
+
+step "wait for the ssh forward to bind local port $TUNNEL_PORT"
+for _ in $(seq 1 30); do
+  if (exec 3<>"/dev/tcp/127.0.0.1/$TUNNEL_PORT") 2>/dev/null; then
+    exec 3>&- 3<&-
+    break
+  fi
+  sleep 1
+done
+pass "local port $TUNNEL_PORT is accepting connections"
+
+step "curl through the forwarded local port (real response from the fixture nginx)"
+if curl -fsS "http://127.0.0.1:$TUNNEL_PORT/" | grep -qi 'nginx'; then
+  pass "tunnel carried a real HTTP response from the fixture nginx"
+else
+  fail "no nginx response through the tunnel on 127.0.0.1:$TUNNEL_PORT"
+fi
+
+step "tunnel list (the open tunnel is reported active)"
+run_cli tunnel_list tunnel list
+assert_json "tunnel list: the opened tunnel id is present + active" tunnel_list \
+  "d['ok'] is True and any(t['id'] == '$TUNNEL_ID' and t['remainingSec'] > 0 for t in d['data']['tunnels'])"
+
+step "tunnel close"
+run_cli tunnel_close tunnel close "$TUNNEL_ID" --yes
+assert_json "tunnel close: closed is True" tunnel_close \
+  "d['ok'] is True and d['data']['closed'] is True"
+
+step "confirm local port $TUNNEL_PORT is released after close"
+released=false
+for _ in $(seq 1 30); do
+  if ! (exec 3<>"/dev/tcp/127.0.0.1/$TUNNEL_PORT") 2>/dev/null; then
+    released=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$released" == true ]]; then
+  pass "local port $TUNNEL_PORT released after tunnel close"
+else
+  fail "local port $TUNNEL_PORT still accepting connections after tunnel close"
+fi
 
 printf '\n%d/%d smoke checks passed.\n' "$PASS_COUNT" "$PASS_COUNT"
