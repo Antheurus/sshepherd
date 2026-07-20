@@ -24,7 +24,10 @@ export type SshErrorCode =
   | 'SSH_TRANSPORT_ERROR'
   | 'COMMAND_FAILED'
   | 'COMMAND_TIMEOUT'
-  | 'CONFIRMATION_REQUIRED';
+  | 'CONFIRMATION_REQUIRED'
+  | 'VALIDATION_ERROR'
+  | 'TUNNEL_PORT_TAKEN'
+  | 'TUNNEL_SPAWN_FAILED';
 
 /**
  * `message` is always a static human string looked up by `code`, never raw ssh
@@ -34,6 +37,23 @@ export interface ErrorInfo {
   code: SshErrorCode;
   message: string;
   remote_exit?: number;
+}
+
+/**
+ * Thrown by an `OpSpec.runLocal` implementation that needs to fail with a structured,
+ * agent-facing error instead of always succeeding — `executeOp` catches this specifically and
+ * builds the `ErrorInfo` from `code`/`message` directly (bypassing the static `ERROR_MESSAGES`
+ * lookup `errorInfo()` uses for transport-originated errors, since a `runLocal` validation
+ * message carries no ssh-stderr leak risk and is more useful to the caller when specific).
+ */
+export class OpRunLocalError extends Error {
+  constructor(
+    public readonly code: SshErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'OpRunLocalError';
+  }
 }
 
 /**
