@@ -12,6 +12,8 @@ import {
   MAX_DURATION_SEC,
   MIN_DURATION_SEC,
   readTunnelRecordFile,
+  resolveSelfInvocation,
+  runSupervisor,
   validateOpenParams,
   writeTunnelRecord,
 } from '../tunnel.ts';
@@ -158,5 +160,50 @@ describe('buildSshArgs', () => {
         null,
       ),
     ).toEqual(['-N', '-R', '0.0.0.0:8080:localhost:3000', 'web-01']);
+  });
+});
+
+describe('resolveSelfInvocation', () => {
+  test('dev mode (argv[1] ends with cli.ts) re-invokes bun + the script path', () => {
+    const original = process.argv;
+    const bunPath = original[0] ?? 'bun';
+    process.argv = [bunPath, '/repo/src/cli.ts', 'tunnel', 'open'];
+    try {
+      expect(resolveSelfInvocation()).toEqual([bunPath, '/repo/src/cli.ts']);
+    } finally {
+      process.argv = original;
+    }
+  });
+
+  test('compiled-binary mode (argv[1] does not end with cli.ts) re-invokes execPath alone', () => {
+    const original = process.argv;
+    process.argv = ['/usr/local/bin/sshepherd', 'tunnel', 'open'];
+    try {
+      expect(resolveSelfInvocation()).toEqual([process.execPath]);
+    } finally {
+      process.argv = original;
+    }
+  });
+});
+
+describe('runSupervisor', () => {
+  test('spawns the given command, kills it once durationSec elapses, and resolves', async () => {
+    // Use a real, harmless long-running command (`sleep 5`) standing in for `ssh -N ...` — the
+    // supervisor doesn't know or care what it's supervising, only that it must die on schedule.
+    const start = Date.now();
+    const exitCode = await runSupervisor({
+      command: 'sleep',
+      args: ['5'],
+      durationSec: 1,
+    });
+    const elapsedMs = Date.now() - start;
+    // Killed by the 1s timer, long before `sleep 5` would exit on its own.
+    expect(elapsedMs).toBeLessThan(4000);
+    expect(exitCode).not.toBe(0);
+  });
+
+  test('resolves with the real exit code when the command finishes before the deadline', async () => {
+    const exitCode = await runSupervisor({ command: 'true', args: [], durationSec: 10 });
+    expect(exitCode).toBe(0);
   });
 });

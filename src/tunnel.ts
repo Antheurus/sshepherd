@@ -110,6 +110,43 @@ export function buildSshArgs(params: OpenTunnelParams, localPort: number | null)
   return ['-N', '-R', `${params.remote}:${params.local}`, params.alias];
 }
 
+/** Dev mode (`bun src/cli.ts ...`) needs `[bun, /path/to/cli.ts]` to re-invoke correctly —
+ *  `process.execPath` alone would just be the `bun` binary, which can't be run with no script
+ *  argument the way this needs. A compiled standalone binary (`dist/sshepherd`, the real
+ *  distribution artifact) has no separate script path in `process.argv[1]`, so `process.execPath`
+ *  alone IS the correct full re-invocation. */
+export function resolveSelfInvocation(): string[] {
+  const scriptArg = process.argv[1];
+  if (scriptArg && scriptArg.endsWith('cli.ts')) {
+    return [process.execPath, scriptArg];
+  }
+  return [process.execPath];
+}
+
+export interface RunSupervisorParams {
+  command: string;
+  args: string[];
+  durationSec: number;
+}
+
+/** Runs as the hidden `sshepherd tunnel __supervise` entrypoint (wired in a later task's
+ *  `cli.ts` change). Spawns the real command (ssh) as its OWN child — inheriting this process's
+ *  group, which `openTunnel` (a later task) makes a NEW group via `detached: true` when it
+ *  spawns the supervisor itself — holds a JS timer for `durationSec`, and kills the child
+ *  directly (no process-group trick needed here; this process has a direct handle to its own
+ *  child) if the timer fires first. */
+export async function runSupervisor(params: RunSupervisorParams): Promise<number> {
+  const proc = Bun.spawn([params.command, ...params.args], {
+    stdio: ['ignore', 'ignore', 'ignore'],
+  });
+  const timer = setTimeout(() => {
+    proc.kill('SIGKILL');
+  }, params.durationSec * 1000);
+  const exitCode = await proc.exited;
+  clearTimeout(timer);
+  return exitCode;
+}
+
 /** Returns `null` for a missing or malformed state file — a tunnel state dir behaves like
  *  `targets.ts`'s "missing file yields empty" tolerance, never throws on a bad read. */
 export function readTunnelRecordFile(path: string): TunnelRecord | null {
