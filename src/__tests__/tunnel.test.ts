@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { defaultTunnelStateDir, readTunnelRecordFile, writeTunnelRecord } from '../tunnel.ts';
+import { defaultTunnelStateDir, findFreePort, readTunnelRecordFile, writeTunnelRecord } from '../tunnel.ts';
 
 function tempStateDir(): string {
   return mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-test-'));
@@ -55,5 +56,28 @@ describe('writeTunnelRecord / readTunnelRecordFile', () => {
     const path = join(dir, 'broken.json');
     writeFileSync(path, 'not json{{{');
     expect(readTunnelRecordFile(path)).toBeNull();
+  });
+});
+
+describe('findFreePort', () => {
+  test('returns a port that is immediately bindable again', async () => {
+    const port = findFreePort();
+    expect(port).toBeGreaterThan(0);
+    expect(port).toBeLessThan(65536);
+
+    // Prove it's actually free by binding a real listener on it.
+    await new Promise<void>((resolve, reject) => {
+      const server = createServer();
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => {
+        server.close(() => resolve());
+      });
+    });
+  });
+
+  test('two consecutive calls return different ports', () => {
+    const a = findFreePort();
+    const b = findFreePort();
+    expect(a).not.toBe(b);
   });
 });

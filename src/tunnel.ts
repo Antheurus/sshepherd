@@ -43,6 +43,23 @@ export function writeTunnelRecord(path: string, record: TunnelRecord): void {
   writeTextSecure(path, JSON.stringify(record));
 }
 
+/** Binds an ephemeral local TCP listener, reads back the OS-assigned port, releases it
+ *  immediately. There is a small window between release and ssh's own bind where another
+ *  process could take the port — `openTunnel` (a later task) surfaces `TUNNEL_PORT_TAKEN` if
+ *  that happens, rather than pretending this race can be closed entirely on localhost. */
+export function findFreePort(): number {
+  const listener = Bun.listen({
+    hostname: '127.0.0.1',
+    port: 0,
+    // Bun.listen requires at least a `data` or `drain` handler at runtime (ERR_INVALID_ARG_TYPE)
+    // even though the types mark them optional. No connection is ever accepted here, so it no-ops.
+    socket: { data() {} },
+  });
+  const port = listener.port;
+  listener.stop(true);
+  return port;
+}
+
 /** Returns `null` for a missing or malformed state file — a tunnel state dir behaves like
  *  `targets.ts`'s "missing file yields empty" tolerance, never throws on a bad read. */
 export function readTunnelRecordFile(path: string): TunnelRecord | null {
