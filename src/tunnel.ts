@@ -1,6 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { listHostAliases } from './parsers/ssh-config.ts';
 import { writeTextSecure } from './setup-file-io.ts';
 import { OpRunLocalError } from './types.ts';
 
@@ -145,6 +147,81 @@ export async function runSupervisor(params: RunSupervisorParams): Promise<number
   const exitCode = await proc.exited;
   clearTimeout(timer);
   return exitCode;
+}
+
+export interface SpawnSupervisorResult {
+  pid: number;
+}
+
+export interface OpenTunnelDeps {
+  spawnSupervisor?: (id: string, durationSec: number, sshArgs: string[]) => SpawnSupervisorResult;
+}
+
+/** The real (production) spawn path — a detached re-invocation of this same binary in
+ *  `tunnel __supervise` mode. `detached: true` makes the supervisor the leader of a NEW process
+ *  group; the ssh child it spawns from inside `runSupervisor` inherits that same group (default
+ *  POSIX fork/exec behavior for a non-detached child), which is what lets `closeTunnel` (Task 8)
+ *  kill both with one negative-PID signal. */
+function defaultSpawnSupervisor(
+  id: string,
+  durationSec: number,
+  sshArgs: string[],
+): SpawnSupervisorResult {
+  const selfInvocation = resolveSelfInvocation();
+  const proc = Bun.spawn(
+    [...selfInvocation, 'tunnel', '__supervise', id, String(durationSec), 'ssh', ...sshArgs],
+    {
+      stdio: ['ignore', 'ignore', 'ignore'],
+      detached: true,
+    },
+  );
+  proc.unref();
+  return { pid: proc.pid };
+}
+
+/** Ties validation, alias-authorization, port-finding, and the detached supervisor spawn into one
+ *  callable open. The alias is checked against the aliases ACTUALLY declared in `~/.ssh/config`
+ *  before any argv is built or process spawned: the tunnel path spawns ssh directly (never through
+ *  `transport.ts`, which guards aliases via `ssh -G`), so without this check a leading-dash alias
+ *  like `-oProxyCommand=<cmd>` would reach ssh as an option, not a hostname — local command
+ *  execution. */
+export function openTunnel(
+  params: OpenTunnelParams,
+  sshConfigPath: string,
+  deps: OpenTunnelDeps = {},
+): TunnelRecord {
+  validateOpenParams(params);
+
+  const declaredAliases = listHostAliases(sshConfigPath);
+  if (!declaredAliases.includes(params.alias)) {
+    throw new OpRunLocalError(
+      'UNKNOWN_ALIAS',
+      `alias '${params.alias}' is not declared in the ssh config`,
+    );
+  }
+
+  const id = `t-${randomUUID()}`;
+  const localPort = params.kind === 'local' || params.kind === 'dynamic' ? findFreePort() : null;
+  const sshArgs = buildSshArgs(params, localPort);
+
+  const spawn = deps.spawnSupervisor ?? defaultSpawnSupervisor;
+  const { pid } = spawn(id, params.durationSec, sshArgs);
+
+  const now = Date.now();
+  const record: TunnelRecord = {
+    id,
+    alias: params.alias,
+    kind: params.kind,
+    localPort,
+    remoteTarget: params.kind === 'dynamic' ? null : (params.remote ?? null),
+    localTarget: params.kind === 'remote' ? (params.local ?? null) : null,
+    pid,
+    openedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + params.durationSec * 1000).toISOString(),
+  };
+
+  writeTunnelRecord(tunnelRecordPath(defaultTunnelStateDir(), id), record);
+  return record;
 }
 
 /** Returns `null` for a missing or malformed state file — a tunnel state dir behaves like

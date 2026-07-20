@@ -11,9 +11,11 @@ import {
   findFreePort,
   MAX_DURATION_SEC,
   MIN_DURATION_SEC,
+  openTunnel,
   readTunnelRecordFile,
   resolveSelfInvocation,
   runSupervisor,
+  tunnelRecordPath,
   validateOpenParams,
   writeTunnelRecord,
 } from '../tunnel.ts';
@@ -205,5 +207,110 @@ describe('runSupervisor', () => {
   test('resolves with the real exit code when the command finishes before the deadline', async () => {
     const exitCode = await runSupervisor({ command: 'true', args: [], durationSec: 10 });
     expect(exitCode).toBe(0);
+  });
+});
+
+describe('openTunnel', () => {
+  function withTempStateDir<T>(fn: () => T): T {
+    const dir = tempStateDir();
+    const original = process.env.SSHEPHERD_TUNNEL_STATE_DIR;
+    process.env.SSHEPHERD_TUNNEL_STATE_DIR = dir;
+    try {
+      return fn();
+    } finally {
+      if (original === undefined) {
+        delete process.env.SSHEPHERD_TUNNEL_STATE_DIR;
+      } else {
+        process.env.SSHEPHERD_TUNNEL_STATE_DIR = original;
+      }
+    }
+  }
+
+  function tempSshConfig(aliases: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-sshconfig-'));
+    const path = join(dir, 'config');
+    const text = aliases.map((a) => `Host ${a}\n    HostName example.invalid\n    User test\n`).join('\n');
+    writeFileSync(path, text);
+    return path;
+  }
+
+  test('local kind: assigns a port, spawns via the injected fn, writes a state record', () => {
+    withTempStateDir(() => {
+      const sshConfigPath = tempSshConfig(['web-01']);
+      const record = openTunnel(
+        { alias: 'web-01', kind: 'local', remote: 'localhost:5432', durationSec: 120 },
+        sshConfigPath,
+        { spawnSupervisor: () => ({ pid: 424242 }) },
+      );
+
+      expect(record.alias).toBe('web-01');
+      expect(record.kind).toBe('local');
+      expect(record.localPort).toBeGreaterThan(0);
+      expect(record.remoteTarget).toBe('localhost:5432');
+      expect(record.localTarget).toBeNull();
+      expect(record.pid).toBe(424242);
+
+      const onDisk = readTunnelRecordFile(tunnelRecordPath(defaultTunnelStateDir(), record.id));
+      expect(onDisk).toEqual(record);
+    });
+  });
+
+  test('remote kind: no localPort assigned, records localTarget', () => {
+    withTempStateDir(() => {
+      const sshConfigPath = tempSshConfig(['web-01']);
+      const record = openTunnel(
+        { alias: 'web-01', kind: 'remote', remote: '0.0.0.0:8080', local: 'localhost:3000', durationSec: 120 },
+        sshConfigPath,
+        { spawnSupervisor: () => ({ pid: 424242 }) },
+      );
+      expect(record.localPort).toBeNull();
+      expect(record.remoteTarget).toBe('0.0.0.0:8080');
+      expect(record.localTarget).toBe('localhost:3000');
+    });
+  });
+
+  test('propagates validation errors before ever calling spawnSupervisor', () => {
+    withTempStateDir(() => {
+      const sshConfigPath = tempSshConfig(['web-01']);
+      let spawnCalled = false;
+      expect(() =>
+        openTunnel(
+          { alias: 'web-01', kind: 'local', durationSec: 120 },
+          sshConfigPath,
+          {
+            spawnSupervisor: () => {
+              spawnCalled = true;
+              return { pid: 1 };
+            },
+          },
+        ),
+      ).toThrow(OpRunLocalError);
+      expect(spawnCalled).toBe(false);
+    });
+  });
+
+  test('rejects an alias that is not declared in the ssh config, before spawning', () => {
+    withTempStateDir(() => {
+      const sshConfigPath = tempSshConfig(['web-01']); // 'evil-alias' is NOT declared
+      let spawnCalled = false;
+      let caught: unknown;
+      try {
+        openTunnel(
+          { alias: '-oProxyCommand=touch /tmp/pwned', kind: 'dynamic', durationSec: 120 },
+          sshConfigPath,
+          {
+            spawnSupervisor: () => {
+              spawnCalled = true;
+              return { pid: 1 };
+            },
+          },
+        );
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(OpRunLocalError);
+      expect((caught as InstanceType<typeof OpRunLocalError>).code).toBe('UNKNOWN_ALIAS');
+      expect(spawnCalled).toBe(false);
+    });
   });
 });
