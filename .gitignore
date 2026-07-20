@@ -31,3 +31,6 @@ CLAUDE.local.md
 
 # historical development planning docs — local only, not shipped
 docs/plan/
+
+# local isolated worktrees for subagent-driven-development
+.worktrees/
