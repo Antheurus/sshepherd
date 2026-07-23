@@ -6,10 +6,19 @@
 
 ![sshepherd — a zero-knowledge shepherd guiding your servers over SSH](docs/assets/hero.jpeg)
 
-A zero-knowledge SSH ops CLI for Claude Code and any other agent or terminal — server
-health checks, docker/systemd control, log tailing, config edits, read-only Postgres
-introspection, and declarative deploys, without ever letting the agent see a password,
-private key, hostname, user, or port.
+Termius, Voltius, and the rest of that category are SSH clients built for a human at the
+keyboard. `sshepherd` is the equivalent tool for an AI agent in the driver's seat — a
+zero-knowledge SSH ops CLI for **any coding agent** — Claude Code, opencode, Aider, Cursor
+CLI, Codex CLI, Cline, or a plain terminal — server health checks, docker/systemd control,
+log tailing, config edits, read-only Postgres introspection, and declarative deploys,
+without ever letting the agent see a password, private key, hostname, user, or port.
+
+|  | Termius / Voltius | sshepherd |
+|---|---|---|
+| Who's driving | A human, via a GUI | An agent, via a CLI |
+| Output | Terminal panes, raw shell | Typed JSON envelopes, no raw dump |
+| Credential model | Human unlocks a vault | Agent never sees a credential, ever |
+| Category | SSH/SFTP terminal client | Zero-knowledge ops CLI for agents |
 
 ## Why
 
@@ -26,26 +35,19 @@ never a raw terminal dump. The agent never types a hostname or password; it type
 — an ssh alias, a Postgres target, a deploy recipe — that resolves entirely outside the
 process.
 
-A [Claude Code](https://claude.com/claude-code) skill for `ssh`/`devops`/`cli` server
-operations, built `zero-knowledge` from the ground up: safe `postgres` introspection,
-declarative `deploy` recipes, and a `security` posture check, all reachable as
-`claude-skills`/`agent-skills` without the agent ever handling a credential.
+It's a standalone binary — any agent that can shell out to a CLI can drive it, no
+integration required beyond that. It also ships as a [Claude Code](https://claude.com/claude-code)
+skill/plugin for those who use Claude Code specifically (see Install below), but the CLI
+itself has no Claude dependency: `ssh`/`devops`/`cli` server operations, safe `postgres`
+introspection, declarative `deploy` recipes, and a `security` posture check, all reachable
+without the agent ever handling a credential.
 
 ## Install
 
-**a. As a Claude Code skill via `npx skills add`:**
+Works with any agent that can shell out to a CLI. Pick a. or b. for any agent/terminal;
+c. and d. are for Claude Code specifically.
 
-```bash
-npx skills add Antheurus/sshepherd
-```
-
-**b. As a Claude Code plugin marketplace:**
-
-```
-/plugin marketplace add Antheurus/sshepherd
-```
-
-**c. Prebuilt release binary** — no Bun required at runtime. Grab one from
+**a. Prebuilt release binary** — no Bun required at runtime. Grab one from
 [Releases](https://github.com/Antheurus/sshepherd/releases) for your platform
 (`darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`), verify the SHA-256 against the
 published checksum, then run it directly:
@@ -62,7 +64,7 @@ Each release binary also carries a
 [GitHub Actions build-provenance attestation](https://github.com/Antheurus/sshepherd/attestations) —
 verify it with `gh attestation verify sshepherd-linux-x64 --repo Antheurus/sshepherd`.
 
-**d. Build from source.** Requires [Bun](https://bun.sh) and [`just`](https://github.com/casey/just).
+**b. Build from source.** Requires [Bun](https://bun.sh) and [`just`](https://github.com/casey/just).
 
 ```bash
 git clone https://github.com/Antheurus/sshepherd.git
@@ -163,9 +165,10 @@ protects `~/.ssh/config` and the agent) and how mutating ops are gated.
 ## Call the binary by absolute path
 
 Like most compiled CLIs installed for a single project, `dist/sshepherd` is not placed on
-`PATH`. When wiring this up as a Claude Code skill, call it by its absolute path
-(`SKILL.md` does this consistently) — every example in this README uses the bare
-`sshepherd` name for brevity; substitute the real path when invoking.
+`PATH`. When wiring this up as a tool for any agent — Claude Code, opencode, Aider, or
+otherwise — call it by its absolute path (`SKILL.md` does this consistently for the Claude
+Code skill); every example in this README uses the bare `sshepherd` name for brevity —
+substitute the real path when invoking.
 
 ## Development
 
@@ -197,9 +200,10 @@ sshepherd is under active development. This is a real roadmap, not a wishlist �
 
 ## Topics
 
-`claude-code` · `claude-skills` · `claude-code-skills` · `agent-skills` · `ssh` · `devops` ·
-`cli` · `security` · `zero-knowledge` · `postgres` · `deploy` — the GitHub topics to set on
-this repo for discovery.
+`ai-agent` · `agentic-cli` · `llm-tools` · `claude-code` · `opencode` · `claude-skills` ·
+`claude-code-skills` · `agent-skills` · `ssh` · `devops` · `devops-tools` · `sysadmin` ·
+`terminal` · `cli` · `security` · `zero-knowledge` · `postgres` · `deploy` — the GitHub
+topics set on this repo for discovery.
 
 ## License
 
