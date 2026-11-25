@@ -1,6 +1,19 @@
 ---
 name: sshepherd
-description: Use this skill whenever the user mentions "sshepherd" by name, or wants to check on a remote server (health, disk, memory, CPU, ports, OOM history), inspect or restart docker/systemd services, tail remote logs, read or write remote config files, deploy a project via a named recipe, introspect a remote Postgres database, or audit SSH/security posture on a box — while keeping the agent zero-knowledge about credentials (no password, private key, or host/user/port ever reaches the agent's context or a tool response). Covers all 9 registry-driven command groups (hosts, check, logs, services, deploy, config, db, files, security) via a single compiled Bun/TypeScript CLI that shells out to the system `ssh` binary — the agent only ever passes an ssh alias, a pg-target name, or a recipe name, never a credential. `setup` is a separate group (deliberately not one of the 9) that writes sshepherd's own local config files; every `setup` action is agent-invocable, with one narrow exception — `setup ssh-alias install` opens a one-shot browser form that only a human can type a password into.
+description: >-
+  Use this skill whenever the user mentions "sshepherd" by name, or wants to check on a remote server
+  (health, disk, memory, CPU, ports, OOM history), inspect or restart docker/systemd services, tail
+  remote logs, read or write remote config files, deploy a project via a named recipe, introspect a
+  remote Postgres database, or audit SSH/security posture on a box. Indonesian triggers: "cek server",
+  "server gua kenapa", "servernya down", "disk penuh", "restart service", "liat log server", "deploy ke
+  server", "ssh ke", "cek RAM server", "kenapa lemot servernya", "port apa aja yang kebuka". Keeps the
+  agent zero-knowledge about credentials — no password, private key, or host/user/port ever reaches the
+  agent context or a tool response. Covers all 9 registry-driven command groups (hosts, check, logs,
+  services, deploy, config, db, files, security) via a single compiled Bun/TypeScript CLI that shells
+  out to the system ssh binary; the agent only ever passes an ssh alias, a pg-target name, or a recipe
+  name. setup is a separate group that writes sshepherd own local config files; every setup action is
+  agent-invocable except setup ssh-alias install, which opens a one-shot browser form only a human can
+  type a password into.
 ---
 
 # sshepherd
