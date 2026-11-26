@@ -33,6 +33,9 @@ compose_file = "/opt/myapp/docker-compose.yml" # path to the compose file ON THE
 service = "db"                               # compose service name for the db container
 user = "sshepherd_ro"                        # read-only role (see above)
 database = "myapp"
+max_profile = "read"                         # optional: db ops on this target never run above
+                                             # SSHEPHERD_PROFILE=read, whatever the caller holds
+                                             # (read | deploy | admin; absent = no cap)
 
 # Plain-container Postgres — `docker exec -i <container> psql ...`
 [staging]

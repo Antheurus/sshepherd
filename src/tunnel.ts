@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { listHostAliases } from './parsers/ssh-config.ts';
 import { writeTextSecure } from './setup-file-io.ts';
-import { sshConfigArgs } from './transport.ts';
+import { STRICT_HOST_KEY_ARGS, sshConfigArgs } from './transport.ts';
 import { OpRunLocalError } from './types.ts';
 
 export type TunnelKind = 'local' | 'remote' | 'dynamic';
@@ -109,12 +109,12 @@ export function validateOpenParams(params: OpenTunnelParams): void {
  *  port sshepherd allocates). */
 export function buildSshArgs(params: OpenTunnelParams, localPort: number | null): string[] {
   if (params.kind === 'local') {
-    return ['-N', '-L', `${localPort}:${params.remote}`, params.alias];
+    return [...STRICT_HOST_KEY_ARGS, '-N', '-L', `${localPort}:${params.remote}`, params.alias];
   }
   if (params.kind === 'dynamic') {
-    return ['-N', '-D', String(localPort), params.alias];
+    return [...STRICT_HOST_KEY_ARGS, '-N', '-D', String(localPort), params.alias];
   }
-  return ['-N', '-R', `${params.remote}:${params.local}`, params.alias];
+  return [...STRICT_HOST_KEY_ARGS, '-N', '-R', `${params.remote}:${params.local}`, params.alias];
 }
 
 /** Dev mode (`bun src/cli.ts ...`) needs `[bun, /path/to/cli.ts]` to re-invoke correctly —

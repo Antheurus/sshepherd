@@ -1,0 +1,30 @@
+# The canary service for src/__tests__/canary-leak.test.ts. plant.sh copies this file to
+# /opt/canary/docker-compose.yml on both sshd fixtures with the placeholder replaced by the run's
+# random canary, then starts it from there, so the compose file, the container Env and the log lines all
+# carry the canary. Same compose project as the smoke fixture: `just smoke-down` removes it too.
+# Each value ends in a two-letter placement tag; the test reports which ops reached which tag.
+name: sshepherd-smoke
+
+services:
+  canary:
+    image: nginx:alpine
+    container_name: sshepherd-fixture-canary
+    environment:
+      API_TOKEN: __C__ev
+      DATABASE_URL: postgres://app:__C__du@postgres:5432/app
+      POSTGRES_PASSWORD: __C__cf
+      APP_PASSWORD: __C__lg
+      BEARER_TOKEN: __C__ah
+      CALLBACK_TOKEN: __C__qs
+      OAUTH_CLIENT_SECRET: __C__js
+    entrypoint: ['sh', '-c']
+    command:
+      - |
+        echo "INFO boot DATABASE_URL=$$DATABASE_URL"
+        echo "INFO connecting to $$DATABASE_URL"
+        echo "WARN login retry user=ops password=$$APP_PASSWORD"
+        echo "DEBUG upstream request headers: Authorization: Bearer $$BEARER_TOKEN"
+        echo "INFO 172.18.0.1 GET /oauth/callback?code=abc123&token=$$CALLBACK_TOKEN HTTP/1.1 200"
+        echo '{"level":"info","msg":"oauth client loaded","client_secret":"'"$$OAUTH_CLIENT_SECRET"'"}'
+        echo "INFO canary app ready"
+        exec sleep 3600

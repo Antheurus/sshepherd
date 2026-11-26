@@ -48,6 +48,12 @@ port_for() {
   if [[ "$1" == debian ]]; then echo "$DEBIAN_PORT"; else echo "$ALPINE_PORT"; fi
 }
 
+# The sshd's own public host keys, read through docker: the out-of-band channel a human would use
+# to confirm a fingerprint before trusting it.
+host_keys() {
+  docker exec "sshepherd-fixture-sshd-$1" sh -c 'cat /etc/ssh/ssh_host_*_key.pub'
+}
+
 # -- bring-up / tear-down ---------------------------------------------------------------------
 
 fixture_up() {
@@ -74,7 +80,7 @@ fixture_up() {
       printf '  User root\n'
       printf '  IdentityFile %s\n' "$KEYDIR/id_ed25519"
       printf '  IdentitiesOnly yes\n'
-      printf '  StrictHostKeyChecking accept-new\n'
+      printf '  StrictHostKeyChecking yes\n'
       printf '  UserKnownHostsFile %s\n\n' "$STATE/known_hosts"
     } >>"$STATE/ssh_config"
   done
@@ -83,6 +89,16 @@ fixture_up() {
   step "bring up the $COMPOSE_PROJECT compose project (debian + alpine sshd, postgres, app)"
   compose up -d --build
   pass "fixture containers started"
+
+  step "record the fixture host keys, read from each container (strict checking, never accept-new)"
+  : >"$STATE/known_hosts"
+  chmod 600 "$STATE/known_hosts"
+  for variant in "${VARIANTS[@]}"; do
+    host_keys "$variant" | while read -r type key _; do
+      printf '[127.0.0.1]:%s %s %s\n' "$(port_for "$variant")" "$type" "$key"
+    done >>"$STATE/known_hosts"
+  done
+  pass "fixture known_hosts holds both variants' host keys"
 
   for variant in "${VARIANTS[@]}"; do
     step "wait for the $variant sshd on port $(port_for "$variant")"
@@ -227,6 +243,48 @@ run_matrix() {
   OUT="$STATE/out/$variant"
   mkdir -p "$OUT"
   write_fixture_config "$variant"
+
+  step "[$variant] strict host keys: unknown and changed keys are typed errors, hosts trust records a verified key"
+  local known_name fingerprints fp
+  known_name="[127.0.0.1]:$(port_for "$variant")"
+  fingerprints="$(host_keys "$variant" | ssh-keygen -lf - | awk '{print $2}')"
+  ssh-keygen -R "$known_name" -f "$STATE/known_hosts" >/dev/null 2>&1
+  run_cli_any hk_unknown hosts test "$alias"
+  assert_json "[$variant] no known_hosts entry: HOST_KEY_UNKNOWN, next names hosts trust" hk_unknown \
+    "d['ok'] is False and d['error']['code'] == 'HOST_KEY_UNKNOWN' and 'hosts trust' in d['error']['next']"
+  run_cli hk_dry hosts trust "$alias" --dry-run
+  fp="$(python3 -c "import json; print(json.load(open('$OUT/hk_dry.json'))['data']['fingerprints'][0]['fingerprint'])")"
+  if grep -qxF "$fp" <<<"$fingerprints"; then
+    pass "[$variant] hosts trust --dry-run shows a fingerprint of the container's own host key"
+  else
+    fail "[$variant] hosts trust --dry-run fingerprint is not one of the container's host keys"
+  fi
+  run_cli_any hk_wrong hosts trust "$alias" --fingerprint "SHA256:$(printf 'x%.0s' $(seq 1 43))" --yes
+  assert_json "[$variant] hosts trust with a fingerprint the host did not present: refused" hk_wrong \
+    "d['ok'] is False and d['error']['code'] == 'HOST_KEY_CHANGED'"
+  if ssh-keygen -F "$known_name" -f "$STATE/known_hosts" >/dev/null; then
+    fail "[$variant] a refused hosts trust still wrote known_hosts"
+  fi
+  pass "[$variant] the refused hosts trust left known_hosts without an entry"
+  run_cli hk_trust hosts trust "$alias" --fingerprint "$fp" --yes
+  assert_json "[$variant] hosts trust --fingerprint --yes: written" hk_trust \
+    "d['ok'] is True and d['data']['written'] is True"
+  run_cli hk_test_trusted hosts test "$alias"
+  assert_json "[$variant] hosts test after trust: ok" hk_test_trusted "d['ok'] is True"
+  run_cli hk_disconnect hosts disconnect "$alias"
+  rm -f "$STATE/impostor_key" "$STATE/impostor_key.pub"
+  ssh-keygen -q -t ed25519 -N '' -f "$STATE/impostor_key"
+  ssh-keygen -R "$known_name" -f "$STATE/known_hosts" >/dev/null 2>&1
+  printf '%s %s\n' "$known_name" "$(cut -d' ' -f1,2 "$STATE/impostor_key.pub")" >>"$STATE/known_hosts"
+  run_cli_any hk_changed hosts test "$alias"
+  assert_json "[$variant] known_hosts holds another key: HOST_KEY_CHANGED" hk_changed \
+    "d['ok'] is False and d['error']['code'] == 'HOST_KEY_CHANGED'"
+  run_cli hk_retrust hosts trust "$alias" --fingerprint "$fp" --yes
+  assert_json "[$variant] hosts trust replaces the stale entry" hk_retrust \
+    "d['ok'] is True and d['data']['written'] is True and d['data']['replaced_entries'] == 1"
+  run_cli hk_test_retrusted hosts test "$alias"
+  assert_json "[$variant] hosts test after re-trust: ok" hk_test_retrusted "d['ok'] is True"
+  run_cli hk_disconnect_again hosts disconnect "$alias"
 
   step "[$variant] hosts test, twice: one ControlMaster socket survives across processes"
   run_cli hosts_test hosts test "$alias"
@@ -393,7 +451,7 @@ for name in sorted(os.listdir(src)):
     if not name.endswith('.json'):
         continue
     d = json.load(open(os.path.join(src, name)))
-    if name.startswith(('cap_', 'fields_', 'limit_', 'bad_')):
+    if name.startswith(('cap_', 'fields_', 'limit_', 'bad_', 'hk_')):
         continue
     if name == 'services_ps.json':
         d['data'] = [c for c in d['data'] if 'sshepherd-fixture-' in json.dumps(c)]

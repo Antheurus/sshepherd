@@ -33,6 +33,13 @@ runner), but if your change touches a remote command's output shape — a new pa
 closest thing this project has to a regression suite for real Linux/Postgres behavior, since
 `bun test` mocks the transport layer entirely.
 
+`src/__tests__/canary-leak.test.ts` is the leak gate and is smoke-only too: with the fixture up
+(`just smoke-up && bun test src/__tests__/canary-leak.test.ts`) it plants a random canary in every
+secret-shaped place on both sshd variants (`scripts/sshd-fixture/canary/`) and runs every op whose
+`exposes` is not `none`; without the fixture it reports as skipped. A new exposing op is driven
+automatically; one it cannot drive goes in its `SKIP` list with a reason. Before merging a scrubber
+or exposing-op change, run it once with `SSHEPHERD_TEST_SCRUB_IDENTITY=1` too and see it fail.
+
 ## Where things live
 
 - `src/registry.ts` — every op as data: group, action, args, whether it mutates, how its

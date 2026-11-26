@@ -96,6 +96,7 @@ describe('registry — getOp/listOps', () => {
     ['deploy', 'migrate'],
     ['security', 'harden'],
     ['files', 'upload'],
+    ['hosts', 'trust'],
   ];
 
   test('every read-only op declared through Phases 3-5 is registered and flagged mutating:false', () => {

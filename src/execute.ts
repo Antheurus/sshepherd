@@ -22,6 +22,7 @@ import {
   serializeJson,
   splitNdjson,
 } from './output.ts';
+import { profileDenial } from './profiles.ts';
 import { isEnvFile, maskEnvContent, type ScrubOptions, scrub } from './scrub.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { run, type TransportDeps } from './transport.ts';
@@ -335,6 +336,11 @@ async function runOp(
     }),
     outcome,
   });
+
+  const denied = profileDenial(op, ctx);
+  if (denied !== null) {
+    return finish(null, denied, 'refused');
+  }
 
   if (!confirmGate({ mutating: requiresConfirm, yes: deps.yes ?? false })) {
     return finish(null, errorInfo('CONFIRMATION_REQUIRED'), 'refused');

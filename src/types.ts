@@ -30,7 +30,8 @@ export type SshErrorCode =
   | 'UNKNOWN_ALIAS'
   | 'CONNECT_TIMEOUT'
   | 'AUTH_FAILED'
-  | 'HOST_KEY_MISMATCH'
+  | 'HOST_KEY_CHANGED'
+  | 'HOST_KEY_UNKNOWN'
   | 'SSH_TRANSPORT_ERROR'
   | 'COMMAND_FAILED'
   | 'COMMAND_TIMEOUT'
@@ -42,6 +43,7 @@ export type SshErrorCode =
   | 'CONFIG_PARSE_ERROR'
   | 'AUDIT_WRITE_FAILED'
   | 'OUTPUT_TOO_LARGE'
+  | 'PROFILE_DENIED'
   | 'INTERNAL_ERROR';
 
 /**

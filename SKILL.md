@@ -153,7 +153,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 11 registry-driven groups (57 ops) + 1 `setup` group (6 sub-groups, 12 actions)
+## Quick reference — 11 registry-driven groups (58 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
@@ -161,6 +161,8 @@ sshepherd hosts list
 sshepherd hosts test web-01
 sshepherd hosts info web-01
 sshepherd hosts disconnect web-01   # or --all; connections self-close after 5 idle minutes
+sshepherd hosts trust web-01 --dry-run                          # the host key fingerprint it presents
+sshepherd hosts trust web-01 --fingerprint SHA256:<fp> --yes    # record it once a human confirmed it
 
 # check
 sshepherd check overview web-01
@@ -260,6 +262,16 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
    prompts interactively (agent-first design) — without `--yes` a mutating op returns a
    `CONFIRMATION_REQUIRED` envelope and refuses before touching ssh. Success *and* failure
    both get an audit line in `~/.local/state/sshepherd/audit.jsonl`.
+   **`SSHEPHERD_PROFILE` caps what a caller may run, before any ssh call:** `read` (every
+   read-only op and any `--dry-run`), `deploy` (adds services/config/files/deploy/tunnel
+   changes), `admin` (adds `security harden` and `hosts trust`). Unset means `admin`; any other
+   value (`root`, an empty string) is refused with `PROFILE_DENIED` rather than read as admin. A
+   pg-target's `max_profile = "read"` in `targets.toml` caps every db op on that target. A
+   subagent verifier runs with `SSHEPHERD_PROFILE=read`; only a human raises it.
+   **Host keys are checked strictly** (`StrictHostKeyChecking=yes` on every connection): an
+   unknown key is `HOST_KEY_UNKNOWN`, a different one `HOST_KEY_CHANGED`, and the only way to
+   record one is `hosts trust <alias> --fingerprint SHA256:... --yes` after a human confirmed
+   the fingerprint `--dry-run` shows.
 3. **No raw exec, ever.** There is no `sshepherd exec "<any command>"`. A genuinely novel
    need is authored as a named, versioned recipe step (`references/recipes.md`) —
    reviewable, not a free-text shell escape hatch. `plain ssh <alias>` remains the
@@ -375,7 +387,8 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `UNKNOWN_ALIAS` | the ssh alias isn't defined in `~/.ssh/config` (or any file it `Include`s) and no wildcard `Host` line or `Match` block could apply to it |
 | `CONNECT_TIMEOUT` | couldn't reach the host within the connect timeout |
 | `AUTH_FAILED` | SSH authentication failed for this alias |
-| `HOST_KEY_MISMATCH` | the remote host key doesn't match the known-hosts entry |
+| `HOST_KEY_CHANGED` | the host presented a different key than `known_hosts` holds for the alias (or not the one `hosts trust --fingerprint` named); `next` is `hosts trust <alias> --dry-run` |
+| `HOST_KEY_UNKNOWN` | `known_hosts` has no key for the alias; sshepherd never accepts one on first use — confirm it with `hosts trust` |
 | `SSH_TRANSPORT_ERROR` | ssh failed before the remote command could run, unclassified |
 | `COMMAND_FAILED` | the remote command exited non-zero (`error.remote_exit` carries the code) |
 | `COMMAND_TIMEOUT` | the remote command exceeded its timeout (`error.budget_sec`, `error.elapsed_ms`; `data.partial_stdout` holds what it printed) |
@@ -387,6 +400,7 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `AUDIT_WRITE_FAILED` | a mutating op finished but its audit line could not be written; `data` keeps the op's result, `error.op_outcome` says how it ended (`ok`/`error` ran, `refused` did not) and `error.op_error` holds its own error — do not re-run it just to record it |
 | `INTERNAL_ERROR` | sshepherd failed while running the op (a bug or an unparseable reply from the host); the message names only the error class |
 | `CONFIRMATION_REQUIRED` | a mutating op ran without `--yes` — refused before any ssh call |
+| `PROFILE_DENIED` | the op needs a higher `SSHEPHERD_PROFILE` than the caller holds (or a target's `max_profile` caps it, or the profile value is unknown) — refused before any ssh call |
 
 Every failure is a JSON envelope whose `error` carries `hint` (what to do), `retryable` (whether the
 same command can succeed on a re-run) and, when one exists, `next` (an exact command to run) and
@@ -394,5 +408,5 @@ same command can succeed on a re-run) and, when one exists, `next` (an exact com
 
 Exit codes: `0` on `ok: true`; `1` when the run failed (`COMMAND_FAILED`, a timeout, a transport
 or internal error, `AUDIT_WRITE_FAILED`); `2` when the command line or its config was wrong (`INVALID_ARGS`,
-`PARSE_ERROR`, `UNKNOWN_SUBGROUP`, `VALIDATION_ERROR`, `CONFIG_PARSE_ERROR`, `UNKNOWN_ALIAS`, `CONFIRMATION_REQUIRED`) —
+`PARSE_ERROR`, `UNKNOWN_SUBGROUP`, `VALIDATION_ERROR`, `CONFIG_PARSE_ERROR`, `UNKNOWN_ALIAS`, `CONFIRMATION_REQUIRED`, `PROFILE_DENIED`) —
 no ssh command is ever run for an exit-`2` other than the alias check behind `UNKNOWN_ALIAS`.

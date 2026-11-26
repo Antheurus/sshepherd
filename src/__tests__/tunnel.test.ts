@@ -172,11 +172,13 @@ describe('buildSshArgs', () => {
         { alias: 'web-01', kind: 'local', remote: 'localhost:5432', durationSec: 60 },
         54321,
       ),
-    ).toEqual(['-N', '-L', '54321:localhost:5432', 'web-01']);
+    ).toEqual(['-o', 'StrictHostKeyChecking=yes', '-N', '-L', '54321:localhost:5432', 'web-01']);
   });
 
   test('dynamic kind', () => {
     expect(buildSshArgs({ alias: 'web-01', kind: 'dynamic', durationSec: 60 }, 1080)).toEqual([
+      '-o',
+      'StrictHostKeyChecking=yes',
       '-N',
       '-D',
       '1080',
@@ -196,7 +198,14 @@ describe('buildSshArgs', () => {
         },
         null,
       ),
-    ).toEqual(['-N', '-R', '0.0.0.0:8080:localhost:3000', 'web-01']);
+    ).toEqual([
+      '-o',
+      'StrictHostKeyChecking=yes',
+      '-N',
+      '-R',
+      '0.0.0.0:8080:localhost:3000',
+      'web-01',
+    ]);
   });
 });
 
