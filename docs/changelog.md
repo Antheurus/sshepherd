@@ -7,6 +7,10 @@
 - Every connection now checks host keys strictly. A host whose key isn't in known_hosts returns `HOST_KEY_UNKNOWN`, and one whose key changed returns `HOST_KEY_CHANGED` (this replaces `HOST_KEY_MISMATCH`; update anything that matched the old name).
 - New `sshepherd hosts trust <alias> --dry-run` shows the fingerprint the host presents. After a human has confirmed it out of band, `hosts trust <alias> --fingerprint SHA256:... --yes` records it and replaces that host's old entry. A fingerprint that doesn't match is refused and nothing is written.
 - Internal: a canary test now plants a random secret in 19 places on the local test servers and checks that no command ever returns it.
+- `setup` now obeys `SSHEPHERD_PROFILE` too: every setup action that writes local config (and `setup ssh-alias install`) needs `admin`, and returns `PROFILE_DENIED` (exit 2) under `read` or `deploy`; `setup ssh-alias list` and `status` stay available under `read`.
+- A `db query` whose cast or constraint fails no longer echoes the row value through the error (`invalid input syntax for type integer: "..."`, `Key (...)=(...) already exists`, `Failing row contains (...)` and the other psql texts that quote data).
+- Secrets and IP addresses are now masked in everything sshepherd prints outside a command run as well: `doctor`, argument errors, unexpected-error envelopes and every `setup` result.
+- Internal: the local test fixture can run as several copies at once (`SSHEPHERD_SMOKE_PROJECT`), and the canary test now also covers the connection's host, user and port and a peer address.
 
 ## v0.4.0-rc.6 — Output limits, field selection and a readable audit log
 

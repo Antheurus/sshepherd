@@ -18,18 +18,47 @@ import type { OpContext, OpSpec } from '../types.ts';
  * ends in a placement tag; the raw ssh output is recorded so the test also proves every placement
  * was actually read by some op (a canary nobody reads would make "0 hits" meaningless).
  *
+ * The aliases connect under a canary identity too: a HostName that resolves nowhere (reached through
+ * a ProxyCommand to the fixture's published port), a canary uid-0 user and a non-22 port. The remote
+ * prints that identity and a documentation-range peer address in a failing command's stderr, sshd
+ * journal lines, auth.log, a psql connect error and `ss` output; neither may reach an envelope or an
+ * audit row, and with `reveal_addresses = true` only the peer address comes back.
+ *
  * Smoke-only: without the fixture the suite is skipped (CI has no Docker fixture). With
  * SSHEPHERD_TEST_SCRUB_IDENTITY=1 the scrubber becomes the identity function inside this test
  * process only, and the test must fail — the falsification run.
  */
 
 const REPO = join(import.meta.dir, '..', '..');
-const STATE = process.env.SSHEPHERD_SMOKE_STATE_DIR ?? '/tmp/sshepherd-smoke';
-const SSH_CONFIG = join(STATE, 'ssh_config');
-const PLANT = join(REPO, 'scripts', 'sshd-fixture', 'canary', 'plant.sh');
+const FIXTURE_DIR = join(REPO, 'scripts', 'sshd-fixture');
+const PLANT = join(FIXTURE_DIR, 'canary', 'plant.sh');
 const VARIANTS = ['debian', 'alpine'] as const;
-const CANARY_CONTAINER = 'sshepherd-fixture-canary';
 const IDENTITY_HOOK = 'SSHEPHERD_TEST_SCRUB_IDENTITY';
+const PEER_IP = '203.0.113.77';
+
+/** The fixture's project, container prefix and state dir, from the same project.sh smoke.sh and
+ *  plant.sh source (SSHEPHERD_SMOKE_PROJECT / SSHEPHERD_SMOKE_STATE_DIR pick the fixture). */
+function fixtureNames(): { prefix: string; state: string } {
+  const proc = Bun.spawnSync(
+    [
+      'bash',
+      '-c',
+      '. "$1"; printf "%s\\n%s" "$SMOKE_PREFIX" "$SMOKE_STATE"',
+      'bash',
+      join(FIXTURE_DIR, 'project.sh'),
+    ],
+    { stdout: 'pipe', stderr: 'pipe' },
+  );
+  if (proc.exitCode !== 0) {
+    throw new Error(`project.sh failed: ${proc.stderr.toString().slice(-300)}`);
+  }
+  const [prefix = '', state = ''] = proc.stdout.toString().split('\n');
+  return { prefix, state };
+}
+
+const { prefix: PREFIX, state: STATE } = fixtureNames();
+const SMOKE_SSH_CONFIG = join(STATE, 'ssh_config');
+const CANARY_CONTAINER = `${PREFIX}-canary`;
 
 /** Placement tags, one per planted value (scripts/sshd-fixture/canary/*). */
 const PLACEMENTS: Record<string, string> = {
@@ -54,6 +83,67 @@ const PLACEMENTS: Record<string, string> = {
   dt: 'db column api_token',
 };
 
+/** psql error texts that quote the value that failed (scrub.ts `PSQL_DATA_ECHO_RULES`), each one a
+ *  `db query` against the planted canary_users row; `marker` is psql's own text, proving it ran.
+ *  `secret_pin` holds the digits-only canary, the one value an integer range error can quote. */
+const DB_ECHO_PROBES: Record<string, { sql: string; marker: string }> = {
+  q1: {
+    sql: 'SELECT email, password::int FROM canary_users',
+    marker: 'invalid input syntax for type integer: "',
+  },
+  q2: {
+    sql: 'SELECT password::canary_mood FROM canary_users',
+    marker: 'invalid input value for enum canary_mood: "',
+  },
+  q3: {
+    sql: 'SELECT secret_pin::int FROM canary_users',
+    marker: 'is out of range for type integer',
+  },
+  q4: { sql: 'SELECT password::text[] FROM canary_users', marker: 'malformed array literal: "' },
+  q5: { sql: 'SELECT password::json FROM canary_users', marker: 'JSON data, line 1: ' },
+  q6: {
+    sql: "SELECT to_date(password, 'FMMonth') FROM canary_users",
+    marker: 'invalid value "',
+  },
+  q7: { sql: 'SELECT secret_pin::date FROM canary_users', marker: 'out of range: "' },
+  q10: {
+    sql: 'SELECT secret_pin::interval FROM canary_users',
+    marker: 'interval field value out of range: "',
+  },
+  q8: { sql: 'SELECT canary_unique_violation()', marker: 'already exists.' },
+  q9: { sql: 'SELECT canary_not_null_violation()', marker: 'Failing row contains (' },
+};
+
+interface Identity {
+  user: string;
+  host: string;
+  port: string;
+}
+
+/** Where the remote prints the canary identity and the peer address; `marker` is a line only that
+ *  placement prints, so reaching it proves the op read it. */
+function addressPlacements(id: Identity): Record<string, { where: string; marker: string }> {
+  return {
+    a1: {
+      where: 'deploy run canary-fail stderr (ssh/rsync connect errors)',
+      marker: `rsync: [sender] ${id.user}@${id.host}: connection from ${PEER_IP} refused`,
+    },
+    a2: {
+      where: 'sshd journal (fake journalctl): Accepted publickey for <user> from <peer>',
+      marker: `Accepted publickey for ${id.user} from ${PEER_IP} port 51234`,
+    },
+    a3: {
+      where: '/var/log/auth.log: Failed password for invalid user <user> from <peer>',
+      marker: `Failed password for invalid user ${id.user} from ${PEER_IP}`,
+    },
+    a4: {
+      where: 'psql connect error naming the peer and the identity host/port',
+      marker: `could not translate host name "${id.host}"`,
+    },
+    a5: { where: 'ss -tlnp: a listener on the peer address', marker: `${PEER_IP}:51234` },
+  };
+}
+
 /** Exposing ops this test cannot drive, each with the reason a reviewer accepted. Growing it means
  *  raising REVIEWED_SKIP_COUNT in the same change, so a skip is never silent. */
 const SKIP: Record<string, string> = {};
@@ -65,7 +155,11 @@ const CANARY_FILES = [
   '/opt/canary/docker-compose.yml',
   '/opt/canary/config.json',
   '/opt/canary/server.pem',
+  '/var/log/auth.log',
 ];
+
+/** The pg-target whose container's PGHOST/PGPORT point at the unreachable peer and identity host. */
+const pgConnectTarget = (alias: string): string => `${alias}-pgconnect`;
 
 function argValues(alias: string): Record<string, string[]> {
   return {
@@ -74,16 +168,19 @@ function argValues(alias: string): Record<string, string[]> {
     stream: ['access', 'error'],
     path: CANARY_FILES,
     file: ['/opt/canary/docker-compose.yml'],
-    target: [alias],
-    sql: ['SELECT * FROM canary_users'],
+    target: [alias, pgConnectTarget(alias)],
+    sql: ['SELECT * FROM canary_users', ...Object.values(DB_ECHO_PROBES).map((probe) => probe.sql)],
     recipe: ['canary-ok', 'canary-fail'],
   };
 }
 
-const ARG_OVERRIDES: Record<string, Record<string, string[]>> = {
-  'files ls': { path: ['/opt/canary'] },
-  'files disk-usage': { path: ['/opt/canary'] },
-};
+function argOverrides(alias: string): Record<string, Record<string, string[]>> {
+  return {
+    'files ls': { path: ['/opt/canary'] },
+    'files disk-usage': { path: ['/opt/canary'] },
+    'db query': { target: [alias] },
+  };
+}
 
 interface Drive {
   label: string;
@@ -92,11 +189,11 @@ interface Drive {
 }
 
 function fixtureRunning(): boolean {
-  if (!existsSync(SSH_CONFIG)) {
+  if (!existsSync(SMOKE_SSH_CONFIG)) {
     return false;
   }
   const proc = Bun.spawnSync(
-    ['docker', 'inspect', '-f', '{{.State.Running}}', 'sshepherd-fixture-sshd-debian'],
+    ['docker', 'inspect', '-f', '{{.State.Running}}', `${PREFIX}-sshd-debian`],
     { stdout: 'pipe', stderr: 'pipe' },
   );
   return proc.exitCode === 0 && proc.stdout.toString().trim() === 'true';
@@ -107,6 +204,18 @@ const FIXTURE_UP = fixtureRunning();
 function randomCanary(): string {
   const alphabet = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   return Array.from(randomBytes(24), (byte) => alphabet[byte % alphabet.length]).join('');
+}
+
+/** Long enough that no real number in an envelope repeats it by chance; leads with 9 so it is
+ *  past the integer range. */
+function randomDigits(): string {
+  return `9${Array.from(randomBytes(20), (byte) => byte % 10).join('')}`;
+}
+
+function randomIdentity(value: string): Identity {
+  const lower = value.toLowerCase();
+  const port = 41_000 + (randomBytes(2).readUInt16BE(0) % 20_000);
+  return { user: `u${lower.slice(0, 20)}`, host: `h${lower}.example.net`, port: String(port) };
 }
 
 function runPlant(...args: string[]): void {
@@ -142,7 +251,10 @@ const ENV_KEYS = [
 const savedEnv: Record<string, string | undefined> = {};
 
 let canary = '';
+let digits = '';
+let identity: Identity = { user: '', host: '', port: '' };
 let scratch = '';
+let sshConfig = '';
 let runtimeDir = '';
 let rawSeen = '';
 
@@ -152,13 +264,68 @@ const recordingRunner: SshRunner = async (args, timeoutMs, options) => {
   return outcome;
 };
 
+/** The host port smoke.sh published for an alias, read from the fixture's own ssh config. */
+function publishedPort(alias: string): string {
+  const text = readFileSync(SMOKE_SSH_CONFIG, 'utf8');
+  const block = text.split(/^Host /m).find((entry) => entry.startsWith(`${alias}\n`)) ?? '';
+  const port = /^\s*Port\s+(\d+)/m.exec(block)?.[1];
+  if (port === undefined) {
+    throw new Error(`no Port for ${alias} in ${SMOKE_SSH_CONFIG}`);
+  }
+  return port;
+}
+
+/** The same aliases as the smoke ssh config, connecting under the canary identity: the HostName
+ *  resolves nowhere, so a ProxyCommand carries the connection to the published port, and the
+ *  canary known_hosts names the host keys under that identity. */
+function writeCanarySshConfig(): void {
+  const knownHosts: string[] = [];
+  const stanzas: string[] = [];
+  for (const variant of VARIANTS) {
+    const alias = `smoke-${variant}`;
+    const keys = Bun.spawnSync(
+      [
+        'docker',
+        'exec',
+        `${PREFIX}-sshd-${variant}`,
+        'sh',
+        '-c',
+        'cat /etc/ssh/ssh_host_*_key.pub',
+      ],
+      { stdout: 'pipe', stderr: 'pipe' },
+    );
+    for (const line of keys.stdout.toString().split('\n')) {
+      const [type, key] = line.trim().split(/\s+/);
+      if (type !== undefined && key !== undefined) {
+        knownHosts.push(`[${identity.host}]:${identity.port} ${type} ${key}`);
+      }
+    }
+    stanzas.push(
+      [
+        `Host ${alias}`,
+        `  HostName ${identity.host}`,
+        `  Port ${identity.port}`,
+        `  User ${identity.user}`,
+        `  ProxyCommand nc 127.0.0.1 ${publishedPort(alias)}`,
+        `  IdentityFile ${join(STATE, 'keys', 'id_ed25519')}`,
+        '  IdentitiesOnly yes',
+        '  StrictHostKeyChecking yes',
+        `  UserKnownHostsFile ${join(scratch, 'known_hosts')}`,
+        '',
+      ].join('\n'),
+    );
+  }
+  writeFileSync(join(scratch, 'known_hosts'), `${knownHosts.join('\n')}\n`);
+  writeFileSync(sshConfig, stanzas.join('\n'));
+}
+
 function writeFixtureConfig(): void {
   const aliases = VARIANTS.map((variant) => `smoke-${variant}`);
   const targets = aliases
-    .map(
-      (alias) =>
-        `[${alias}]\nalias = "${alias}"\ncontainer = "sshepherd-fixture-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
-    )
+    .flatMap((alias) => [
+      `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
+      `[${pgConnectTarget(alias)}]\nalias = "${alias}"\ncontainer = "${PREFIX}-canary-pg"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
+    ])
     .join('\n');
   writeFileSync(join(scratch, 'targets.toml'), targets);
   const paths = ['/opt/canary', ...CANARY_FILES].map((path) => `"${path}"`).join(', ');
@@ -207,7 +374,7 @@ function writeFixtureConfig(): void {
         '[[step]]',
         'name = "leaky-failure"',
         'kind = "shell"',
-        `run = "cat .env prod.env >&2; docker logs --tail 50 ${CANARY_CONTAINER} >&2; exit 3"`,
+        `run = "cat .env prod.env deploy-error.log >&2; docker logs --tail 50 ${CANARY_CONTAINER} >&2; exit 3"`,
         'mutates = false',
         '',
         '[[step]]',
@@ -228,7 +395,7 @@ function writeFixtureConfig(): void {
  *  is never skipped); `files download` writes into the scratch dir so the file can be searched. */
 function drivesFor(op: OpSpec, alias: string): Drive[] {
   const name = `${op.group} ${op.name}`;
-  const values = { ...argValues(alias), ...ARG_OVERRIDES[name] };
+  const values = { ...argValues(alias), ...argOverrides(alias)[name] };
   let drives: Drive[] = [{ label: name, args: {} }];
   for (const spec of op.args) {
     if (spec.name === 'local_path') {
@@ -265,7 +432,7 @@ function drivesFor(op: OpSpec, alias: string): Drive[] {
 
 function contextFor(op: OpSpec, alias: string, args: Record<string, string | boolean>): OpContext {
   if (op.group === 'db') {
-    return buildDbOpContext(alias, args);
+    return buildDbOpContext(typeof args.target === 'string' ? args.target : alias, args);
   }
   if (op.group === 'deploy') {
     process.env.SSHEPHERD_RECIPE_PATH = join(scratch, `${String(args.recipe)}.${alias}.toml`);
@@ -279,20 +446,44 @@ interface DriveResult {
   status: string;
   hits: string[];
   reached: string[];
+  /** The peer address came back in the envelope (expected only with reveal_addresses). */
+  peerShown: boolean;
 }
 
-async function drive(op: OpSpec, alias: string, entry: Drive, index: number): Promise<DriveResult> {
+/** Each planted value, as the test searches for it: `where` it may never appear. The identity
+ *  and the peer address are envelope-and-audit only — a file `files download` writes is the user's
+ *  own bytes and keeps its addresses by design. */
+function needles(): { name: string; found: (text: string) => boolean; envelopeOnly: boolean }[] {
+  const lower = (needle: string) => (text: string) => text.toLowerCase().includes(needle);
+  const portPattern = new RegExp(`(?<![\\d.])${identity.port}(?!\\d)`);
+  return [
+    { name: 'canary', found: (text) => text.includes(canary), envelopeOnly: false },
+    { name: 'digits', found: (text) => text.includes(digits), envelopeOnly: false },
+    { name: 'identity-user', found: lower(identity.user), envelopeOnly: true },
+    { name: 'identity-host', found: lower(identity.host), envelopeOnly: true },
+    { name: 'identity-port', found: (text) => portPattern.test(text), envelopeOnly: true },
+  ];
+}
+
+async function drive(
+  op: OpSpec,
+  alias: string,
+  entry: Drive,
+  index: number,
+  peerAllowed: boolean,
+): Promise<DriveResult> {
   const auditLogPath = join(scratch, `audit-${alias}-${index}.jsonl`);
   rawSeen = '';
   const ctx = contextFor(op, alias, entry.args);
   const envelope = await executeOp(op, ctx, {
-    transport: { runner: recordingRunner, sshConfigPath: SSH_CONFIG },
-    sshConfigPath: SSH_CONFIG,
+    transport: { runner: recordingRunner, sshConfigPath: sshConfig },
+    sshConfigPath: sshConfig,
     yes: true,
     auditLogPath,
   });
+  const stdout = JSON.stringify(envelope);
   const places: Record<string, string> = {
-    stdout: JSON.stringify(envelope),
+    stdout,
     error: JSON.stringify(envelope.error ?? null),
     stderr_tail: envelope.error?.stderr_tail ?? '',
     audit_row: existsSync(auditLogPath) ? readFileSync(auditLogPath, 'utf8') : '',
@@ -301,21 +492,36 @@ async function drive(op: OpSpec, alias: string, entry: Drive, index: number): Pr
         ? readFileSync(entry.downloadPath, 'latin1')
         : '',
   };
-  const hits = Object.entries(places)
-    .filter(([, text]) => text.includes(canary))
-    .map(([where]) => where);
+  const checks = [
+    ...needles(),
+    { name: 'peer-ip', found: (text: string) => text.includes(PEER_IP), envelopeOnly: true },
+  ].filter((needle) => !(peerAllowed && needle.name === 'peer-ip'));
+  const hits = Object.entries(places).flatMap(([where, text]) =>
+    checks
+      .filter((needle) => !(needle.envelopeOnly && where === 'downloaded_file'))
+      .filter((needle) => needle.found(text))
+      .map((needle) => `${needle.name}@${where}`),
+  );
   // `files download` moves the bytes as one base64 line; decode it so its reach shows too.
   const decoded = (rawSeen.match(/[A-Za-z0-9+/]{32,}={0,2}/g) ?? [])
     .map((token) => Buffer.from(token, 'base64').toString('latin1'))
     .join('\n');
-  const reached = Object.keys(PLACEMENTS).filter((tag) =>
-    `${rawSeen}\n${decoded}`.includes(`${canary}${tag}`),
-  );
+  const raw = `${rawSeen}\n${decoded}`;
+  const reached = [
+    ...Object.keys(PLACEMENTS).filter((tag) => raw.includes(`${canary}${tag}`)),
+    ...Object.entries(DB_ECHO_PROBES)
+      .filter(([, probe]) => entry.args.sql === probe.sql && raw.includes(probe.marker))
+      .map(([tag]) => tag),
+    ...Object.entries(addressPlacements(identity))
+      .filter(([, placement]) => raw.includes(placement.marker))
+      .map(([tag]) => tag),
+  ];
   return {
     label: entry.label,
     status: envelope.ok ? 'ok' : (envelope.error?.code ?? 'error'),
     hits,
     reached,
+    peerShown: stdout.includes(PEER_IP),
   };
 }
 
@@ -363,17 +569,21 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
       installIdentityScrubber();
     }
     canary = randomCanary();
+    digits = randomDigits();
+    identity = randomIdentity(randomCanary());
     scratch = mkdtempSync(join(tmpdir(), 'sshepherd-canary-'));
+    sshConfig = join(scratch, 'ssh_config');
     runtimeDir = mkdtempSync('/tmp/sshepherd-canary-run-');
     writeFixtureConfig();
-    process.env.SSHEPHERD_SSH_CONFIG_PATH = SSH_CONFIG;
+    writeCanarySshConfig();
+    process.env.SSHEPHERD_SSH_CONFIG_PATH = sshConfig;
     process.env.XDG_RUNTIME_DIR = runtimeDir;
     process.env.SSHEPHERD_TARGETS_PATH = join(scratch, 'targets.toml');
     process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = join(scratch, 'files-allowlist.toml');
     process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = join(scratch, 'config-allowlist.toml');
     process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = join(scratch, 'reveal-allowlist.toml');
     delete process.env.SSHEPHERD_PROFILE;
-    runPlant('plant', canary);
+    runPlant('plant', canary, digits, identity.user, identity.host, identity.port);
   }, 120_000);
 
   afterAll(async () => {
@@ -402,7 +612,7 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
           continue;
         }
         for (const entry of drivesFor(op, alias)) {
-          results.push(await drive(op, alias, entry, index));
+          results.push(await drive(op, alias, entry, index, false));
           index += 1;
         }
       }
@@ -422,11 +632,78 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
       expect(hits).toEqual([]);
 
       const reached = new Set(results.flatMap((result) => result.reached));
-      const unreached = Object.entries(PLACEMENTS)
+      const placements: Record<string, string> = {
+        ...PLACEMENTS,
+        ...Object.fromEntries(
+          Object.entries(DB_ECHO_PROBES).map(([tag, probe]) => [tag, `db query ${probe.sql}`]),
+        ),
+        ...Object.fromEntries(
+          Object.entries(addressPlacements(identity)).map(([tag, placement]) => [
+            tag,
+            placement.where,
+          ]),
+        ),
+      };
+      const unreached = Object.entries(placements)
         .filter(([tag]) => !reached.has(tag))
         .map(([tag, where]) => `${tag} (${where})`);
       expect(unreached).toEqual([]);
     }, 300_000);
+  }
+
+  for (const variant of VARIANTS) {
+    test(`${variant}: reveal_addresses = true returns the peer address and still hides the identity`, async () => {
+      const alias = `smoke-${variant}`;
+      writeFileSync(
+        join(scratch, 'reveal-allowlist.toml'),
+        `[${alias}.scrub]\nreveal_addresses = true\n`,
+      );
+      const byName = (name: string): OpSpec => {
+        const op = exposingOps().find(
+          (candidate) => `${candidate.group} ${candidate.name}` === name,
+        );
+        if (op === undefined) {
+          throw new Error(`no op ${name}`);
+        }
+        return op;
+      };
+      const plan: [string, Record<string, string>][] = [
+        ['deploy run', { recipe: 'canary-fail' }],
+        ['logs service', { unit: 'ssh.service' }],
+        ['files cat', { path: '/var/log/auth.log' }],
+        ['db tables', { target: pgConnectTarget(alias) }],
+        ['check ports', {}],
+      ];
+      const results: DriveResult[] = [];
+      try {
+        for (const [index, [name, args]] of plan.entries()) {
+          results.push(
+            await drive(
+              byName(name),
+              alias,
+              { label: `${name} reveal`, args },
+              10_000 + index,
+              true,
+            ),
+          );
+        }
+      } finally {
+        writeFileSync(join(scratch, 'reveal-allowlist.toml'), '');
+      }
+      for (const result of results) {
+        console.log(
+          `[${variant}] ${result.label}: ${result.status}; peer shown ${result.peerShown}; hits ${result.hits.join(',') || '0'}`,
+        );
+      }
+      expect(
+        results
+          .filter((result) => result.hits.length > 0)
+          .map((r) => `${r.label}: ${r.hits.join(', ')}`),
+      ).toEqual([]);
+      expect(results.filter((result) => !result.peerShown).map((result) => result.label)).toEqual(
+        [],
+      );
+    }, 120_000);
   }
 
   test(`the compiled binary ignores ${IDENTITY_HOOK}: files cat still masks the canary`, async () => {

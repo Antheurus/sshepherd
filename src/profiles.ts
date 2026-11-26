@@ -91,7 +91,36 @@ export function requiredProfile(op: OpSpec, ctx: OpContext): Profile {
   return OP_PROFILES[`${op.group} ${op.name}`] ?? 'admin';
 }
 
+/** `setup` never reaches `executeOp`, so its actions carry their own profiles, keyed
+ *  `<sub-group> <action>`: an action that writes local config (an ssh alias, a key, an allowlist, a
+ *  target, a recipe) or opens the key-install form needs `admin`; one that only reads it needs
+ *  `read`. An action missing here needs `admin` too. */
+export const SETUP_PROFILES: Record<string, Profile> = {
+  'ssh-alias register': 'admin',
+  'ssh-alias keygen': 'admin',
+  'ssh-alias remove': 'admin',
+  'ssh-alias install': 'admin',
+  'ssh-alias list': 'read',
+  'ssh-alias status': 'read',
+  'ssh-alias update': 'admin',
+  'db-target scaffold': 'admin',
+  'config-allowlist scaffold': 'admin',
+  'deploy-recipe scaffold': 'admin',
+  'files-allowlist scaffold': 'admin',
+  'reveal-allowlist scaffold': 'admin',
+};
+
 const PROFILE_VALUE_MAX_CHARS = 32;
+
+function unknownProfileError(envProfile: string): ErrorInfo {
+  return describeError(
+    'PROFILE_DENIED',
+    `SSHEPHERD_PROFILE='${envProfile.slice(0, PROFILE_VALUE_MAX_CHARS)}' is not a profile; expected one of ${PROFILES.join(', ')}`,
+  );
+}
+
+const callerHint = (needed: Profile): string =>
+  `A human re-runs it with SSHEPHERD_PROFILE=${needed} (or unset); the agent never raises its own.`;
 
 /** `PROFILE_DENIED` when the op needs more than the caller's profile, capped by the target's
  *  `max_profile` (`ctx.args.max_profile`, set only by `buildDbOpContext`), allows; null to proceed.
@@ -103,10 +132,7 @@ export function profileDenial(
 ): ErrorInfo | null {
   const command = `${op.group} ${op.name}`;
   if (envProfile !== undefined && !isProfile(envProfile)) {
-    return describeError(
-      'PROFILE_DENIED',
-      `SSHEPHERD_PROFILE='${envProfile.slice(0, PROFILE_VALUE_MAX_CHARS)}' is not a profile; expected one of ${PROFILES.join(', ')}`,
-    );
+    return unknownProfileError(envProfile);
   }
   const caller: Profile = envProfile ?? 'admin';
   const cap = ctx.args.max_profile;
@@ -123,6 +149,26 @@ export function profileDenial(
   return describeError('PROFILE_DENIED', `'${command}' needs the '${needed}' profile; ${source}`, {
     hint: capped
       ? `A human raises max_profile for that target in targets.toml to '${needed}' or higher; the agent never raises its own.`
-      : `A human re-runs it with SSHEPHERD_PROFILE=${needed} (or unset); the agent never raises its own.`,
+      : callerHint(needed),
   });
+}
+
+/** The same refusal for a `setup <sub-group> <action>`, from `SETUP_PROFILES`; null to proceed. */
+export function setupProfileDenial(
+  action: string,
+  envProfile: string | undefined = process.env.SSHEPHERD_PROFILE,
+): ErrorInfo | null {
+  if (envProfile !== undefined && !isProfile(envProfile)) {
+    return unknownProfileError(envProfile);
+  }
+  const caller: Profile = envProfile ?? 'admin';
+  const needed = SETUP_PROFILES[action] ?? 'admin';
+  if (PROFILE_RANK[needed] <= PROFILE_RANK[caller]) {
+    return null;
+  }
+  return describeError(
+    'PROFILE_DENIED',
+    `'setup ${action}' needs the '${needed}' profile; SSHEPHERD_PROFILE is '${caller}'`,
+    { hint: callerHint(needed) },
+  );
 }

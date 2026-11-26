@@ -1,23 +1,27 @@
-# Disposable local fixture for `just smoke` (see scripts/smoke.sh), one compose project,
-# `sshepherd-smoke`, so teardown and every docker query can be scoped to it:
+# Disposable local fixture for `just smoke` (see scripts/smoke.sh), one compose project per fixture
+# (`sshepherd-smoke` unless SSHEPHERD_SMOKE_PROJECT names another, see project.sh), so teardown and
+# every docker query can be scoped to it:
 #   sshd-debian / sshd-alpine - the ssh targets sshepherd connects to (GNU and busybox userland);
 #                  each has the docker CLI mounted against the HOST daemon so it can exec into the
 #                  postgres/app containers below. That socket also shows the host's OTHER
-#                  containers to `services ps`; assertions must never depend on them.
+#                  containers (another fixture's included) to `services ps`; assertions must never
+#                  depend on them.
 #   postgres     - a real Postgres, seeded with a read-only role (postgres-init/01-fixture.sql).
 #   app          - a minimal long-running nginx standing in for a deployed app.
 #   noisy        - prints 5 MiB of log lines once, then idles: the output-cap check (`logs docker`).
 #
-# scripts/smoke.sh sets SSHEPHERD_SMOKE_KEYDIR (an ephemeral generated keypair) and the two host
-# ports (SSHEPHERD_SMOKE_DEBIAN_PORT 8413, SSHEPHERD_SMOKE_ALPINE_PORT 8414) before invoking
-# `docker compose -p sshepherd-smoke up`.
+# scripts/smoke.sh sets SSHEPHERD_SMOKE_KEYDIR (an ephemeral generated keypair), the container-name
+# prefix SSHEPHERD_SMOKE_CONTAINER_PREFIX and the two host ports (SSHEPHERD_SMOKE_DEBIAN_PORT 8413,
+# SSHEPHERD_SMOKE_ALPINE_PORT 8414 for the default project; empty = an ephemeral port) before
+# invoking `docker compose -p <project> up`. ip_nonlocal_bind lets the canary (canary/plant.sh) open
+# a listener on a documentation-range address no interface carries.
 
-name: sshepherd-smoke
+name: ${SSHEPHERD_SMOKE_PROJECT:-sshepherd-smoke}
 
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: sshepherd-fixture-postgres
+    container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-postgres
     environment:
       POSTGRES_USER: postgres
       POSTGRES_DB: fixture
@@ -27,11 +31,11 @@ services:
 
   app:
     image: nginx:alpine
-    container_name: sshepherd-fixture-app
+    container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-app
 
   noisy:
     image: nginx:alpine
-    container_name: sshepherd-fixture-noisy
+    container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-noisy
     entrypoint: ['sh', '-c']
     command:
       - "head -c 5242880 /dev/zero | tr '\\0' 'x' | fold -w 1000; echo NOISY-DONE; sleep 3600"
@@ -40,12 +44,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.debian
-    container_name: sshepherd-fixture-sshd-debian
+    container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-sshd-debian
     ports:
-      - '127.0.0.1:${SSHEPHERD_SMOKE_DEBIAN_PORT:-8413}:22'
+      - '127.0.0.1:${SSHEPHERD_SMOKE_DEBIAN_PORT-8413}:22'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SSHEPHERD_SMOKE_KEYDIR:-./.smoke-keys}/authorized_keys:/root/.ssh/authorized_keys:ro
+    sysctls:
+      net.ipv4.ip_nonlocal_bind: 1
     depends_on:
       - postgres
       - app
@@ -55,12 +61,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.alpine
-    container_name: sshepherd-fixture-sshd-alpine
+    container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-sshd-alpine
     ports:
-      - '127.0.0.1:${SSHEPHERD_SMOKE_ALPINE_PORT:-8414}:22'
+      - '127.0.0.1:${SSHEPHERD_SMOKE_ALPINE_PORT-8414}:22'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SSHEPHERD_SMOKE_KEYDIR:-./.smoke-keys}/authorized_keys:/root/.ssh/authorized_keys:ro
+    sysctls:
+      net.ipv4.ip_nonlocal_bind: 1
     depends_on:
       - postgres
       - app

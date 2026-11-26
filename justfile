@@ -28,11 +28,11 @@ rollback:
 check-skill: install
     bun test src/__tests__/skill-doc.test.ts
 
-# Bring the smoke fixture (debian + alpine sshd, postgres, nginx) up under compose project sshepherd-smoke.
+# Bring the smoke fixture (debian + alpine sshd, postgres, nginx) up under compose project sshepherd-smoke (SSHEPHERD_SMOKE_PROJECT names another, on ephemeral ports).
 smoke-up:
     bash scripts/smoke.sh up
 
-# Tear the fixture down. Only compose project sshepherd-smoke is touched.
+# Tear the fixture down. Only that compose project (sshepherd-smoke, or SSHEPHERD_SMOKE_PROJECT) is touched.
 smoke-down:
     bash scripts/smoke.sh down
 

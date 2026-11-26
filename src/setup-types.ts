@@ -1,3 +1,5 @@
+import { scrubLocalOutput } from './scrub.ts';
+
 /**
  * Dedicated return shape for the `setup` command group — deliberately NOT `Envelope<T>`
  * (see research.md, "Return shape for setup's local-only commands"). `setup`'s actions
@@ -58,6 +60,7 @@ export interface SetupErrorInput {
  * that doesn't parse as a private key at all, `PASSPHRASE_PROTECTED_KEY_UNSUPPORTED` covers a
  * pasted key that does parse but is passphrase-protected, which install cannot supply
  * non-interactively.
+ * `PROFILE_DENIED` is the op groups' code, for a setup action above the caller's `SSHEPHERD_PROFILE`.
  */
 export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
@@ -77,7 +80,8 @@ export type SetupErrorCode =
   | 'INSTALL_FAILED'
   | 'TAILSCALE_SSH_DETECTED'
   | 'INVALID_PRIVATE_KEY'
-  | 'PASSPHRASE_PROTECTED_KEY_UNSUPPORTED';
+  | 'PASSPHRASE_PROTECTED_KEY_UNSUPPORTED'
+  | 'PROFILE_DENIED';
 
 export interface BuildSetupResultInput<T> {
   command: string;
@@ -166,6 +170,10 @@ const SETUP_GUIDANCE: Record<SetupErrorCode, SetupGuidance> = {
     hint: 'install cannot supply a passphrase; paste a key without one, or use ssh-agent instead.',
     retryable: false,
   },
+  PROFILE_DENIED: {
+    hint: 'This action needs a higher SSHEPHERD_PROFILE; a human re-runs it, the agent never raises its own.',
+    retryable: false,
+  },
 };
 
 /** Exit 2 for a wrong command line, 1 for a run that failed, 0 for success — same split as the
@@ -175,6 +183,7 @@ const SETUP_USER_ERROR_CODES: ReadonlySet<SetupErrorCode> = new Set([
   'INVALID_ARGS',
   'PARSE_ERROR',
   'VALIDATION_ERROR',
+  'PROFILE_DENIED',
 ]);
 
 export function setupExitCode(result: SetupResult<unknown>): number {
@@ -217,9 +226,11 @@ export function buildSetupResult<T>(input: BuildSetupResultInput<T>): SetupResul
 /**
  * Terminal rendering for a `SetupResult` — kept separate from output.ts's
  * `printJson`/`printPretty` (those are typed for `Envelope`, which has fields
- * `SetupResult` deliberately doesn't carry).
+ * `SetupResult` deliberately doesn't carry). Every setup result is printed through here, so this
+ * is where it passes the scrubber.
  */
-export function printSetupResult(result: SetupResult<unknown>, pretty: boolean): void {
+export function printSetupResult(unscrubbed: SetupResult<unknown>, pretty: boolean): void {
+  const result = scrubLocalOutput(unscrubbed).value;
   if (!pretty) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;

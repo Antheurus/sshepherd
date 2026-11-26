@@ -1,0 +1,4 @@
+#!/bin/sh
+# Canary stand-in for journalctl (the fixtures run no systemd): every unit's journal is the planted
+# sshd lines, so `logs service` and `logs docker-daemon` read them.
+cat /opt/canary/journal.ndjson

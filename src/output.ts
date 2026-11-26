@@ -63,7 +63,7 @@ export interface BuildEnvelopeInput<T> {
   startedAtMs: number;
   data: T | null;
   error: ErrorInfo | null;
-  /** Set by `executeOp` after its scrub pass; envelopes built elsewhere mask nothing. */
+  /** Set by `executeOp` after its scrub pass; the CLI sets it on the envelopes it scrubs itself. */
   scrubbed?: number;
 }
 

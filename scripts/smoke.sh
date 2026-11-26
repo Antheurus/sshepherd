@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Live smoke matrix for the compiled dist/sshepherd binary against a disposable local Docker
 # fixture (scripts/sshd-fixture/): a debian and an alpine sshd, a postgres and an nginx app, all
-# in ONE compose project, `sshepherd-smoke`. Every docker command here is scoped to that project;
-# nothing else on the daemon is started, stopped or removed.
+# in ONE compose project, `sshepherd-smoke` unless SSHEPHERD_SMOKE_PROJECT names another (so two
+# worktrees can each run one at once; scripts/sshd-fixture/project.sh derives the names). Every
+# docker command here is scoped to that project; nothing else on the daemon is started, stopped or
+# removed.
 #
 #   scripts/smoke.sh                 up, run the matrix on both sshd variants, always tear down
 #   scripts/smoke.sh up | down       bring the fixture up / tear it down
@@ -10,16 +12,25 @@
 #
 # The ssh aliases live in a fixture-only ssh config ($STATE/ssh_config, reached through
 # SSHEPHERD_SSH_CONFIG_PATH), never in ~/.ssh/config. The keypair is generated per run and never
-# committed. Host ports: 8413 (debian) and 8414 (alpine), override with
-# SSHEPHERD_SMOKE_DEBIAN_PORT / SSHEPHERD_SMOKE_ALPINE_PORT.
+# committed. Host ports of the default project: 8413 (debian) and 8414 (alpine), override with
+# SSHEPHERD_SMOKE_DEBIAN_PORT / SSHEPHERD_SMOKE_ALPINE_PORT; any other project binds ephemeral
+# ports and reads them back with `docker compose port`, so nobody picks one by hand.
 set -euo pipefail
 
 BIN="${BIN:-./dist/sshepherd}"
 FIXTURE_DIR="scripts/sshd-fixture"
-COMPOSE_PROJECT="sshepherd-smoke"
-DEBIAN_PORT="${SSHEPHERD_SMOKE_DEBIAN_PORT:-8413}"
-ALPINE_PORT="${SSHEPHERD_SMOKE_ALPINE_PORT:-8414}"
-STATE="${SSHEPHERD_SMOKE_STATE_DIR:-/tmp/sshepherd-smoke}"
+# shellcheck source=sshd-fixture/project.sh
+source "$FIXTURE_DIR/project.sh"
+COMPOSE_PROJECT="$SMOKE_PROJECT"
+PREFIX="$SMOKE_PREFIX"
+STATE="$SMOKE_STATE"
+if [[ "$COMPOSE_PROJECT" == "$SMOKE_DEFAULT_PROJECT" ]]; then
+  DEBIAN_PORT="${SSHEPHERD_SMOKE_DEBIAN_PORT:-8413}"
+  ALPINE_PORT="${SSHEPHERD_SMOKE_ALPINE_PORT:-8414}"
+else
+  DEBIAN_PORT=""
+  ALPINE_PORT=""
+fi
 KEYDIR="$STATE/keys"
 LIVE_DIR="src/__tests__/fixtures/live"
 CANARY_DIR="src/__tests__/fixtures/canary"
@@ -40,25 +51,36 @@ fail() {
 
 compose() {
   (cd "$FIXTURE_DIR" && SSHEPHERD_SMOKE_KEYDIR="$KEYDIR" \
+    SSHEPHERD_SMOKE_PROJECT="$COMPOSE_PROJECT" SSHEPHERD_SMOKE_CONTAINER_PREFIX="$PREFIX" \
     SSHEPHERD_SMOKE_DEBIAN_PORT="$DEBIAN_PORT" SSHEPHERD_SMOKE_ALPINE_PORT="$ALPINE_PORT" \
     docker compose -p "$COMPOSE_PROJECT" "$@")
 }
 
+# The host port an sshd variant is published on: the fixed one, or the ephemeral one compose
+# picked, read back from the running project.
 port_for() {
-  if [[ "$1" == debian ]]; then echo "$DEBIAN_PORT"; else echo "$ALPINE_PORT"; fi
+  local fixed
+  if [[ "$1" == debian ]]; then fixed="$DEBIAN_PORT"; else fixed="$ALPINE_PORT"; fi
+  if [[ -n "$fixed" ]]; then
+    echo "$fixed"
+    return
+  fi
+  local published
+  published="$(compose port "sshd-$1" 22)"
+  echo "${published##*:}"
 }
 
 # The sshd's own public host keys, read through docker: the out-of-band channel a human would use
 # to confirm a fingerprint before trusting it.
 host_keys() {
-  docker exec "sshepherd-fixture-sshd-$1" sh -c 'cat /etc/ssh/ssh_host_*_key.pub'
+  docker exec "$PREFIX-sshd-$1" sh -c 'cat /etc/ssh/ssh_host_*_key.pub'
 }
 
 # -- bring-up / tear-down ---------------------------------------------------------------------
 
 fixture_up() {
   for port in "$DEBIAN_PORT" "$ALPINE_PORT"; do
-    if lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    if [[ -n "$port" ]] && lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
       echo "smoke: host port $port is already listening; free it or set SSHEPHERD_SMOKE_*_PORT" >&2
       exit 1
     fi
@@ -71,6 +93,15 @@ fixture_up() {
   ssh-keygen -q -t ed25519 -N '' -f "$KEYDIR/id_ed25519"
   cp "$KEYDIR/id_ed25519.pub" "$KEYDIR/authorized_keys"
   chmod 600 "$KEYDIR/id_ed25519" "$KEYDIR/authorized_keys"
+  pass "keypair written under $STATE"
+
+  step "bring up the $COMPOSE_PROJECT compose project (debian + alpine sshd, postgres, app)"
+  compose up -d --build
+  DEBIAN_PORT="$(port_for debian)"
+  ALPINE_PORT="$(port_for alpine)"
+  pass "fixture containers started"
+
+  step "write the fixture-only ssh config for the published ports"
   : >"$STATE/ssh_config"
   for variant in "${VARIANTS[@]}"; do
     {
@@ -84,11 +115,7 @@ fixture_up() {
       printf '  UserKnownHostsFile %s\n\n' "$STATE/known_hosts"
     } >>"$STATE/ssh_config"
   done
-  pass "keypair and fixture ssh config written under $STATE"
-
-  step "bring up the $COMPOSE_PROJECT compose project (debian + alpine sshd, postgres, app)"
-  compose up -d --build
-  pass "fixture containers started"
+  pass "fixture ssh config written: debian on $(port_for debian), alpine on $(port_for alpine)"
 
   step "record the fixture host keys, read from each container (strict checking, never accept-new)"
   : >"$STATE/known_hosts"
@@ -117,7 +144,7 @@ fixture_up() {
   step "wait for the postgres fixture to finish its init scripts"
   local db_ready=false
   for _ in $(seq 1 60); do
-    if docker exec sshepherd-fixture-postgres psql -U sshepherd_ro -d fixture -tAc 'SELECT 1 FROM smoke_fixture' >/dev/null 2>&1; then
+    if docker exec "$PREFIX-postgres" psql -U sshepherd_ro -d fixture -tAc 'SELECT 1 FROM smoke_fixture' >/dev/null 2>&1; then
       db_ready=true
       break
     fi
@@ -129,7 +156,7 @@ fixture_up() {
   step "wait for the noisy fixture to finish printing its 5 MiB"
   local noisy_ready=false
   for _ in $(seq 1 60); do
-    if docker logs --tail 1 sshepherd-fixture-noisy 2>&1 | grep -q NOISY-DONE; then
+    if docker logs --tail 1 "$PREFIX-noisy" 2>&1 | grep -q NOISY-DONE; then
       noisy_ready=true
       break
     fi
@@ -201,7 +228,7 @@ write_fixture_config() {
   cat >"$STATE/targets.toml" <<TOML
 [$alias]
 alias = "$alias"
-container = "sshepherd-fixture-postgres"
+container = "$PREFIX-postgres"
 user = "sshepherd_ro"
 database = "fixture"
 TOML
@@ -308,10 +335,10 @@ run_matrix() {
   step "[$variant] services ps"
   run_cli services_ps services ps "$alias"
   assert_json "[$variant] services ps: lists the fixture app container" services_ps \
-    "d['ok'] is True and any('sshepherd-fixture-app' in str(c) for c in d['data'])"
+    "d['ok'] is True and any('$PREFIX-app' in str(c) for c in d['data'])"
 
   step "[$variant] logs docker"
-  run_cli logs_docker logs docker "$alias" sshepherd-fixture-app --tail 5
+  run_cli logs_docker logs docker "$alias" "$PREFIX-app" --tail 5
   assert_json "[$variant] logs docker: LogsResult shape" logs_docker \
     "d['ok'] is True and 'lines' in d['data'] and 'next_since' in d['data']"
 
@@ -370,7 +397,7 @@ run_matrix() {
     "d['ok'] is True and len(d['data']['steps']) == 1 and d['data']['steps'][0]['name'] == 'check-app'"
 
   step "[$variant] output cap: a container that printed 5 MiB comes back under 64 KiB"
-  run_cli cap_logs_noisy logs docker "$alias" sshepherd-fixture-noisy --tail 5000
+  run_cli cap_logs_noisy logs docker "$alias" "$PREFIX-noisy" --tail 5000
   assert_json "[$variant] logs docker of a 5 MiB container: output_truncated, at most 65536 bytes" cap_logs_noisy \
     "d['ok'] is True and d['output_truncated'] is True and len(open('$OUT/cap_logs_noisy.json','rb').read()) <= 65536"
   run_cli cap_hosts_test_1 hosts test "$alias"
@@ -441,12 +468,18 @@ run_matrix() {
   pass "[$variant] master socket gone after hosts disconnect"
 }
 
+# Only the default project records: the committed fixtures name its containers, and two fixtures
+# running at once must not both write them.
 record_outputs() {
+  if [[ "$COMPOSE_PROJECT" != "$SMOKE_DEFAULT_PROJECT" ]]; then
+    printf '\n[STEP] outputs not recorded: project %s is not %s\n' "$COMPOSE_PROJECT" "$SMOKE_DEFAULT_PROJECT"
+    return
+  fi
   for variant in "${VARIANTS[@]}"; do
     mkdir -p "$LIVE_DIR/$variant"
-    python3 - "$STATE/out/$variant" "$LIVE_DIR/$variant" <<'PY'
+    python3 - "$STATE/out/$variant" "$LIVE_DIR/$variant" "$PREFIX-" <<'PY'
 import json, os, sys
-src, dst = sys.argv[1:3]
+src, dst, prefix = sys.argv[1:4]
 for name in sorted(os.listdir(src)):
     if not name.endswith('.json'):
         continue
@@ -454,7 +487,7 @@ for name in sorted(os.listdir(src)):
     if name.startswith(('cap_', 'fields_', 'limit_', 'bad_', 'hk_')):
         continue
     if name == 'services_ps.json':
-        d['data'] = [c for c in d['data'] if 'sshepherd-fixture-' in json.dumps(c)]
+        d['data'] = [c for c in d['data'] if prefix in json.dumps(c)]
     json.dump(d, open(os.path.join(dst, name), 'w'), indent=2)
     open(os.path.join(dst, name), 'a').write('\n')
 PY

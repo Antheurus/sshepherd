@@ -10,6 +10,7 @@
 
 import {
   MAX_IDENTITY_GAP_CHARS,
+  MAX_PSQL_TYPE_NAME_CHARS,
   MIN_BARE_HOSTNAME_CHARS,
   MIN_MASKED_USER_CHARS,
 } from './limits.ts';
@@ -222,6 +223,57 @@ function maskPemBlocks(text: string): ScrubResult<string> {
   return { value: out, count };
 }
 
+/** psql error texts that quote the value that failed, so a query that errors never hands back the
+ *  data its result would have masked by column name (`SELECT password::int` echoes the password):
+ *  a cast (`invalid input syntax for type <t>: "<v>"`, `invalid input value for enum <t>: "<v>"`,
+ *  `value "<v>" is out of range for type <t>` and its float form without `value`, `malformed array
+ *  literal: "<v>"`, `date/time field value out of range: "<v>"`, `date|timestamp out of range: "<v>"`,
+ *  `interval field value out of range: "<v>"`), `to_date`/`to_timestamp` (`invalid value "<v>"
+ *  for "<field>"`), JSON input (`Token "<v>" is invalid`, `but found "<v>"`, `JSON data, line N: <v>`)
+ *  and a constraint's DETAIL (`Key (<cols>)=(<v>) already exists`, `Failing row contains (<v>)`).
+ *  A quoted value runs to the last quote on its line, since psql never escapes one inside it.
+ *  `value too long for type ...` quotes nothing. */
+const PSQL_DATA_ECHO_RULES: ShapeRule[] = [
+  {
+    pattern: new RegExp(
+      String.raw`\b((?:invalid input syntax for type [^:"\n]{1,${MAX_PSQL_TYPE_NAME_CHARS}}|invalid input value for enum [^:"\n]{1,${MAX_PSQL_TYPE_NAME_CHARS}}|malformed (?:array|record|range|multirange) literal|(?:date\/time field value|interval field value|time zone displacement|date|timestamp) out of range): ")([^\n]*)(")`,
+      'g',
+    ),
+    replace: (m, head = '', value = '', close = '') =>
+      isMasked(value) ? m : `${head}${MASK}${close}`,
+  },
+  {
+    pattern: /(\binvalid value ")([^\n]*?)(" for ")|(")([^"\n]*)(" is out of range for type )/g,
+    replace: (m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
+      const [lead, inner, tail] = head.length > 0 ? [head, value, close] : [head2, value2, close2];
+      return isMasked(inner) ? m : `${lead}${MASK}${tail}`;
+    },
+  },
+  {
+    pattern: /\b(Token ")([^\n]*)(" is invalid)|(, but found ")([^\n]*)(")/g,
+    replace: (m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
+      const [lead, inner, tail] = head.length > 0 ? [head, value, close] : [head2, value2, close2];
+      return isMasked(inner) ? m : `${lead}${MASK}${tail}`;
+    },
+  },
+  {
+    pattern: /\b(JSON data, line \d+: )([^\n]+)/g,
+    replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
+  },
+  {
+    pattern:
+      /\b(Key \([^\n]*?\)=\()([^\n]*?)(\) (?:already exists|is not present in table|is still referenced from table|conflicts with existing key))/g,
+    replace: (m, head = '', value = '', close = '') =>
+      isMasked(value) ? m : `${head}${MASK}${close}`,
+  },
+  {
+    pattern:
+      /\b((?:conflicts with existing key \([^\n]*?\)=|Failing row contains )\()([^\n]*)(\))/g,
+    replace: (m, head = '', value = '', close = '') =>
+      isMasked(value) ? m : `${head}${MASK}${close}`,
+  },
+];
+
 /** Value shapes that are secrets wherever they appear, independent of any key name. */
 const SHAPE_RULES: ShapeRule[] = [
   {
@@ -292,6 +344,7 @@ const SHAPE_RULES: ShapeRule[] = [
       /(\b(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)\b[^\n]{0,256}?[ \t]-p)([^\s"']+)/g,
     replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
   },
+  ...PSQL_DATA_ECHO_RULES,
 ];
 
 /** The alias's own connection identity, from the `ssh -G` the transport already runs to validate
@@ -726,6 +779,13 @@ export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
   };
   const scrubbed = walk(value, false) as T;
   return { value: scrubbed, count };
+}
+
+/** Output built outside `executeOp` (setup results, `doctor`, the CLI's argument-error and catch
+ *  envelopes): no alias identity is known there, so the secret rules and rule 2 (every non-loopback
+ *  IP becomes `<ip-N>`) run over the whole value, keys and header fields included. */
+export function scrubLocalOutput<T>(value: T): ScrubResult<T> {
+  return scrub(value, { maskAddresses: true });
 }
 
 const PEM_BEGIN_LINE = new RegExp(`-----BEGIN ${PEM_LABEL}-----`);

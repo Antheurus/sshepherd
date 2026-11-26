@@ -73,3 +73,7 @@ export const MIN_MASKED_USER_CHARS = 3;
 /** Blanks allowed between an identity keyword and its value (`for  opsuser`, `-p   2222`): a
  *  bound keeps the context rules linear on a line of spaces; real output never pads more than 8. */
 export const MAX_IDENTITY_GAP_CHARS = 8;
+/** How far a psql error's type name may run (`invalid input syntax for type <t>: "`): Postgres caps
+ *  an identifier at 63 bytes, and a multi-word type (`timestamp with time zone`) is far shorter, so
+ *  64 holds every real one while a long line with no `: "` is never rescanned past it. */
+export const MAX_PSQL_TYPE_NAME_CHARS = 64;

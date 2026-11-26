@@ -14,6 +14,7 @@ import {
 import { buildEnvelope, parseFieldPaths, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
 import { type ExecuteDeps, executeOp, getOp, listOps, runDoctor } from './registry.ts';
+import { scrubLocalOutput } from './scrub.ts';
 import { runSetup } from './setup.ts';
 import { didYouMean, didYouMeanOrAll } from './suggest.ts';
 import { buildDbOpContext } from './targets.ts';
@@ -75,6 +76,13 @@ const USER_ERROR_CODES: ReadonlySet<SshErrorCode> = new Set([
   'CONFIRMATION_REQUIRED',
   'PROFILE_DENIED',
 ]);
+
+/** Prints an envelope the CLI built itself (doctor, an argument error, the catch-all), which never
+ *  went through `executeOp`'s scrub pass. */
+function printLocalEnvelope(envelope: Envelope<unknown>): void {
+  const { value, count } = scrubLocalOutput(envelope);
+  printJson({ ...value, scrubbed: value.scrubbed + count });
+}
 
 function exitCodeFor(error: ErrorInfo | null): number {
   if (error === null) {
@@ -447,7 +455,7 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
   }
 
   if (first === 'doctor') {
-    printJson(
+    printLocalEnvelope(
       buildEnvelope({
         alias: '',
         command: 'doctor',
@@ -503,7 +511,7 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
         next: `sshepherd ${group} ${action} --help`,
       }),
     });
-    printJson(envelope);
+    printLocalEnvelope(envelope);
     process.exitCode = 2;
     return;
   }
@@ -518,26 +526,31 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
   process.exitCode = exitCodeFor(envelope.error);
 }
 
+/** What escaped `run`: an `OpError` keeps its message, anything else becomes `INTERNAL_ERROR`. */
+export function printFailure(argv: string[], err: unknown): void {
+  const command = argv.slice(0, 2).join(' ');
+  const error =
+    err instanceof OpError
+      ? describeError(err.code, err.message, err.extras)
+      : internalErrorInfo(command.length > 0 ? command : 'sshepherd', err);
+  printLocalEnvelope(
+    buildEnvelope({
+      alias: '',
+      command,
+      startedAtMs: Date.now(),
+      data: null,
+      error,
+    }),
+  );
+  process.exitCode = exitCodeFor(error);
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
-  const command = argv.slice(0, 2).join(' ');
   try {
     await run(argv);
   } catch (err) {
-    const error =
-      err instanceof OpError
-        ? describeError(err.code, err.message, err.extras)
-        : internalErrorInfo(command.length > 0 ? command : 'sshepherd', err);
-    printJson(
-      buildEnvelope({
-        alias: '',
-        command,
-        startedAtMs: Date.now(),
-        data: null,
-        error,
-      }),
-    );
-    process.exitCode = exitCodeFor(error);
+    printFailure(argv, err);
   }
 }
 

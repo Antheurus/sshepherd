@@ -1,4 +1,5 @@
 import { getFlag, hasFlag, parseArgv } from './cli.ts';
+import { setupProfileDenial } from './profiles.ts';
 import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts';
 import { scaffold } from './setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
@@ -518,6 +519,17 @@ export async function runSetup(tail: string[]): Promise<void> {
   }
 
   if (rejectUnknownSetupFlags(subGroup, actionOrHelp, argTail)) {
+    return;
+  }
+
+  const denied = setupProfileDenial(`${subGroup.name} ${actionOrHelp}`);
+  if (denied !== null) {
+    const result = buildSetupResult({
+      command: `setup ${subGroup.name} ${actionOrHelp}`,
+      error: { code: 'PROFILE_DENIED', message: denied.message, hint: denied.hint },
+    });
+    printSetupResult(result, hasFlag(parseArgv(argTail).flags, 'pretty'));
+    process.exitCode = setupExitCode(result);
     return;
   }
 

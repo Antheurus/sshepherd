@@ -1,8 +1,34 @@
+DROP FUNCTION IF EXISTS canary_unique_violation();
+DROP FUNCTION IF EXISTS canary_not_null_violation();
 DROP TABLE IF EXISTS canary_users;
+DROP TYPE IF EXISTS canary_mood;
+CREATE TYPE canary_mood AS ENUM ('calm');
 CREATE TABLE canary_users (
   id serial PRIMARY KEY,
   email text NOT NULL,
   password text NOT NULL,
-  api_token text NOT NULL
+  api_token text NOT NULL,
+  secret_pin text NOT NULL
 );
-INSERT INTO canary_users (email, password, api_token) VALUES ('ops@example.com', '__C__db', '__C__dt');
+INSERT INTO canary_users (email, password, api_token, secret_pin)
+  VALUES ('ops@example.com', '__C__db', '__C__dt', '__D__');
+-- A read-only transaction cannot write, so these raise psql's exact constraint-violation texts
+-- (unique_violation's DETAIL, not_null_violation's DETAIL) carrying the row's real value.
+CREATE FUNCTION canary_unique_violation() RETURNS integer LANGUAGE plpgsql AS $fn$
+DECLARE v text;
+BEGIN
+  SELECT password INTO v FROM canary_users LIMIT 1;
+  RAISE unique_violation USING
+    MESSAGE = 'duplicate key value violates unique constraint "canary_users_password_key"',
+    DETAIL = format('Key (password)=(%s) already exists.', v);
+END
+$fn$;
+CREATE FUNCTION canary_not_null_violation() RETURNS integer LANGUAGE plpgsql AS $fn$
+DECLARE r canary_users;
+BEGIN
+  SELECT * INTO r FROM canary_users LIMIT 1;
+  RAISE not_null_violation USING
+    MESSAGE = 'null value in column "email" of relation "canary_users" violates not-null constraint',
+    DETAIL = format('Failing row contains (%s, null, %s, %s, %s).', r.id, r.password, r.api_token, r.secret_pin);
+END
+$fn$;
