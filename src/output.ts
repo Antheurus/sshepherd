@@ -158,7 +158,7 @@ function pick(value: unknown, path: string[]): unknown {
       : undefined;
   }
   const [head, ...rest] = path;
-  if (!isPlainObject(value) || head === undefined || !(head in value)) {
+  if (!isPlainObject(value) || head === undefined || !Object.hasOwn(value, head)) {
     return undefined;
   }
   const inner = pick(value[head], rest);
@@ -172,7 +172,7 @@ function mergePicked(target: unknown, source: unknown): unknown {
   if (isPlainObject(target) && isPlainObject(source)) {
     const merged: Record<string, unknown> = { ...target };
     for (const [key, value] of Object.entries(source)) {
-      merged[key] = key in merged ? mergePicked(merged[key], value) : value;
+      merged[key] = Object.hasOwn(merged, key) ? mergePicked(merged[key], value) : value;
     }
     return merged;
   }
@@ -195,7 +195,10 @@ export function selectFields(
     }
     selected = selected === undefined ? picked : mergePicked(selected, picked);
   }
-  return { data: selected ?? (Array.isArray(data) ? [] : {}), unmatched };
+  if (selected !== undefined) {
+    return { data: selected, unmatched };
+  }
+  return { data: data === null ? null : Array.isArray(data) ? [] : {}, unmatched };
 }
 
 /** `--limit N`: the first N items of `data` when it is a list, or of each list directly under it. */

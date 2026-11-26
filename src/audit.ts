@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { AUDIT_KEEP_FILES, AUDIT_ROTATE_BYTES } from './limits.ts';
+import { AUDIT_KEEP_FILES, AUDIT_ROTATE_BYTES, MAX_SESSION_ID_CHARS } from './limits.ts';
 
 export type AuditOutcome = 'ok' | 'error' | 'refused';
 
@@ -121,7 +121,9 @@ export function auditMutating(
     bytes: input.bytes,
     profile: profile !== undefined && PROFILES.has(profile) ? profile : undefined,
     session_id:
-      sessionId !== undefined && sessionId.length > 0 ? sessionId.slice(0, 128) : undefined,
+      sessionId !== undefined && sessionId.length > 0
+        ? sessionId.slice(0, MAX_SESSION_ID_CHARS)
+        : undefined,
   };
   appendFileSync(deps.logPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 }

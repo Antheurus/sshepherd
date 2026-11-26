@@ -32,6 +32,7 @@ import {
   OpError,
   type OpSpec,
   type OutputMode,
+  Premasked,
 } from './types.ts';
 
 /** `op.timeoutSec` is the per-op default; the CLI's global `--timeout` arrives as
@@ -192,8 +193,13 @@ function auditFor(
   );
 }
 
-/** `--fields`, `--limit`, then `--max-bytes`, in that order, on the scrubbed envelope: the cap
- *  measures what the caller selected, and runs last so it cannot cut ahead of the scrubber. */
+/** Rounds of cap-then-recount: a recount moves the size by a few bytes, so a re-cap settles it in
+ *  a round or two; the bound only stops a pathological value from looping. */
+const RECOUNT_MAX_ROUNDS = 4;
+
+/** The line cap, `--fields`, `--limit`, then `--max-bytes`, in that order, on the scrubbed
+ *  envelope: the cap measures what the caller selected, and runs last so it cannot cut ahead of
+ *  the scrubber. After a cut, the op's `recount` makes `data`'s own counters match what is left. */
 function shapeOutput(
   op: OpSpec,
   envelope: Envelope<unknown>,
@@ -202,10 +208,16 @@ function shapeOutput(
 ): Envelope<unknown> {
   let shaped = envelope;
   let cut = cutAtTransport;
+  if (op.capLines !== undefined) {
+    const capped = op.capLines(shaped.data);
+    shaped = { ...shaped, data: capped.data };
+    cut = cut || capped.cut;
+  }
   if (deps.fields !== undefined) {
     const { data, unmatched } = selectFields(shaped.data, deps.fields);
     shaped = { ...shaped, data, ...(unmatched.length > 0 ? { fields_unmatched: unmatched } : {}) };
   }
+  const selected = shaped.data;
   if (deps.limit !== undefined) {
     const limited = limitItems(shaped.data, deps.limit);
     shaped = { ...shaped, data: limited.data };
@@ -214,7 +226,21 @@ function shapeOutput(
   if (cut) {
     shaped = { ...shaped, output_truncated: true };
   }
-  return capEnvelope(shaped, deps.maxBytes ?? DEFAULT_MAX_BYTES, op.truncateKeeps ?? 'head');
+  const maxBytes = deps.maxBytes ?? DEFAULT_MAX_BYTES;
+  const keep = op.truncateKeeps ?? 'head';
+  let capped = capEnvelope(shaped, maxBytes, keep);
+  for (
+    let round = 0;
+    op.recount && capped.output_truncated && round < RECOUNT_MAX_ROUNDS;
+    round++
+  ) {
+    const recounted = { ...capped, data: op.recount(selected, capped.data, cutAtTransport) };
+    if (Buffer.byteLength(serializeJson(recounted)) <= maxBytes) {
+      return recounted;
+    }
+    capped = capEnvelope(recounted, maxBytes, keep);
+  }
+  return capped;
 }
 
 /** Every `OpError` the op raises, on its way into an envelope. */
@@ -236,6 +262,8 @@ interface OpResult {
   commandStderr?: string;
   /** The transport stopped reading at `MAX_STDOUT_BYTES`. */
   outputTruncated?: boolean;
+  /** Values the op's `shape` masked itself (`Premasked`), added to the scrubber's count. */
+  premasked?: number;
 }
 
 /**
@@ -265,6 +293,7 @@ export async function executeOp(
   let envelope: Envelope<unknown>;
   let commandStderr = '';
   let cutAtTransport = false;
+  let premasked = 0;
   let scrubOptions: ScrubOptions = {};
   try {
     scrubOptions = scrubOptionsFor(op, ctx);
@@ -273,6 +302,7 @@ export async function executeOp(
       outcome,
       commandStderr = '',
       outputTruncated: cutAtTransport = false,
+      premasked = 0,
     } = await runOp(op, ctx, deps, command, requiresConfirm, startedAtMs));
   } catch (err) {
     const error = err instanceof OpError ? opErrorInfo(err) : internalErrorInfo(command, err);
@@ -285,6 +315,7 @@ export async function executeOp(
     });
   }
   envelope = scrubEnvelope(op, ctx, envelope, commandStderr, scrubOptions);
+  envelope = { ...envelope, scrubbed: envelope.scrubbed + premasked };
   envelope = shapeOutput(op, envelope, deps, cutAtTransport);
   if (!audited) {
     return envelope;
@@ -367,7 +398,10 @@ async function runOp(
     remoteCmd,
     effectiveTimeoutSec(op, deps),
     withConfigPath(deps),
-    { stdoutCap: op.mutating ? 'drain-tail' : 'kill-head' },
+    {
+      stdoutCap: op.mutating ? 'drain-tail' : 'kill-head',
+      ...(op.maxStdoutBytes !== undefined ? { stdoutMaxBytes: op.maxStdoutBytes } : {}),
+    },
   );
   const outputTruncated = result.raw.outputTruncated === true;
   if (result.error) {
@@ -386,14 +420,23 @@ async function runOp(
 
   try {
     const parsed = parseByMode(op.output, result.raw.stdout, outputTruncated);
-    return { ...finish(op.shape(parsed, ctx), null, 'ok'), outputTruncated };
+    const shaped = op.shape(parsed, ctx);
+    if (shaped instanceof Premasked) {
+      return {
+        ...finish(shaped.data, null, 'ok'),
+        outputTruncated,
+        premasked: shaped.count,
+      };
+    }
+    return { ...finish(shaped, null, 'ok'), outputTruncated };
   } catch (err) {
-    if (!outputTruncated) {
+    // An op's own error (files download refusing a short payload) says more than the generic one.
+    if (!outputTruncated || err instanceof OpError) {
       throw err;
     }
     throw new OpError(
       'OUTPUT_TOO_LARGE',
-      `'${command}' printed more than ${MAX_STDOUT_BYTES} bytes, so its output was cut before it could be parsed`,
+      `'${command}' printed more than ${op.maxStdoutBytes ?? MAX_STDOUT_BYTES} bytes, so its output was cut before it could be parsed`,
     );
   }
 }

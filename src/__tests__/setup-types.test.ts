@@ -42,7 +42,7 @@ describe('buildSetupResult', () => {
 
   test('the shape has no alias/duration_ms field — deliberately not an Envelope', () => {
     const keys = Object.keys(buildSetupResult({ command: 'setup deploy-recipe scaffold' }));
-    expect(keys.sort()).toEqual(['command', 'data', 'error', 'ok', 'ran_at']);
+    expect(keys.sort()).toEqual(['command', 'data', 'error', 'ok', 'ran_at', 'schema_version']);
   });
 });
 

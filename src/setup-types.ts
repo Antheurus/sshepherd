@@ -5,6 +5,8 @@
  * carry and no `duration_ms` worth measuring against a remote round-trip.
  */
 export interface SetupResult<T> {
+  /** Same version as the op envelope's; fields are only ever added within it. */
+  schema_version: 1;
   ok: boolean;
   command: string;
   ran_at: string;
@@ -203,6 +205,7 @@ export function buildSetupResult<T>(input: BuildSetupResultInput<T>): SetupResul
     }
   }
   return {
+    schema_version: 1,
     ok: error === null,
     command: input.command,
     ran_at: new Date().toISOString(),

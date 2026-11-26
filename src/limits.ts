@@ -33,6 +33,18 @@ export const MAX_PARTIAL_STDOUT_CHARS = 65_536;
  *  mutating op, the rest is drained unread): 2 MiB is far more than any envelope can carry,
  *  low enough that a runaway `docker logs` cannot exhaust the process. */
 export const MAX_STDOUT_BYTES = 2 * 1_024 * 1_024;
+/** Largest file `files download` fetches; the remote side refuses anything bigger before sending. */
+export const DOWNLOAD_MAX_BYTES = 10_485_760;
+/** `files download`'s own stdout read ceiling, in place of `MAX_STDOUT_BYTES`: the base64 of a
+ *  `DOWNLOAD_MAX_BYTES` file (13,981,016 bytes) plus 64 bytes for the `__OK__:<size>` header line.
+ *  The payload goes to a local file, never into the envelope, so it does not compete with `--max-bytes`. */
+export const DOWNLOAD_MAX_STDOUT_BYTES = Math.ceil(DOWNLOAD_MAX_BYTES / 3) * 4 + 64;
+/** One log or tail line, cut after the scrubber: 4 KiB holds a stack-trace frame or a JSON log
+ *  record, while a 100 KB minified blob on one line can no longer crowd out every other line. */
+export const MAX_LINE_BYTES = 4_096;
+/** `session_id` kept in an audit row: a UUID is 36 chars, 128 leaves room for any client's id
+ *  format without letting an arbitrary env value bloat every row. */
+export const MAX_SESSION_ID_CHARS = 128;
 /** Default size of the JSON an invocation prints (`--max-bytes`): 64 KiB is roughly 16k tokens,
  *  the most an agent can usefully read from one call. */
 export const DEFAULT_MAX_BYTES = 65_536;

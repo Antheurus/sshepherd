@@ -28,8 +28,8 @@ describe('docs/schema snapshot', () => {
     expect(readdirSync(SCHEMA_DIR).sort()).toEqual([...generated.keys()].sort());
   });
 
-  test('there is one schema per registry op plus the envelope', () => {
-    expect(generated.size).toBe(listOps().length + 1);
+  test('there is one schema per registry op plus the envelope and the setup result', () => {
+    expect(generated.size).toBe(listOps().length + 2);
   });
 
   test('a real envelope carries only fields the envelope schema declares, with schema_version 1', () => {

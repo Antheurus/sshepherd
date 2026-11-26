@@ -54,6 +54,8 @@ export type StdoutCapPolicy = 'kill-head' | 'drain-tail';
 
 export interface RunnerOptions {
   stdoutCap?: StdoutCapPolicy;
+  /** Read ceiling in place of `MAX_STDOUT_BYTES` (an op's `maxStdoutBytes`). */
+  stdoutMaxBytes?: number;
 }
 
 /**
@@ -458,7 +460,7 @@ async function defaultRunner(
 
   const keep = options.stdoutCap === 'drain-tail' ? 'tail' : 'head';
   const [stdout, stderr, code] = await Promise.all([
-    readCapped(proc.stdout, MAX_STDOUT_BYTES, keep, () => proc.kill()),
+    readCapped(proc.stdout, options.stdoutMaxBytes ?? MAX_STDOUT_BYTES, keep, () => proc.kill()),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
