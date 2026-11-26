@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:09.389Z",
+  "command": "files find",
+  "duration_ms": 23,
+  "scrubbed": 0,
+  "data": {
+    "found": true,
+    "paths": [
+      "/opt/myapp/app.log"
+    ],
+    "paths_returned": 1,
+    "truncated": false
+  },
+  "error": null
+}

@@ -63,8 +63,34 @@
         {
           "type": "object",
           "properties": {
+            "failed_at": {
+              "type": "null"
+            },
+            "likely_cause": {
+              "type": "null"
+            },
             "reachable": {
               "type": "boolean"
+            },
+            "stages": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "detail": {
+                    "type": "string"
+                  },
+                  "ms": {
+                    "type": "integer"
+                  },
+                  "stage": {
+                    "type": "string"
+                  },
+                  "verdict": {
+                    "type": "string"
+                  }
+                }
+              }
             }
           }
         }

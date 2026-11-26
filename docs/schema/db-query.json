@@ -76,13 +76,30 @@
           "type": "null"
         },
         {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "note": {
-                "type": "string"
+          "type": "object",
+          "properties": {
+            "row_count": {
+              "type": "integer"
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer"
+                  },
+                  "label": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                }
               }
+            },
+            "truncated": {
+              "type": "boolean"
             }
           }
         }

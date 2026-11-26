@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:08.707Z",
+  "command": "env keys",
+  "duration_ms": 34,
+  "scrubbed": 0,
+  "data": [
+    {
+      "key": "PATH",
+      "state": "set",
+      "length_bucket": "33+"
+    },
+    {
+      "key": "NGINX_VERSION",
+      "state": "set",
+      "length_bucket": "1-8"
+    },
+    {
+      "key": "PKG_RELEASE",
+      "state": "set",
+      "length_bucket": "1-8"
+    },
+    {
+      "key": "DYNPKG_RELEASE",
+      "state": "set",
+      "length_bucket": "1-8"
+    },
+    {
+      "key": "NJS_VERSION",
+      "state": "set",
+      "length_bucket": "1-8"
+    },
+    {
+      "key": "NJS_RELEASE",
+      "state": "set",
+      "length_bucket": "1-8"
+    },
+    {
+      "key": "ACME_VERSION",
+      "state": "set",
+      "length_bucket": "1-8"
+    }
+  ],
+  "error": null
+}

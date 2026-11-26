@@ -2,20 +2,24 @@
   "schema_version": 1,
   "ok": false,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T16:15:00.339Z",
+  "ran_at": "2026-11-26T18:23:27.531Z",
   "command": "db query",
-  "duration_ms": 2041,
+  "duration_ms": 1073,
   "scrubbed": 0,
   "data": null,
   "error": {
     "code": "COMMAND_TIMEOUT",
-    "message": "Remote command timed out",
-    "hint": "The command outran its budget; re-run with a larger --timeout <sec> (max 3600) or narrow what it does.",
+    "message": "Postgres cancelled the statement at statement_timeout (1 s)",
+    "hint": "Narrow the query (a WHERE on an indexed column, a smaller range) or give it more time with --timeout <sec>; statement_timeout follows that budget.",
     "retryable": true,
+    "remote_exit": 1,
     "phase": "command",
-    "timeout_sec": 2,
-    "budget_sec": 2,
-    "elapsed_ms": 2018,
-    "stderr_tail": "context canceled"
+    "timeout_sec": 1,
+    "data": {
+      "sql_error": {
+        "message": "canceling statement due to statement timeout"
+      }
+    },
+    "stderr_tail": "ERROR:  canceling statement due to statement timeout"
   }
 }

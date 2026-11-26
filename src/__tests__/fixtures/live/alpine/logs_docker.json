@@ -2,22 +2,42 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T16:14:53.218Z",
+  "ran_at": "2026-11-26T18:23:19.605Z",
   "command": "logs docker",
-  "duration_ms": 37,
-  "scrubbed": 0,
+  "duration_ms": 27,
+  "scrubbed": 1,
   "data": {
     "source": "docker:sshepherd-fixture-app",
-    "lines_returned": 1,
-    "truncated": false,
+    "lines_returned": 5,
+    "truncated": true,
     "lines": [
       {
-        "ts": "2026-11-26T16:14:51.468645921Z",
+        "ts": "2026-11-26T18:23:00.492660979Z",
         "stream": "stdout",
-        "text": "192.168.156.6 - - [26/Nov/2026:16:14:51 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"curl/8.7.1\" \"-\""
+        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 35"
+      },
+      {
+        "ts": "2026-11-26T18:23:00.492662062Z",
+        "stream": "stdout",
+        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 36"
+      },
+      {
+        "ts": "2026-11-26T18:23:00.494770331Z",
+        "stream": "stdout",
+        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 37"
+      },
+      {
+        "ts": "2026-11-26T18:23:00.496776266Z",
+        "stream": "stdout",
+        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 38"
+      },
+      {
+        "ts": "2026-11-26T18:23:16.285797640Z",
+        "stream": "stdout",
+        "text": "<ip-1> - - [26/Nov/2026:18:23:16 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"curl/8.7.1\" \"-\""
       }
     ],
-    "next_since": "2026-11-26T16:14:51.468645921Z"
+    "next_since": "2026-11-26T18:23:16.285797640Z"
   },
   "error": null
 }

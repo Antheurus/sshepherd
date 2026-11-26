@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:09.725Z",
+  "command": "files find",
+  "duration_ms": 1,
+  "scrubbed": 0,
+  "data": null,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "files path '/opt/myapp/../../etc' is not on the allowlist for alias 'smoke-debian'",
+    "hint": "A human declares allowed paths with setup files-allowlist scaffold; the agent never widens its own allowlist.",
+    "retryable": false
+  }
+}

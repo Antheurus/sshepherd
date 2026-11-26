@@ -2,11 +2,13 @@
   "schema_version": 1,
   "ok": true,
   "command": "setup files-allowlist scaffold",
-  "ran_at": "2026-11-26T17:45:04.824Z",
+  "ran_at": "2026-11-26T18:23:19.871Z",
   "data": {
     "alias": "smoke-alpine",
     "paths": [
       "/root",
+      "/opt/myapp",
+      "/opt/myapp/.env",
       "/opt/myapp/prod.env",
       "/opt/myapp/start.sh"
     ]

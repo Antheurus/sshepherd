@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T16:15:02.092Z",
+  "ran_at": "2026-11-26T18:23:29.103Z",
   "command": "hosts disconnect",
-  "duration_ms": 10,
+  "duration_ms": 7,
   "scrubbed": 0,
   "data": {
     "closed": 1

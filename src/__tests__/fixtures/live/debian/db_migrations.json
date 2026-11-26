@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:11.222Z",
+  "command": "db migrations",
+  "duration_ms": 121,
+  "scrubbed": 0,
+  "data": {
+    "tables": [
+      {
+        "framework": "prisma",
+        "table": "_prisma_migrations",
+        "migrations": [
+          {
+            "name": "20261102103000_add_users_nickname",
+            "applied_at": "2026-11-02T10:30:00+00:00"
+          },
+          {
+            "name": "20261001090000_init",
+            "applied_at": "2026-10-01T09:00:00+00:00"
+          }
+        ]
+      },
+      {
+        "framework": "rails",
+        "table": "schema_migrations",
+        "migrations": [
+          {
+            "name": "20261015000000",
+            "applied_at": null
+          },
+          {
+            "name": "20260901000000",
+            "applied_at": null
+          }
+        ]
+      }
+    ]
+  },
+  "error": null
+}

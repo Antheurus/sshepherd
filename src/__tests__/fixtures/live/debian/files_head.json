@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:09.513Z",
+  "command": "files head",
+  "duration_ms": 20,
+  "scrubbed": 0,
+  "data": {
+    "lines": [
+      "APP_NAME=***MASKED***",
+      "DB_PASSWORD=***MASKED***"
+    ],
+    "lines_returned": 2
+  },
+  "error": null
+}

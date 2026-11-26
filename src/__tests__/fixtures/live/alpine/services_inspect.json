@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T18:23:21.393Z",
+  "command": "services inspect",
+  "duration_ms": 53,
+  "scrubbed": 0,
+  "data": [
+    {
+      "mounts": [],
+      "ports": [
+        {
+          "host_ip": null,
+          "host_port": null,
+          "container_port": 80,
+          "proto": "tcp"
+        }
+      ],
+      "health": null,
+      "env": [
+        {
+          "key": "PATH",
+          "state": "set",
+          "length_bucket": "33+"
+        },
+        {
+          "key": "NGINX_VERSION",
+          "state": "set",
+          "length_bucket": "1-8"
+        },
+        {
+          "key": "PKG_RELEASE",
+          "state": "set",
+          "length_bucket": "1-8"
+        },
+        {
+          "key": "DYNPKG_RELEASE",
+          "state": "set",
+          "length_bucket": "1-8"
+        },
+        {
+          "key": "NJS_VERSION",
+          "state": "set",
+          "length_bucket": "1-8"
+        },
+        {
+          "key": "NJS_RELEASE",
+          "state": "set",
+          "length_bucket": "1-8"
+        },
+        {
+          "key": "ACME_VERSION",
+          "state": "set",
+          "length_bucket": "1-8"
+        }
+      ]
+    }
+  ],
+  "error": null
+}

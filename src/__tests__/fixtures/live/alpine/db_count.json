@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T18:23:23.426Z",
+  "command": "db count",
+  "duration_ms": 64,
+  "scrubbed": 0,
+  "data": {
+    "count": 1
+  },
+  "error": null
+}

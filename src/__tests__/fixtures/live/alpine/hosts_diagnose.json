@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T18:23:19.234Z",
+  "command": "hosts test",
+  "duration_ms": 113,
+  "scrubbed": 0,
+  "data": {
+    "reachable": true,
+    "stages": [
+      {
+        "stage": "dns",
+        "verdict": "skipped",
+        "ms": 0,
+        "detail": "the alias names an address, not a name"
+      },
+      {
+        "stage": "tcp",
+        "verdict": "ok",
+        "ms": 1,
+        "detail": "the port accepted the connection"
+      },
+      {
+        "stage": "banner",
+        "verdict": "ok",
+        "ms": 5,
+        "detail": "sshd answered with its banner"
+      },
+      {
+        "stage": "auth",
+        "verdict": "ok",
+        "ms": 96,
+        "detail": "the login was accepted"
+      },
+      {
+        "stage": "echo",
+        "verdict": "ok",
+        "ms": 96,
+        "detail": "a remote command ran and answered"
+      }
+    ],
+    "failed_at": null,
+    "likely_cause": null
+  },
+  "error": null
+}

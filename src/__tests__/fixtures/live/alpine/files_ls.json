@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T16:14:53.550Z",
+  "ran_at": "2026-11-26T18:23:20.008Z",
   "command": "files ls",
-  "duration_ms": 27,
+  "duration_ms": 25,
   "scrubbed": 0,
   "data": [
     {
@@ -14,7 +14,7 @@
       "owner": "root",
       "group": "root",
       "size_bytes": 8,
-      "modified_at": "2026-11-26T06:40",
+      "modified_at": "2026-11-26T18:07",
       "is_dir": true,
       "is_symlink": false,
       "link_target": null
@@ -26,7 +26,7 @@
       "owner": "root",
       "group": "root",
       "size_bytes": 26,
-      "modified_at": "2026-11-26T16:14",
+      "modified_at": "2026-11-26T18:23",
       "is_dir": true,
       "is_symlink": false,
       "link_target": null
@@ -38,7 +38,7 @@
       "owner": "root",
       "group": "root",
       "size_bytes": 30,
-      "modified_at": "2026-11-26T16:14",
+      "modified_at": "2026-11-26T18:23",
       "is_dir": true,
       "is_symlink": false,
       "link_target": null

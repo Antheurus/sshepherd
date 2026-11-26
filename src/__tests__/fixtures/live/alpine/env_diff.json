@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T18:23:21.231Z",
+  "command": "env diff",
+  "duration_ms": 23,
+  "scrubbed": 0,
+  "data": {
+    "missing": [
+      "API_URL"
+    ],
+    "extra": [
+      "LOG_LEVEL"
+    ],
+    "empty": [
+      "EMPTY_KEY"
+    ]
+  },
+  "error": null
+}

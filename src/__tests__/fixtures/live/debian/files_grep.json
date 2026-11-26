@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:09.127Z",
+  "command": "files grep",
+  "duration_ms": 28,
+  "scrubbed": 0,
+  "data": {
+    "found": true,
+    "lines": [
+      "/opt/myapp/app.log:2:2026-11-27 ERROR upstream refused"
+    ],
+    "lines_returned": 1,
+    "truncated": false
+  },
+  "error": null
+}

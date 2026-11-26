@@ -9,7 +9,7 @@
     "mutating": false,
     "exposes": "metadata",
     "timeout_sec": 60,
-    "data_shape": "unrecorded",
+    "data_shape": "recorded",
     "args": [
       {
         "name": "target",
@@ -70,7 +70,21 @@
       "type": "integer",
       "description": "How many values the scrubber masked."
     },
-    "data": {},
+    "data": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "count": {
+              "type": "integer"
+            }
+          }
+        }
+      ]
+    },
     "error": {
       "anyOf": [
         {

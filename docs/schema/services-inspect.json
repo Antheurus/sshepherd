@@ -9,7 +9,7 @@
     "mutating": false,
     "exposes": "metadata",
     "timeout_sec": 20,
-    "data_shape": "unrecorded",
+    "data_shape": "recorded",
     "args": [
       {
         "name": "container",
@@ -55,7 +55,64 @@
       "type": "integer",
       "description": "How many values the scrubber masked."
     },
-    "data": {},
+    "data": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "env": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "length_bucket": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  }
+                }
+              },
+              "health": {
+                "type": "null"
+              },
+              "mounts": {
+                "type": "array"
+              },
+              "ports": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "container_port": {
+                      "type": "integer"
+                    },
+                    "host_ip": {
+                      "type": "null"
+                    },
+                    "host_port": {
+                      "type": "null"
+                    },
+                    "proto": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
     "error": {
       "anyOf": [
         {

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:08.566Z",
+  "command": "env keys",
+  "duration_ms": 27,
+  "scrubbed": 0,
+  "data": [
+    {
+      "key": "APP_NAME",
+      "state": "set",
+      "length_bucket": "1-8"
+    },
+    {
+      "key": "DB_PASSWORD",
+      "state": "set",
+      "length_bucket": "9-32"
+    },
+    {
+      "key": "EMPTY_KEY",
+      "state": "empty",
+      "length_bucket": "0"
+    },
+    {
+      "key": "LOG_LEVEL",
+      "state": "set",
+      "length_bucket": "1-8"
+    }
+  ],
+  "error": null
+}

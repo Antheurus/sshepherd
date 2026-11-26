@@ -114,10 +114,7 @@
               "type": "integer"
             },
             "next_since": {
-              "type": [
-                "null",
-                "string"
-              ]
+              "type": "string"
             },
             "source": {
               "type": "string"

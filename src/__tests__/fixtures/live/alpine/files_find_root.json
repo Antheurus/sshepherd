@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T18:23:22.047Z",
+  "command": "files find",
+  "duration_ms": 1,
+  "scrubbed": 0,
+  "data": null,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "files path '/' is not on the allowlist for alias 'smoke-alpine'",
+    "hint": "A human declares allowed paths with setup files-allowlist scaffold; the agent never widens its own allowlist.",
+    "retryable": false
+  }
+}

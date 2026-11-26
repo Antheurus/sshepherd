@@ -60,6 +60,9 @@
             "dead_end_risk": {
               "type": "boolean"
             },
+            "degraded": {
+              "type": "array"
+            },
             "disk": {
               "type": "array",
               "items": {
@@ -133,6 +136,12 @@
             },
             "psi_mem": {
               "type": "null"
+            },
+            "risk_signals": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             },
             "uptime": {
               "type": "object",

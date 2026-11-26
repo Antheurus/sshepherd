@@ -2,14 +2,39 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T16:14:45.199Z",
+  "ran_at": "2026-11-26T18:23:10.267Z",
   "command": "db tables",
-  "duration_ms": 89,
+  "duration_ms": 78,
   "scrubbed": 0,
   "data": [
     {
       "schema": "public",
+      "table": "big",
+      "size_bytes": 139264
+    },
+    {
+      "schema": "public",
+      "table": "users",
+      "size_bytes": 65536
+    },
+    {
+      "schema": "public",
       "table": "smoke_fixture",
+      "size_bytes": 32768
+    },
+    {
+      "schema": "public",
+      "table": "orgs",
+      "size_bytes": 32768
+    },
+    {
+      "schema": "public",
+      "table": "_prisma_migrations",
+      "size_bytes": 32768
+    },
+    {
+      "schema": "public",
+      "table": "schema_migrations",
       "size_bytes": 32768
     }
   ],

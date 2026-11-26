@@ -2,34 +2,34 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T16:14:52.629Z",
+  "ran_at": "2026-11-26T18:23:19.011Z",
   "command": "check overview",
-  "duration_ms": 38,
+  "duration_ms": 43,
   "scrubbed": 0,
   "data": {
     "nproc": 10,
     "mem": {
       "mem": {
         "total": 4179505152,
-        "used": 2129526784,
-        "free": 1190076416,
-        "shared": 129527808,
-        "buff_cache": 1182261248,
-        "available": 2049978368
+        "used": 2188759040,
+        "free": 1147871232,
+        "shared": 204111872,
+        "buff_cache": 1239912448,
+        "available": 1990746112
       },
       "swap": {
         "total": 5253238784,
-        "used": 948391936,
-        "free": 4304846848
+        "used": 872943616,
+        "free": 4380295168
       }
     },
     "disk": [
       {
         "filesystem": "overlay",
-        "size_bytes": 68719476736,
-        "used_bytes": 24517963776,
-        "avail_bytes": 44201512960,
-        "use_percent": 36,
+        "size_bytes": 67847061504,
+        "used_bytes": 25062146048,
+        "avail_bytes": 42784915456,
+        "use_percent": 37,
         "mounted_on": "/"
       },
       {
@@ -50,17 +50,17 @@
       },
       {
         "filesystem": "/dev/vdb1",
-        "size_bytes": 68719476736,
-        "used_bytes": 24517963776,
-        "avail_bytes": 44201512960,
-        "use_percent": 36,
+        "size_bytes": 67847061504,
+        "used_bytes": 25062146048,
+        "avail_bytes": 42784915456,
+        "use_percent": 37,
         "mounted_on": "/etc/hosts"
       },
       {
         "filesystem": "mac",
         "size_bytes": 494384795648,
-        "used_bytes": 447749410816,
-        "avail_bytes": 46635384832,
+        "used_bytes": 449053544448,
+        "avail_bytes": 45331251200,
         "use_percent": 91,
         "mounted_on": "/root/.ssh/authorized_keys"
       },
@@ -82,15 +82,19 @@
       }
     ],
     "uptime": {
-      "time": "16:14:52",
-      "uptime": "1 day,  6:38",
+      "time": "18:23:19",
+      "uptime": "1 day,  8:47",
       "users": 0,
-      "load_1m": 1.21,
-      "load_5m": 0.89,
-      "load_15m": 0.79
+      "load_1m": 0.86,
+      "load_5m": 0.73,
+      "load_15m": 0.74
     },
     "psi_mem": null,
-    "dead_end_risk": true
+    "dead_end_risk": true,
+    "degraded": [],
+    "risk_signals": [
+      "disk"
+    ]
   },
   "error": null
 }

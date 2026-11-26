@@ -2,18 +2,18 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T16:14:50.335Z",
+  "ran_at": "2026-11-26T18:23:15.186Z",
   "command": "tunnel open",
-  "duration_ms": 4,
+  "duration_ms": 3,
   "scrubbed": 0,
   "data": {
-    "id": "t-5195b9b7-d23e-4f06-93c2-35170558308a",
+    "id": "t-6f04808d-9996-455d-a84e-1c99f636f612",
     "alias": "smoke-debian",
     "kind": "local",
-    "localPort": 51678,
+    "localPort": 62020,
     "remoteTarget": "app:80",
     "localTarget": null,
-    "expiresAt": "2026-11-26T16:16:50.335Z"
+    "expiresAt": "2026-11-26T18:25:15.185Z"
   },
   "error": null
 }

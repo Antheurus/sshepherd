@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T18:23:09.260Z",
+  "command": "files grep",
+  "duration_ms": 25,
+  "scrubbed": 2,
+  "data": {
+    "found": true,
+    "lines": [
+      "/opt/myapp/.env:2:DB_PASSWORD=***MASKED***",
+      "/opt/myapp/prod.env:1:DB_PASSWORD=***MASKED***"
+    ],
+    "lines_returned": 2,
+    "truncated": false
+  },
+  "error": null
+}

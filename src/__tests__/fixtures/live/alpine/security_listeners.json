@@ -2,25 +2,25 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T16:14:54.815Z",
+  "ran_at": "2026-11-26T18:23:22.419Z",
   "command": "security listeners",
-  "duration_ms": 30,
+  "duration_ms": 24,
   "scrubbed": 0,
   "data": {
     "listening": [
+      {
+        "proto": "tcp",
+        "local_addr": "127.0.0.11",
+        "port": 37411,
+        "process": null,
+        "pid": null
+      },
       {
         "proto": "tcp",
         "local_addr": "0.0.0.0",
         "port": 22,
         "process": "sshd",
         "pid": 1
-      },
-      {
-        "proto": "tcp",
-        "local_addr": "127.0.0.11",
-        "port": 38461,
-        "process": null,
-        "pid": null
       },
       {
         "proto": "tcp",

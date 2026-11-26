@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T16:14:43.763Z",
+  "ran_at": "2026-11-26T18:23:07.804Z",
   "command": "files cat",
-  "duration_ms": 25,
+  "duration_ms": 21,
   "scrubbed": 0,
   "data": {
     "found": true,

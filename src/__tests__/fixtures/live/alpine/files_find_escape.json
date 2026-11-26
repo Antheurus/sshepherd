@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T18:23:22.285Z",
+  "command": "files find",
+  "duration_ms": 25,
+  "scrubbed": 0,
+  "data": null,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "files find: '/opt/myapp/escape' resolves outside every files-allowlist.toml root for alias 'smoke-alpine' (a symlink leads out of it), so nothing was read",
+    "hint": "Search the real directory, and have a human declare it with setup files-allowlist scaffold if it is meant to be searchable.",
+    "retryable": false
+  }
+}
