@@ -1,13 +1,14 @@
 {
+  "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T15:48:25.549Z",
+  "ran_at": "2026-11-26T16:14:53.024Z",
   "command": "services ps",
-  "duration_ms": 296,
+  "duration_ms": 240,
   "scrubbed": 0,
   "data": [
     {
-      "id": "7de326424096",
+      "id": "e10fe70d38ce",
       "name": "sshepherd-fixture-sshd-debian",
       "image": "sshepherd-smoke-sshd-debian",
       "state": "running",
@@ -31,7 +32,7 @@
       "compose_service": "sshd-debian"
     },
     {
-      "id": "96e5687b8d7a",
+      "id": "eb14c9271409",
       "name": "sshepherd-fixture-sshd-alpine",
       "image": "sshepherd-smoke-sshd-alpine",
       "state": "running",
@@ -55,7 +56,31 @@
       "compose_service": "sshd-alpine"
     },
     {
-      "id": "47d12e4b6b0e",
+      "id": "554a7caa35e8",
+      "name": "sshepherd-fixture-postgres",
+      "image": "postgres:16-alpine",
+      "state": "running",
+      "health": null,
+      "restart_count": 0,
+      "oom_killed": false,
+      "exit_code": 0,
+      "mem_limit_bytes": null,
+      "nano_cpus": null,
+      "oom_score_adj": 0,
+      "restart_policy": "no",
+      "ports": [
+        {
+          "host_ip": null,
+          "host_port": null,
+          "container_port": 5432,
+          "proto": "tcp"
+        }
+      ],
+      "compose_project": "sshepherd-smoke",
+      "compose_service": "postgres"
+    },
+    {
+      "id": "9750e543fd06",
       "name": "sshepherd-fixture-app",
       "image": "nginx:alpine",
       "state": "running",
@@ -79,9 +104,9 @@
       "compose_service": "app"
     },
     {
-      "id": "f04368ce6ff8",
-      "name": "sshepherd-fixture-postgres",
-      "image": "postgres:16-alpine",
+      "id": "66fee086ff7d",
+      "name": "sshepherd-fixture-noisy",
+      "image": "nginx:alpine",
       "state": "running",
       "health": null,
       "restart_count": 0,
@@ -95,12 +120,12 @@
         {
           "host_ip": null,
           "host_port": null,
-          "container_port": 5432,
+          "container_port": 80,
           "proto": "tcp"
         }
       ],
       "compose_project": "sshepherd-smoke",
-      "compose_service": "postgres"
+      "compose_service": "noisy"
     }
   ],
   "error": null

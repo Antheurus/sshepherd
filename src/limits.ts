@@ -29,3 +29,26 @@ export const CONTROL_PERSIST_SEC = 300;
 export const KILL_AFTER_SEC = 10;
 /** Partial stdout returned with a `COMMAND_TIMEOUT` — 64 KiB keeps an envelope readable. */
 export const MAX_PARTIAL_STDOUT_CHARS = 65_536;
+/** Hard ceiling on stdout read from one ssh call. Past it the client is killed (or, for a
+ *  mutating op, the rest is drained unread): 2 MiB is far more than any envelope can carry,
+ *  low enough that a runaway `docker logs` cannot exhaust the process. */
+export const MAX_STDOUT_BYTES = 2 * 1_024 * 1_024;
+/** Default size of the JSON an invocation prints (`--max-bytes`): 64 KiB is roughly 16k tokens,
+ *  the most an agent can usefully read from one call. */
+export const DEFAULT_MAX_BYTES = 65_536;
+/** Lowest `--max-bytes`: leaves room for the error block (2 KiB stderr tail, hint, next, sql_error). */
+export const MIN_MAX_BYTES = 8_192;
+/** Highest `--max-bytes`: nothing larger than the transport read ceiling can exist anyway. */
+export const CEILING_MAX_BYTES = MAX_STDOUT_BYTES;
+/** `--tail N` on any op: 5,000 lines already exceed `DEFAULT_MAX_BYTES` for typical log lines. */
+export const MAX_TAIL_LINES = 5_000;
+/** `--limit N` ceiling: more items than this cannot fit under `CEILING_MAX_BYTES` anyway. */
+export const MAX_LIMIT_ITEMS = 100_000;
+/** Audit log rotates when the active file reaches 50 MiB: ~250k rows, months of agent use. */
+export const AUDIT_ROTATE_BYTES = 50 * 1_024 * 1_024;
+/** Files kept including the active one (active + 4 archives = at most 250 MiB on disk). */
+export const AUDIT_KEEP_FILES = 5;
+/** `audit tail` rows when `--n` is absent. */
+export const DEFAULT_AUDIT_TAIL = 50;
+/** `audit tail --n` ceiling: 1,000 rows of ~500 bytes fit under `DEFAULT_MAX_BYTES` x 8. */
+export const MAX_AUDIT_TAIL = 1_000;

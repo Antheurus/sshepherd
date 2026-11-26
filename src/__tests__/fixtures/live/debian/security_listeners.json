@@ -1,9 +1,10 @@
 {
+  "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T15:48:19.346Z",
+  "ran_at": "2026-11-26T16:14:44.813Z",
   "command": "security listeners",
-  "duration_ms": 36,
+  "duration_ms": 29,
   "scrubbed": 0,
   "data": {
     "listening": [
@@ -17,7 +18,7 @@
       {
         "proto": "tcp",
         "local_addr": "127.0.0.11",
-        "port": 44559,
+        "port": 41129,
         "process": null,
         "pid": null
       },

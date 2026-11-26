@@ -1,6 +1,7 @@
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { AUDIT_KEEP_FILES, AUDIT_ROTATE_BYTES } from './limits.ts';
 
 export type AuditOutcome = 'ok' | 'error' | 'refused';
 
@@ -10,11 +11,28 @@ export interface AuditEntryInput {
   /** Arg values, not logged raw — they could contain sensitive paths — only their hash is written. */
   argsSummary: Record<string, string | boolean>;
   outcome: AuditOutcome;
+  /** Names that identify what ran (recipe, target, container, unit) — never arg values. */
+  identifiers?: Partial<Record<AuditIdentifier, string>>;
+  durationMs?: number;
+  /** Exit status of the remote command; absent when it never ran. */
+  remoteExit?: number;
+  errorCode?: string;
+  /** Size of the envelope as printed. */
+  bytes?: number;
 }
+
+/** The arg names whose values are safe to log: they name a thing, they are not its contents. */
+export const AUDIT_IDENTIFIER_ARGS = ['recipe', 'target', 'container', 'unit'] as const;
+export type AuditIdentifier = (typeof AUDIT_IDENTIFIER_ARGS)[number];
 
 export interface AuditDeps {
   logPath: string;
+  /** Tests shrink these; production uses the limits.ts values. */
+  rotateBytes?: number;
+  keepFiles?: number;
 }
+
+const PROFILES = new Set(['read', 'deploy', 'admin']);
 
 /** Read on every call, never at import: a compiled binary must not freeze the build machine's
  *  environment, and tests redirect it through `SSHEPHERD_STATE_DIR` (`SSHEPHERD_AUDIT_PATH`
@@ -37,18 +55,73 @@ function hashArgs(argsSummary: Record<string, string | boolean>): string {
   return Bun.hash.crc32(canonical).toString(36);
 }
 
-/** Appends one JSON line per mutating op to the audit log, creating a private 0700 dir if missing. */
+/** Full sha256 of the args: two different `deploy run` calls never share a hash, and the raw
+ *  values are not recoverable from it. `args_hash` (crc32) stays on new rows for readers of old ones. */
+function sha256Args(argsSummary: Record<string, string | boolean>): string {
+  const sortedKeys = Object.keys(argsSummary).sort();
+  return new Bun.CryptoHasher('sha256')
+    .update(JSON.stringify(argsSummary, sortedKeys))
+    .digest('hex');
+}
+
+/** `audit.jsonl` -> `audit.jsonl.1` -> ... : the newest archive is `.1`, the oldest falls off. */
+export function auditArchivePaths(logPath: string, keepFiles: number = AUDIT_KEEP_FILES): string[] {
+  return Array.from({ length: keepFiles - 1 }, (_, index) => `${logPath}.${index + 1}`);
+}
+
+function rotateIfFull(logPath: string, rotateBytes: number, keepFiles: number): void {
+  if (!existsSync(logPath) || statSync(logPath).size < rotateBytes) {
+    return;
+  }
+  const archives = auditArchivePaths(logPath, keepFiles);
+  const oldest = archives[archives.length - 1];
+  if (oldest !== undefined) {
+    rmSync(oldest, { force: true });
+  }
+  for (let index = archives.length - 1; index > 0; index--) {
+    const from = archives[index - 1];
+    const to = archives[index];
+    if (from !== undefined && to !== undefined && existsSync(from)) {
+      renameSync(from, to);
+    }
+  }
+  const newest = archives[0];
+  if (newest === undefined) {
+    rmSync(logPath, { force: true });
+    return;
+  }
+  renameSync(logPath, newest);
+}
+
+/** Appends one JSON line per audited op (mutating, or exposing content) to the audit log,
+ *  creating a private 0700 dir if missing and rotating the file at `AUDIT_ROTATE_BYTES`. */
 export function auditMutating(
   input: AuditEntryInput,
   deps: AuditDeps = { logPath: auditLogPath() },
 ): void {
   mkdirSync(dirname(deps.logPath), { recursive: true, mode: 0o700 });
+  rotateIfFull(
+    deps.logPath,
+    deps.rotateBytes ?? AUDIT_ROTATE_BYTES,
+    deps.keepFiles ?? AUDIT_KEEP_FILES,
+  );
+  const profile = process.env.SSHEPHERD_PROFILE;
+  const sessionId = process.env.SSHEPHERD_SESSION_ID;
   const entry = {
     ts: new Date().toISOString(),
     alias: input.alias,
     command: input.command,
+    ...input.identifiers,
     args_hash: hashArgs(input.argsSummary),
+    args_sha256: sha256Args(input.argsSummary),
     outcome: input.outcome,
+    duration_ms: input.durationMs,
+    remote_exit: input.remoteExit,
+    error_code: input.errorCode,
+    bytes: input.bytes,
+    profile: profile !== undefined && PROFILES.has(profile) ? profile : undefined,
+    session_id:
+      sessionId !== undefined && sessionId.length > 0 ? sessionId.slice(0, 128) : undefined,
   };
   appendFileSync(deps.logPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
 }

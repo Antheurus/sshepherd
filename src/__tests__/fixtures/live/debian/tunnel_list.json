@@ -1,22 +1,23 @@
 {
+  "schema_version": 1,
   "ok": true,
   "alias": "",
-  "ran_at": "2026-11-26T15:48:24.001Z",
+  "ran_at": "2026-11-26T16:14:51.585Z",
   "command": "tunnel list",
   "duration_ms": 1,
   "scrubbed": 0,
   "data": {
     "tunnels": [
       {
-        "id": "t-9e265b5b-5742-4a20-a412-d2c3f00856d6",
+        "id": "t-5195b9b7-d23e-4f06-93c2-35170558308a",
         "alias": "smoke-debian",
         "kind": "local",
-        "localPort": 50606,
+        "localPort": 51678,
         "remoteTarget": "app:80",
         "localTarget": null,
-        "pid": 34888,
-        "openedAt": "2026-11-26T15:48:22.752Z",
-        "expiresAt": "2026-11-26T15:50:22.752Z",
+        "pid": 50856,
+        "openedAt": "2026-11-26T16:14:50.335Z",
+        "expiresAt": "2026-11-26T16:16:50.335Z",
         "remainingSec": 119
       }
     ]

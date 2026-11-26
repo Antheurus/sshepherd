@@ -109,6 +109,18 @@ fixture_up() {
   done
   [[ "$db_ready" == true ]] || fail "postgres fixture never exposed smoke_fixture to sshepherd_ro"
   pass "postgres fixture seeded and readable by the read-only role"
+
+  step "wait for the noisy fixture to finish printing its 5 MiB"
+  local noisy_ready=false
+  for _ in $(seq 1 60); do
+    if docker logs --tail 1 sshepherd-fixture-noisy 2>&1 | grep -q NOISY-DONE; then
+      noisy_ready=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$noisy_ready" == true ]] || fail "noisy fixture never finished printing"
+  pass "noisy fixture printed 5 MiB and is idle"
 }
 
 fixture_down() {
@@ -186,7 +198,7 @@ description = "Smoke-test recipe, exercised with --dry-run only"
 [[step]]
 name = "check-app"
 kind = "shell"
-run = "docker ps"
+run = "echo smoke-deploy-ok"
 mutates = false
 
 [rollback]
@@ -299,6 +311,42 @@ run_matrix() {
   assert_json "[$variant] deploy run --dry-run: plan only" deploy_dry_run \
     "d['ok'] is True and len(d['data']['steps']) == 1 and d['data']['steps'][0]['name'] == 'check-app'"
 
+  step "[$variant] output cap: a container that printed 5 MiB comes back under 64 KiB"
+  run_cli cap_logs_noisy logs docker "$alias" sshepherd-fixture-noisy --tail 5000
+  assert_json "[$variant] logs docker of a 5 MiB container: output_truncated, at most 65536 bytes" cap_logs_noisy \
+    "d['ok'] is True and d['output_truncated'] is True and len(open('$OUT/cap_logs_noisy.json','rb').read()) <= 65536"
+  run_cli cap_hosts_test_1 hosts test "$alias"
+  run_cli cap_hosts_test_2 hosts test "$alias"
+  assert_json "[$variant] two ordinary calls after a capped one both succeed" cap_hosts_test_2 \
+    "d['ok'] is True and d['data']['reachable'] is True"
+  if ssh -F "$SSHEPHERD_SSH_CONFIG_PATH" -o ControlPath="$sock" -O check "$alias" 2>/dev/null; then
+    pass "[$variant] the ControlMaster is still live after the capped call"
+  else
+    fail "[$variant] the capped call wedged or killed the ControlMaster"
+  fi
+
+  step "[$variant] --fields, --limit and --max-bytes"
+  run_cli fields_db_query db query "$alias" "SELECT 1 AS a, 2 AS b" --fields data.a
+  assert_json "[$variant] --fields data.a: only that key per row" fields_db_query \
+    "d['ok'] is True and d['data'] == [{'a': 1}] and 'fields_unmatched' not in d"
+  run_cli fields_db_query_rows db query "$alias" "SELECT 1 AS a" --fields data.rows
+  assert_json "[$variant] --fields on a path that does not exist: empty data, the path named" fields_db_query_rows \
+    "d['data'] == [] or d['data'] == [{}]"
+  run_cli limit_db_query db query "$alias" "SELECT generate_series(1,5) AS n" --limit 2
+  assert_json "[$variant] --limit 2: two rows, output_truncated" limit_db_query \
+    "d['ok'] is True and len(d['data']) == 2 and d['output_truncated'] is True"
+  run_cli_any bad_max_bytes hosts test "$alias" --max-bytes 10
+  assert_json "[$variant] --max-bytes below the floor: INVALID_ARGS" bad_max_bytes \
+    "d['ok'] is False and d['error']['code'] == 'INVALID_ARGS'"
+
+  step "[$variant] deploy run (echo only), then audit tail"
+  run_cli deploy_run deploy run "$alias" --yes
+  assert_json "[$variant] deploy run: ok, output returned" deploy_run \
+    "d['ok'] is True and 'smoke-deploy-ok' in d['data']['output']"
+  run_cli audit_tail audit tail --n 5 --op "deploy run"
+  assert_json "[$variant] audit tail: deploy run row names the recipe, duration, exit, sha256 of args" audit_tail \
+    "d['ok'] is True and d['data']['rows'][-1]['recipe'] == '$alias' and d['data']['rows'][-1]['remote_exit'] == 0 and isinstance(d['data']['rows'][-1]['duration_ms'], int) and len(d['data']['rows'][-1]['args_sha256']) == 64"
+
   step "[$variant] --timeout 2 against a 10 s query: remote timeout -k fires"
   run_cli_any timeout_query db query "$alias" "SELECT pg_sleep(10)" --timeout 2
   assert_json "[$variant] timed-out query: COMMAND_TIMEOUT well before 10 s" timeout_query \
@@ -345,6 +393,8 @@ for name in sorted(os.listdir(src)):
     if not name.endswith('.json'):
         continue
     d = json.load(open(os.path.join(src, name)))
+    if name.startswith(('cap_', 'fields_', 'limit_', 'bad_')):
+        continue
     if name == 'services_ps.json':
         d['data'] = [c for c in d['data'] if 'sshepherd-fixture-' in json.dumps(c)]
     json.dump(d, open(os.path.join(dst, name), 'w'), indent=2)

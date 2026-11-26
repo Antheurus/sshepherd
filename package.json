@@ -1,6 +1,6 @@
 {
   "name": "sshepherd",
-  "version": "0.4.0-rc.5",
+  "version": "0.4.0-rc.6",
   "module": "src/cli.ts",
   "type": "module",
   "license": "MIT",
@@ -19,7 +19,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "biome check",
     "lint:fix": "biome check --write",
-    "check": "bun run typecheck && bun run lint"
+    "check": "bun run typecheck && bun run lint",
+    "gen-schema": "bun scripts/gen-schema.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.3",

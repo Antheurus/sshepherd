@@ -66,7 +66,7 @@ exception noted below.
 - The one scoped exception: `setup ssh-alias status <alias>` echoes that alias's own
   `host`/`user`/`port` (plus `hasKey`) back in `data` — not new exposure, since the caller
   already supplied those same values to `register` in the first place. `setup ssh-alias
-  list` stays name-only, and every other command in the tool, including all 10 registry
+  list` stays name-only, and every other command in the tool, including all 11 registry
   groups, still returns only the alias/target/recipe name.
 - ssh's own stderr is discarded entirely (never surfaced, never logged) — it's classified
   into a small error enum instead, because OpenSSH's stderr phrasing varies by
@@ -105,7 +105,7 @@ sshepherd <group> <action> [positionals...] [--flag value]
 ```
 
 ```bash
-sshepherd --help                # lists 10 registry groups + the setup group
+sshepherd --help                # lists 11 registry groups + the setup group
 sshepherd <group> --help        # lists that group's actions + args/flags
 sshepherd <group> <action> --help   # shows one action's args
 ```
@@ -118,6 +118,7 @@ The **first positional** differs by group:
 | `deploy` (all actions) | `<recipe>` — a recipe name | `recipes.ts` |
 | `hosts list`, `db list` | *(none — host-local, no ssh)* | — |
 | `tunnel list`, `tunnel close` | *(none — `list` is host-local; `close` takes `<id>` instead)* | — |
+| `audit tail` | *(none — reads the local audit log, no ssh)* | — |
 | every other group | `<alias>` — an ssh alias from `~/.ssh/config` | — |
 
 ## Global flags
@@ -127,6 +128,9 @@ The **first positional** differs by group:
 | `--yes` | confirm a mutating op — required; sshepherd never prompts interactively |
 | `--dry-run` | `deploy run` only: print the resolved plan, execute nothing, no `--yes` needed |
 | `--timeout <sec>` | any op: seconds the remote command may run, 1-3600 (each op has its own default); out of range returns `INVALID_ARGS` |
+| `--max-bytes <n>` | any op: the printed JSON never exceeds n bytes, 8192-2097152 (default 65536); a cut sets `output_truncated: true` and keeps `error` whole |
+| `--fields <a,b.c>` | any op: keep only these dot paths of `data` (a leading `data.` is optional; a list is walked per item); paths that matched nothing come back in `fields_unmatched` |
+| `--limit <n>` | any op: keep the first n items of `data`, or of each list directly under it (1-100000) |
 | `--pretty` | render a human table/key-value view instead of JSON |
 | `--reveal <keys>` | `files cat`/`files download`: comma-separated env-var keys to unmask |
 | `--from <path>` | `config put` only: local file to read + base64-encode (instead of typing `--content-base64` by hand) |
@@ -141,11 +145,15 @@ PEM private keys, the password in `scheme://user:pass@` and `Bearer` tokens beco
 failed (any exit but ssh's own 255) carries `error.stderr_tail` — its last 20 lines / 2 KB of
 stderr, scrubbed (not for `files cat`/`config get`); `db` ops add `error.data.sql_error`
 `{message, detail?, hint?}` from psql's `ERROR:` lines, with the target's user/database masked.
+Every envelope carries `schema_version: 1` (fields are only ever added within a version); the JSON
+Schema of the envelope and of each op is under `docs/schema/`. The audit log (`audit tail`) records
+every mutating op and every op that exposes content: `args_sha256` of the args (never the values),
+the recipe/target/container/unit name, `duration_ms`, `remote_exit`, `error_code` and `bytes`.
 Exit codes: `0` success, `1` the op ran and failed (transport/command error, or a refused
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 10 registry-driven groups (56 ops) + 1 `setup` group (6 sub-groups, 12 actions)
+## Quick reference — 11 registry-driven groups (57 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
@@ -224,6 +232,9 @@ sshepherd security fail2ban web-01
 sshepherd tunnel open web-01 --kind local --remote localhost:5432 --duration 1800 --yes
 sshepherd tunnel list
 sshepherd tunnel close t-a1b2c3d4 --yes
+
+# audit
+sshepherd audit tail --n 20 --op "deploy run" --alias web-01
 
 # setup — agent-invocable; install's credential boundary is the one exception (see Gotchas #9)
 sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes

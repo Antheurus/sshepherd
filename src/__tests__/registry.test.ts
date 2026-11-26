@@ -37,6 +37,7 @@ function connectedRunOutcomes(stdout: string): SpawnOutcome[] {
 describe('registry — getOp/listOps', () => {
   const READ_ONLY: Array<[string, string]> = [
     ['hosts', 'list'],
+    ['audit', 'tail'],
     ['hosts', 'test'],
     ['hosts', 'info'],
     ['check', 'overview'],

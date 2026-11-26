@@ -23,6 +23,8 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   UNKNOWN_SUBGROUP: 'Unknown group or action',
   CONFIG_PARSE_ERROR: 'A sshepherd config file could not be parsed',
   AUDIT_WRITE_FAILED: 'The op finished but its audit line could not be written',
+  OUTPUT_TOO_LARGE:
+    'The command printed more than sshepherd reads and its output could not be parsed',
   INTERNAL_ERROR: 'sshepherd failed while running the op',
 };
 
@@ -92,6 +94,10 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
   },
   AUDIT_WRITE_FAILED: {
     hint: 'The op already finished (op_outcome) and is missing from the audit log; point SSHEPHERD_STATE_DIR or SSHEPHERD_AUDIT_PATH at a writable directory before the next mutating op, and do not re-run this one just to record it.',
+    retryable: false,
+  },
+  OUTPUT_TOO_LARGE: {
+    hint: 'The output passed the read ceiling before it was complete; ask for less (a smaller --tail, a WHERE or LIMIT in the query) and run again.',
     retryable: false,
   },
   INTERNAL_ERROR: {
