@@ -29,16 +29,17 @@ export const REVEAL_DENYLIST_PATTERNS: RegExp[] = [
 const SECRET_NAME_FRAGMENTS = ['SECRET', 'TOKEN', 'PASSWORD', 'PASSWD', 'PASSPHRASE', 'CREDENTIAL'];
 const SECRET_NAME_ENDINGS = ['PASS', 'DSN'];
 const SECRET_NAME_SEGMENTS = new Set(SECRET_NAME_ENDINGS);
-/** A last name segment joined without a separator (`privkey`, `ssl_privkey`, `LICENSEKEY`): only
- *  these prefixes before `KEY` make it secret, so `monkey`, `turkey`, `hockey` and `key` stay visible. */
+/** A last name segment joined without a separator (`privkey`, `TS_AUTHKEY`, `LICENSEKEY`): it is
+ *  secret when the word right before `KEY` is a secret-ish one, so `monkey`, `turkey`, `hockey`,
+ *  `whiskey` and `key` stay visible. `PASS` covers tracker `passkey`s, which are credentials. */
 const JOINED_SECRET_KEY =
-  /(?:PRIV|PRIVATE|MASTER|SIGNING|STRIPE|APP|LICENSE|API|SECRET|ENCRYPTION|ACCESS)KEY$/;
+  /(?:PRIV|PRIVATE|MASTER|SIGNING|STRIPE|APP|LICENSE|API|SECRET|ENCRYPTION|ACCESS|AUTH|JWT|HMAC|SESSION|CRYPT|PRESHARED|CLIENT|DEPLOY|SSH|WEBHOOK|PASS)KEY$/;
 
 /** A key name whose value is a secret: the reveal denylist, a name containing a secret word,
  *  a name ending in (or having a `_`/`.`/`-` segment equal to) PASS/DSN, a `_PWD`/`_PW` name, a
- *  camelCase `...Key`, a last segment ending in a joined `<prefix>key`, or a KEY segment in a name
- *  of two or more segments. A bare `key`, `url`, `APP_URL` or `monkey` is not: a URL's credentials
- *  are masked by its shape, not its name.
+ *  camelCase `...Key`/`...Salt`, a last segment ending in a joined `<prefix>key` or equal to SALT,
+ *  or a KEY segment in a name of two or more segments. A bare `key`, `url`, `APP_URL` or `monkey`
+ *  is not: a URL's credentials are masked by its shape, not its name.
  *  `PORT`, `NODE_ENV` and `DB_HOST` are not — a host is not a secret by default. */
 export function isSecretKey(name: string): boolean {
   if (REVEAL_DENYLIST_PATTERNS.some((pattern) => pattern.test(name))) {
@@ -48,15 +49,17 @@ export function isSecretKey(name: string): boolean {
   if (SECRET_NAME_FRAGMENTS.some((fragment) => upper.includes(fragment))) {
     return true;
   }
-  if (/[_.-]PWD?$/i.test(name) || /[a-z0-9]Key$/.test(name)) {
+  if (/[_.-]PWD?$/i.test(name) || /[a-z0-9](?:Key|Salt)$/.test(name)) {
     return true;
   }
   if (SECRET_NAME_ENDINGS.some((ending) => upper.endsWith(ending))) {
     return true;
   }
   const segments = upper.split(/[_.-]/);
+  const last = segments[segments.length - 1] ?? '';
   return (
-    JOINED_SECRET_KEY.test(segments[segments.length - 1] ?? '') ||
+    JOINED_SECRET_KEY.test(last) ||
+    last === 'SALT' ||
     segments.some((segment) => SECRET_NAME_SEGMENTS.has(segment)) ||
     (segments.length > 1 && segments.includes('KEY'))
   );
@@ -121,9 +124,11 @@ const KEYED_CALL_ARG = new RegExp(
   'g',
 );
 
-/** The same pair anywhere in a line (`... password=x&user=y`, `{"token":"x"}`, `--secret=x`). */
+/** The same pair anywhere in a line (`... password=x&user=y`, `{"token":"x"}`, `--secret=x`), and a
+ *  hash-rocket pair (`'password' => 'x'`, `:password=>'x'`) whose value is a quoted or numeric
+ *  literal — an arrow function `token => token.trim()` is code, not a secret. */
 const KEYED_INLINE = new RegExp(
-  String.raw`${RUN_START}(["']?)(-*${RUN_KEY_NAME})\1([ \t]*[=:][ \t]*)("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s"',;&<>)}\]]+)`,
+  String.raw`${RUN_START}(["']?)(-*${RUN_KEY_NAME})\1([ \t]*(?:=>[ \t]*(?=["'\d])|[=:][ \t]*))("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s"',;&<>)}\]]+)`,
   'g',
 );
 
@@ -151,8 +156,13 @@ const PEM_BEGIN_MARKER = new RegExp(`-----BEGIN ${PEM_LABEL}-----`, 'g');
 
 /** How far a URL's password may run looking for the last `@` before the host: a bound keeps the
  *  rule linear on a long run with many `scheme://user:` starts and no `@`. 512 chars is far past
- *  any real password in a connection string. */
+ *  any real password in a connection string. The password never runs across another `://` (a URL
+ *  in the query string) and never starts with a port (`localhost:3000/api?email=a@b` has no userinfo). */
 const MAX_URL_PASSWORD_CHARS = 512;
+
+/** A query parameter carrying a URL signature (Azure SAS `sig`, S3 `X-Amz-Signature`, CloudFront
+ *  `Signature`) — secret in a query string, while a `signature` key elsewhere is usually not. */
+const SIGNATURE_PARAM = /^sig$|signature$/i;
 
 /** Private-key PEM blocks, in one pass over the markers instead of a regex rescanning to the end
  *  of the text from every BEGIN (quadratic: 375 KB of BEGIN lines took 4 s). A BEGIN with a later
@@ -236,7 +246,7 @@ const SHAPE_RULES: ShapeRule[] = [
   },
   {
     pattern: new RegExp(
-      String.raw`\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]*:)([^\s"'<>]{1,${MAX_URL_PASSWORD_CHARS}})(@)`,
+      String.raw`\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]*:)(?!\d{1,5}[/?#])((?:(?!:\/\/)[^\s"'<>]){1,${MAX_URL_PASSWORD_CHARS}})(@)`,
       'gi',
     ),
     replace: (_m, head = '', _password, at = '') => `${head}${MASK}${at}`,
@@ -244,7 +254,9 @@ const SHAPE_RULES: ShapeRule[] = [
   {
     pattern: /([?&])([\w.-]+)(=)([^&#\s"'<>]+)/g,
     replace: (m, lead = '', key = '', eq = '', value = '') =>
-      isSecretKey(key) && !isMasked(value) ? `${lead}${key}${eq}${MASK}` : m,
+      (isSecretKey(key) || SIGNATURE_PARAM.test(key)) && !isMasked(value)
+        ? `${lead}${key}${eq}${MASK}`
+        : m,
   },
   {
     pattern:
@@ -458,11 +470,43 @@ export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
 
 const PEM_BEGIN_LINE = new RegExp(`-----BEGIN ${PEM_LABEL}-----`);
 const PEM_END_LINE = new RegExp(`-----END ${PEM_LABEL}-----`);
+/** Only quotes and separators (after escaped `\n`s and whitespace are dropped) — what sits around
+ *  a marker that is the whole line (`-----END ...-----"`, a YAML `key: "-----BEGIN ...-----`). */
+const PEM_MARKER_EDGE = /^["',;)}\]]*$/;
+const PEM_BODY_CHUNK = /^[A-Za-z0-9+/=]{16}$/;
+
+const bareSide = (text: string): string => text.replaceAll('\\n', ' ').trim();
+
+/** A BEGIN opens a block only when nothing but edge characters follow it, or a base64 body does:
+ *  `note: expected -----BEGIN RSA PRIVATE KEY----- header` is prose about a key. */
+function opensPemBlock(line: string): boolean {
+  const begin = PEM_BEGIN_LINE.exec(line);
+  if (!begin) {
+    return false;
+  }
+  const after = bareSide(line.slice(begin.index + begin[0].length));
+  return PEM_MARKER_EDGE.test(after) || PEM_BODY_CHUNK.test(after.slice(0, 16));
+}
+
+/** An END closes a body whose BEGIN was cut off only when the marker is the whole line, or ends a
+ *  base64 body on it: `must end with -----END RSA PRIVATE KEY-----` is prose about a key. */
+function isLonePemEnd(line: string): boolean {
+  const end = PEM_END_LINE.exec(line);
+  if (!end) {
+    return false;
+  }
+  const before = bareSide(line.slice(0, end.index));
+  const after = bareSide(line.slice(end.index + end[0].length));
+  return (
+    PEM_MARKER_EDGE.test(after) &&
+    (PEM_MARKER_EDGE.test(before) || PEM_BODY_CHUNK.test(before.slice(-16)))
+  );
+}
 
 /** For output already split into lines (`files tail`, `logs *`), where no single string holds
  *  both ends of a PEM block: every line between a private-key BEGIN and its END is masked, and a
  *  lone END (its BEGIN cut off by `-n`) masks every line before it since the output start or the
- *  previous END. */
+ *  previous END. A line that only mentions a marker in prose does neither. */
 export function maskPemLines(lines: readonly string[]): string[] {
   const out = [...lines];
   let inside = false;
@@ -479,12 +523,12 @@ export function maskPemLines(lines: readonly string[]): string[] {
       }
       continue;
     }
-    if (PEM_BEGIN_LINE.test(line)) {
+    if (opensPemBlock(line)) {
       inside = !isEnd;
       bodyStart = i + 1;
       continue;
     }
-    if (isEnd) {
+    if (isLonePemEnd(line)) {
       for (let j = bodyStart; j < i; j += 1) {
         out[j] = MASK;
       }
