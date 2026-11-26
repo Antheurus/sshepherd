@@ -1,3 +1,5 @@
+import type { TransportDeps } from './transport.ts';
+
 /**
  * Shared contract for the transport, output, and (later) registry layers.
  *
@@ -25,7 +27,8 @@ export type SshErrorCode =
   | 'COMMAND_FAILED'
   | 'COMMAND_TIMEOUT'
   | 'CONFIRMATION_REQUIRED'
-  | 'VALIDATION_ERROR';
+  | 'VALIDATION_ERROR'
+  | 'INVALID_ARGS';
 
 /**
  * `message` is always a static human string looked up by `code`, never raw ssh
@@ -35,6 +38,14 @@ export interface ErrorInfo {
   code: SshErrorCode;
   message: string;
   remote_exit?: number;
+  /** Timeout errors only: where the clock ran out — opening the connection or running the command. */
+  phase?: 'connect' | 'command';
+  /** Timeout errors only: the limit that expired, in seconds (ConnectTimeout, or the command budget). */
+  timeout_sec?: number;
+  /** `COMMAND_TIMEOUT` only: the `--timeout` budget the command was given. */
+  budget_sec?: number;
+  /** Timeout errors only: wall time spent in that phase before it was cut off. */
+  elapsed_ms?: number;
 }
 
 /**
@@ -115,7 +126,7 @@ export interface OpSpec<T = unknown> {
    *  step failed. Reads `raw.stdout` only, never `transportStderr`/`commandStderr`.
    *  Returns `undefined` when nothing to add, in which case `data` stays `null`. */
   shapeError?: (raw: RawResult, ctx: OpContext) => Record<string, unknown> | undefined;
-  runLocal?: (ctx: OpContext, sshConfigPath: string) => T;
+  runLocal?: (ctx: OpContext, sshConfigPath: string, transport?: TransportDeps) => T | Promise<T>;
   /** Optional: one or more allowlist gates `executeOp` enforces before `buildRemote`. */
   allowlist?: AllowlistPolicy[];
 }

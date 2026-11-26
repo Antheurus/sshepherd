@@ -1,4 +1,4 @@
-import { DEFAULT_TIMEOUT_SEC } from '../op-args.ts';
+import { CHECK_TIMEOUT_SEC } from '../limits.ts';
 import { parseDf, parseDfInodes } from '../parsers/df.ts';
 import { parseDmesgOom } from '../parsers/dmesg-oom.ts';
 import { parseDu } from '../parsers/du.ts';
@@ -32,7 +32,7 @@ const checkOverview: OpSpec<CheckOverviewResult> = {
   summary: 'Bundled survival denominators: nproc/mem/disk/uptime/PSI + a dead_end_risk verdict.',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
     shellJoin([
@@ -82,7 +82,7 @@ const checkMem: OpSpec<CheckMemResult> = {
   summary: 'Memory usage + PSI pressure with a dead_end_risk verdict.',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
     shellJoin([
@@ -122,7 +122,7 @@ const checkDisk: OpSpec<CheckDiskResult> = {
   summary: 'Disk usage + inodes + top space consumers with a dead_end_risk verdict.',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
     shellJoin([
@@ -164,7 +164,7 @@ const checkCpu: OpSpec<CheckCpuResult> = {
   summary: 'Load average vs core count + top CPU processes.',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
     shellJoin([
@@ -200,7 +200,7 @@ const checkPorts: OpSpec<CheckPortsResult> = {
   summary: 'Listening TCP ports (ss -tlnp), structured — never a raw address string.',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: CHECK_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: () => shellJoin(['ss', '-H', '-tlnp']),
   shape: (parsed) => ({ listening: parseSs(parsed as string) }),
@@ -216,7 +216,7 @@ const checkOomHistory: OpSpec<CheckOomHistoryResult> = {
   summary: 'Kernel OOM-killer events from dmesg (per-container OOM lives in services ps).',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: CHECK_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: () =>
     shellJoin(['sh', '-c', 'dmesg -T 2>/dev/null | grep -i "killed process" || true']),
@@ -236,7 +236,7 @@ const checkKernel: OpSpec<CheckKernelResult> = {
   summary: 'swappiness/overcommit_memory/file-max + cgroup swapaccount cmdline flag.',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
     shellJoin([

@@ -1,9 +1,7 @@
 import type { PortMapping } from './parsers/docker-ports.ts';
 import type { ArgSpec, OpContext } from './types.ts';
 
-export const DEFAULT_TIMEOUT_SEC = 12;
-export const LOG_TIMEOUT_SEC = 20;
-export const FILE_TIMEOUT_SEC = 25;
+export { DEFAULT_TIMEOUT_SEC, FILE_TIMEOUT_SEC, LOG_TIMEOUT_SEC } from './limits.ts';
 export const DEFAULT_LOG_TAIL = 200;
 export const FILE_CAT_MAX_BYTES = 1_048_576; // 1 MiB
 

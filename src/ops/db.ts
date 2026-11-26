@@ -7,11 +7,10 @@ import {
   wrapAsJsonAgg,
   wrapReadOnlyTxn,
 } from '../db.ts';
+import { DB_TIMEOUT_SEC } from '../limits.ts';
 import { arg, optStr, readRecord, reqStr } from '../op-args.ts';
 import { defaultTargetsPath, loadTargets } from '../targets.ts';
 import type { OpContext, OpSpec } from '../types.ts';
-
-const DB_TIMEOUT_SEC = 20;
 
 // ---------------------------------------------------------------------------
 // db

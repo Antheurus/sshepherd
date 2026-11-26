@@ -76,6 +76,7 @@ describe('registry — getOp/listOps', () => {
     ['security', 'authorized-keys'],
     ['security', 'fail2ban'],
     ['tunnel', 'list'],
+    ['hosts', 'disconnect'],
   ];
 
   const MUTATING: Array<[string, string]> = [
@@ -972,8 +973,8 @@ describe('executeOp — mutating gate: the ONE path every mutating op goes throu
       };
       await executeOp(
         op,
-        { alias: 'lms-server', args: { recipe: 'demo', timeout: '900', yes: true } },
-        { transport: { runner }, auditLogPath, yes: true },
+        { alias: 'lms-server', args: { recipe: 'demo', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true, timeoutSec: 900 },
       );
 
       // Last call is the actual command run, wrapped as `timeout <sec> ...` — its
@@ -1028,8 +1029,8 @@ describe('executeOp — mutating gate: the ONE path every mutating op goes throu
       };
       await executeOp(
         op,
-        { alias: 'lms-server', args: { recipe: 'demo', timeout: '999999', yes: true } },
-        { transport: { runner }, auditLogPath, yes: true },
+        { alias: 'lms-server', args: { recipe: 'demo', yes: true } },
+        { transport: { runner }, auditLogPath, yes: true, timeoutSec: 999999 },
       );
 
       const lastTimeout = seenTimeouts[seenTimeouts.length - 1];

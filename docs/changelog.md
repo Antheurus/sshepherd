@@ -1,5 +1,12 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.2 — Faster repeated calls and clearer timeouts
+
+- Repeated calls to the same server now reuse one SSH connection for 5 idle minutes instead of reconnecting each time. `sshepherd hosts disconnect <alias>` (or `--all`) closes it on demand, for example after you change `~/.ssh/config`.
+- Every op accepts `--timeout <seconds>` (1 to 3600). A value outside that range returns an `INVALID_ARGS` error without touching the server. Defaults changed per op: check 30 s, services 20 s, db 60 s, `hosts test` 10 s.
+- A server that cannot be reached now reports `CONNECT_TIMEOUT` or `AUTH_FAILED` straight away. A command that runs out of time reports `COMMAND_TIMEOUT` with the budget it had, how long it ran, and whatever it had printed so far.
+- `--yes`, `--dry-run` and `--pretty` no longer swallow the argument after them (`deploy run --yes demo` now works), and `--` ends flag parsing.
+
 ## v0.4.0-rc.1 — internal: registry split by group
 
 - Internal change, no user-visible effect.

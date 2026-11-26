@@ -121,6 +121,7 @@ The **first positional** differs by group:
 |---|---|
 | `--yes` | confirm a mutating op — required; sshepherd never prompts interactively |
 | `--dry-run` | `deploy run` only: print the resolved plan, execute nothing, no `--yes` needed |
+| `--timeout <sec>` | any op: seconds the remote command may run, 1-3600 (each op has its own default); out of range returns `INVALID_ARGS` |
 | `--pretty` | render a human table/key-value view instead of JSON |
 | `--reveal <keys>` | `files cat` only: comma-separated env-var keys to unmask |
 | `--from <path>` | `config put` only: local file to read + base64-encode (instead of typing `--content-base64` by hand) |
@@ -130,13 +131,14 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 10 registry-driven groups (55 ops) + 1 `setup` group (6 sub-groups, 12 actions)
+## Quick reference — 10 registry-driven groups (56 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
 sshepherd hosts list
 sshepherd hosts test web-01
 sshepherd hosts info web-01
+sshepherd hosts disconnect web-01   # or --all; connections self-close after 5 idle minutes
 
 # check
 sshepherd check overview web-01
@@ -351,7 +353,8 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `HOST_KEY_MISMATCH` | the remote host key doesn't match the known-hosts entry |
 | `SSH_TRANSPORT_ERROR` | ssh failed before the remote command could run, unclassified |
 | `COMMAND_FAILED` | the remote command exited non-zero (`error.remote_exit` carries the code) |
-| `COMMAND_TIMEOUT` | the remote command exceeded its timeout |
+| `COMMAND_TIMEOUT` | the remote command exceeded its timeout (`error.budget_sec`, `error.elapsed_ms`; `data.partial_stdout` holds what it printed) |
+| `INVALID_ARGS` | a global flag was malformed or out of range (e.g. `--timeout 9999`) |
 | `CONFIRMATION_REQUIRED` | a mutating op ran without `--yes` — refused before any ssh call |
 
 Exit codes: `0` on `ok: true`; `1` when the envelope's `ok` is `false` (any code above);

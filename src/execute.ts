@@ -1,36 +1,33 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { auditMutating, confirmGate } from './audit.ts';
+import { MAX_PARTIAL_STDOUT_CHARS, MAX_TIMEOUT_SEC } from './limits.ts';
 import { optBool } from './op-args.ts';
 import { enforceAllowlist } from './ops/config.ts';
 import { buildEnvelope, splitNdjson } from './output.ts';
 import { errorInfo, run, type TransportDeps } from './transport.ts';
 import {
   type Envelope,
+  type ErrorInfo,
   type OpContext,
   OpRunLocalError,
   type OpSpec,
   type OutputMode,
 } from './types.ts';
 
-/** Ceiling for any `--timeout` override — generous enough for a genuinely slow one-off
- *  migration/build, low enough that a typo (`--timeout 9999999999`) can't wedge a
- *  session open indefinitely. */
-const MAX_TIMEOUT_OVERRIDE_SEC = 3_600;
+/** `op.timeoutSec` is the per-op default; the CLI's global `--timeout` arrives as
+ *  `deps.timeoutSec` and applies to every op, bounded by the shared ceiling. */
+function effectiveTimeoutSec(op: OpSpec, deps: ExecuteDeps): number {
+  return Math.min(deps.timeoutSec ?? op.timeoutSec, MAX_TIMEOUT_SEC);
+}
 
-/** `op.timeoutSec` is the static per-op default; ops that declare a `timeout` ArgSpec
- *  (currently `deploy run`/`deploy migrate`) let the caller raise it for a known-slow
- *  step instead of retrying blind against the same fixed budget every time. */
-function effectiveTimeoutSec(op: OpSpec, ctx: OpContext): number {
-  const raw = ctx.args.timeout;
-  if (typeof raw !== 'string') {
-    return op.timeoutSec;
+/** A timed-out command's stdout so far is still the legitimate payload — return it
+ *  (capped) so a "almost done" step is visible instead of lost. */
+function partialStdout(error: ErrorInfo, stdout: string): Record<string, unknown> | undefined {
+  if (error.code !== 'COMMAND_TIMEOUT' || stdout.length === 0) {
+    return undefined;
   }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return op.timeoutSec;
-  }
-  return Math.min(parsed, MAX_TIMEOUT_OVERRIDE_SEC);
+  return { partial_stdout: stdout.slice(0, MAX_PARTIAL_STDOUT_CHARS) };
 }
 
 export interface ExecuteDeps {
@@ -38,6 +35,8 @@ export interface ExecuteDeps {
   sshConfigPath?: string;
   /** Confirms a mutating op — the CLI (Phase 6) sets this after `--yes` or an interactive prompt. */
   yes?: boolean;
+  /** The CLI's `--timeout <sec>`: replaces the op's default budget. */
+  timeoutSec?: number;
   /** Overrides `auditMutating`'s log path — tests point this at a temp file. */
   auditLogPath?: string;
 }
@@ -112,7 +111,7 @@ export async function executeOp(
     const sshConfigPath = deps.sshConfigPath ?? join(homedir(), '.ssh', 'config');
     let data: unknown;
     try {
-      data = op.runLocal(ctx, sshConfigPath);
+      data = await op.runLocal(ctx, sshConfigPath, deps.transport);
     } catch (err) {
       if (err instanceof OpRunLocalError) {
         if (requiresConfirm) {
@@ -135,7 +134,7 @@ export async function executeOp(
     return envelope;
   }
 
-  const result = await run(ctx.alias, remoteCmd, effectiveTimeoutSec(op, ctx), deps.transport);
+  const result = await run(ctx.alias, remoteCmd, effectiveTimeoutSec(op, deps), deps.transport);
   if (result.error) {
     if (requiresConfirm) {
       auditFor(deps, ctx.alias, command, ctx, 'error');
@@ -144,7 +143,8 @@ export async function executeOp(
       alias: ctx.alias,
       command,
       startedAtMs,
-      data: op.shapeError?.(result.raw, ctx) ?? null,
+      data:
+        op.shapeError?.(result.raw, ctx) ?? partialStdout(result.error, result.raw.stdout) ?? null,
       error: result.error,
     });
   }

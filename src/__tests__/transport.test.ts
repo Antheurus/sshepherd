@@ -1,6 +1,17 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildEnvelope } from '../output.ts';
-import { classify, run, type SpawnOutcome, type SshRunner } from '../transport.ts';
+import { executeOp, getOp } from '../registry.ts';
+import {
+  classify,
+  closeAllMasters,
+  closeMaster,
+  run,
+  type SpawnOutcome,
+  type SshRunner,
+} from '../transport.ts';
 import type { RawResult } from '../types.ts';
 
 /** Scripted runner: returns queued outcomes in call order, last one repeats if exhausted. */
@@ -148,7 +159,7 @@ describe('run — keepalive and kill-escalation (fixes the idle-drop / orphaned-
     expect(commandCall).toContain('ServerAliveCountMax=4');
   });
 
-  test('the remote command is wrapped in `timeout --kill-after=10 <sec>` so a hung local wrapper is force-killed', async () => {
+  test('the remote command is wrapped in `timeout -k 10 <sec>` (the short form busybox also accepts) so a hung wrapper is force-killed', async () => {
     let commandArgs: string[] = [];
     const runner: SshRunner = async (args) => {
       if (args.includes('timeout')) {
@@ -161,8 +172,9 @@ describe('run — keepalive and kill-escalation (fixes the idle-drop / orphaned-
 
     const timeoutIndex = commandArgs.indexOf('timeout');
     expect(timeoutIndex).toBeGreaterThanOrEqual(0);
-    expect(commandArgs[timeoutIndex + 1]).toBe('--kill-after=10');
-    expect(commandArgs[timeoutIndex + 2]).toBe('45');
+    expect(commandArgs[timeoutIndex + 1]).toBe('-k');
+    expect(commandArgs[timeoutIndex + 2]).toBe('10');
+    expect(commandArgs[timeoutIndex + 3]).toBe('45');
   });
 });
 
@@ -183,15 +195,13 @@ describe('run — end to end with a fake runner', () => {
   test('AUTH_FAILED path never leaks its transportStderr text into the raw stdout field', async () => {
     const runner = scriptedRunner([
       { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
-      { code: 1, stdout: '', stderr: '', timedOut: false }, // -O check fails (no master yet)
-      { code: 1, stdout: '', stderr: '', timedOut: false }, // -O exit (stale cleanup, ignored)
-      { code: 255, stdout: '', stderr: '', timedOut: false }, // -M -N -f open fails
+      { code: 255, stdout: '', stderr: 'No such file or directory', timedOut: false }, // -O check: no master yet
       {
         code: 255,
         stdout: '',
         stderr: 'Permission denied (publickey) for 10.0.0.9',
         timedOut: false,
-      }, // actual run attempt over the (unopened) master
+      }, // -M -N -f open fails; the command never runs
     ]);
 
     const result = await run('lms-server', 'echo hi', 10, { runner });
@@ -206,15 +216,13 @@ describe('hygiene invariant — transport stderr never reaches the envelope', ()
     const leakyIp = '203.0.113.42';
     const runner = scriptedRunner([
       { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
-      { code: 1, stdout: '', stderr: '', timedOut: false }, // -O check fails
-      { code: 1, stdout: '', stderr: '', timedOut: false }, // -O exit cleanup
-      { code: 255, stdout: '', stderr: '', timedOut: false }, // master open fails
+      { code: 255, stdout: '', stderr: 'No such file or directory', timedOut: false }, // -O check fails
       {
         code: 255,
         stdout: '',
         stderr: `ssh: connect to host ${leakyIp} port 22: Connection timed out`,
         timedOut: false,
-      },
+      }, // master open fails
     ]);
 
     const startedAtMs = Date.now();
@@ -291,5 +299,272 @@ describe('hygiene invariant — transport stderr never reaches the envelope', ()
 
     expect(result.error).toBeNull();
     expect(result.raw.stdout).toContain(remoteIp);
+  });
+});
+
+/** Stateful fake: a master opened once stays up, as a ControlPersist master does across
+ *  separate sshepherd invocations. */
+function persistentMasterRunner(): { runner: SshRunner; calls: string[][]; opens: () => number } {
+  const calls: string[][] = [];
+  let masterUp = false;
+  let opens = 0;
+  const runner: SshRunner = async (args) => {
+    calls.push(args);
+    if (args.includes('-G')) {
+      return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+    }
+    if (args.includes('check')) {
+      return masterUp
+        ? { code: 0, stdout: '', stderr: 'Master running', timedOut: false }
+        : { code: 255, stdout: '', stderr: 'No such file or directory', timedOut: false };
+    }
+    if (args.includes('-M')) {
+      masterUp = true;
+      opens += 1;
+      return { code: 0, stdout: '', stderr: '', timedOut: false };
+    }
+    return { code: 0, stdout: 'ok', stderr: '', timedOut: false };
+  };
+  return { runner, calls, opens: () => opens };
+}
+
+describe('run — one ControlMaster reused across invocations', () => {
+  test('two sequential run() calls open at most one master', async () => {
+    const fake = persistentMasterRunner();
+
+    const first = await run('web-a', 'echo one', 10, { runner: fake.runner });
+    const second = await run('web-a', 'echo two', 10, { runner: fake.runner });
+
+    expect(first.error).toBeNull();
+    expect(second.error).toBeNull();
+    expect(fake.opens()).toBe(1);
+  });
+
+  test('the master persists 300 s past the last use and the socket name is a 16-char sha256 prefix under 100 chars', async () => {
+    const fake = persistentMasterRunner();
+
+    await run('web-a', 'echo one', 10, { runner: fake.runner });
+
+    const open = fake.calls.find((args) => args.includes('-M'));
+    expect(open).toContain('ControlPersist=300');
+    expect(open).toContain('ConnectTimeout=10');
+    const controlPath = (open?.find((arg) => arg.startsWith('ControlPath=')) ?? '').slice(
+      'ControlPath='.length,
+    );
+    expect(controlPath.length).toBeLessThan(100);
+    expect(controlPath).toMatch(/\/[0-9a-f]{16}\.sock$/);
+  });
+
+  test('the command call carries ConnectTimeout=10 so a lapsed master fails fast, not after the OS default', async () => {
+    const fake = persistentMasterRunner();
+
+    await run('web-a', 'echo one', 10, { runner: fake.runner });
+
+    const commandCall = fake.calls[fake.calls.length - 1];
+    expect(commandCall).toContain('ConnectTimeout=10');
+  });
+
+  test('`-O exit` runs only when `-O check` reports a stale socket (Connection refused)', async () => {
+    const calls: string[][] = [];
+    const makeRunner = (checkStderr: string): SshRunner => {
+      return async (args) => {
+        calls.push(args);
+        if (args.includes('check')) {
+          return { code: 255, stdout: '', stderr: checkStderr, timedOut: false };
+        }
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+    };
+
+    await run('web-a', 'echo hi', 10, { runner: makeRunner('No such file or directory') });
+    expect(calls.some((args) => args.includes('exit'))).toBe(false);
+
+    calls.length = 0;
+    await run('web-a', 'echo hi', 10, {
+      runner: makeRunner('Control socket connect: Connection refused'),
+    });
+    expect(calls.some((args) => args.includes('exit'))).toBe(true);
+  });
+});
+
+describe('run — connect failures and remote timeouts are classified', () => {
+  test('master-open 255 "Connection timed out" -> CONNECT_TIMEOUT (phase connect), command never runs', async () => {
+    const calls: string[][] = [];
+    const runner: SshRunner = async (args) => {
+      calls.push(args);
+      if (args.includes('-G')) {
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      }
+      if (args.includes('check')) {
+        return { code: 255, stdout: '', stderr: 'No such file or directory', timedOut: false };
+      }
+      return {
+        code: 255,
+        stdout: '',
+        stderr: 'ssh: connect to host 10.0.0.9 port 22: Connection timed out',
+        timedOut: false,
+      };
+    };
+
+    const result = await run('web-a', 'echo hi', 10, { runner });
+
+    expect(result.error?.code).toBe('CONNECT_TIMEOUT');
+    expect(result.error?.phase).toBe('connect');
+    expect(result.error?.timeout_sec).toBe(10);
+    expect(typeof result.error?.elapsed_ms).toBe('number');
+    expect(calls.some((args) => args.includes('timeout'))).toBe(false);
+  });
+
+  test('master-open killed locally (timedOut) -> CONNECT_TIMEOUT, not COMMAND_TIMEOUT', async () => {
+    const runner: SshRunner = async (args) => {
+      if (args.includes('-G')) {
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      }
+      if (args.includes('check')) {
+        return { code: 255, stdout: '', stderr: '', timedOut: false };
+      }
+      return { code: -1, stdout: '', stderr: '', timedOut: true };
+    };
+
+    const result = await run('web-a', 'echo hi', 10, { runner });
+
+    expect(result.error?.code).toBe('CONNECT_TIMEOUT');
+    expect(result.error?.phase).toBe('connect');
+  });
+
+  test('master-open 255 "Permission denied" -> AUTH_FAILED', async () => {
+    const runner: SshRunner = async (args) => {
+      if (args.includes('-G')) {
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      }
+      if (args.includes('check')) {
+        return { code: 255, stdout: '', stderr: '', timedOut: false };
+      }
+      return { code: 255, stdout: '', stderr: 'Permission denied (publickey).', timedOut: false };
+    };
+
+    const result = await run('web-a', 'echo hi', 10, { runner });
+
+    expect(result.error?.code).toBe('AUTH_FAILED');
+  });
+
+  for (const exitCode of [124, 137]) {
+    test(`remote exit ${exitCode} -> COMMAND_TIMEOUT carrying budget_sec, phase and the partial stdout`, async () => {
+      const runner: SshRunner = async (args) => {
+        if (args.includes('timeout')) {
+          return { code: exitCode, stdout: 'half-done\n', stderr: 'Terminated', timedOut: false };
+        }
+        return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+      };
+
+      const result = await run('web-a', 'slow-thing', 45, { runner });
+
+      expect(result.error?.code).toBe('COMMAND_TIMEOUT');
+      expect(result.error?.budget_sec).toBe(45);
+      expect(result.error?.timeout_sec).toBe(45);
+      expect(result.error?.phase).toBe('command');
+      expect(typeof result.error?.elapsed_ms).toBe('number');
+      expect(result.raw.stdout).toBe('half-done\n');
+    });
+  }
+
+  test('local kill of the command (timedOut) -> COMMAND_TIMEOUT with the budget', async () => {
+    const runner: SshRunner = async (args) => {
+      if (args.includes('timeout')) {
+        return { code: -1, stdout: 'so far', stderr: '', timedOut: true };
+      }
+      return { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+    };
+
+    const result = await run('web-a', 'slow-thing', 20, { runner });
+
+    expect(result.error?.code).toBe('COMMAND_TIMEOUT');
+    expect(result.error?.budget_sec).toBe(20);
+    expect(result.raw.stdout).toBe('so far');
+  });
+});
+
+describe('hosts disconnect — closing reused masters on demand', () => {
+  test('closeMaster reports whether a master was up', async () => {
+    const up: SshRunner = async () => ({ code: 0, stdout: '', stderr: '', timedOut: false });
+    const down: SshRunner = async () => ({ code: 255, stdout: '', stderr: '', timedOut: false });
+
+    expect(await closeMaster('web-a', { runner: up })).toBe(true);
+    expect(await closeMaster('web-a', { runner: down })).toBe(false);
+  });
+
+  test('closeAllMasters sends `-O exit` to every *.sock in the socket dir and counts the live ones', async () => {
+    const saved = process.env.XDG_RUNTIME_DIR;
+    const base = mkdtempSync(join(tmpdir(), 'sshepherd-disconnect-'));
+    mkdirSync(join(base, 'sshepherd'));
+    for (const name of ['aaaa.sock', 'bbbb.sock', 'notes.txt']) {
+      writeFileSync(join(base, 'sshepherd', name), '');
+    }
+    process.env.XDG_RUNTIME_DIR = base;
+    try {
+      const paths: string[] = [];
+      const runner: SshRunner = async (args) => {
+        paths.push(args.find((arg) => arg.startsWith('ControlPath=')) ?? '');
+        const live = paths.length === 1;
+        return { code: live ? 0 : 255, stdout: '', stderr: '', timedOut: false };
+      };
+
+      const closed = await closeAllMasters({ runner });
+
+      expect(closed).toBe(1);
+      expect(paths.sort()).toEqual([
+        `ControlPath=${join(base, 'sshepherd', 'aaaa.sock')}`,
+        `ControlPath=${join(base, 'sshepherd', 'bbbb.sock')}`,
+      ]);
+    } finally {
+      if (saved === undefined) {
+        delete process.env.XDG_RUNTIME_DIR;
+      } else {
+        process.env.XDG_RUNTIME_DIR = saved;
+      }
+    }
+  });
+
+  test('the op needs an alias or --all, never both', async () => {
+    const op = getOp('hosts', 'disconnect');
+    if (!op) {
+      throw new Error('hosts disconnect op missing');
+    }
+    const runner: SshRunner = async () => ({ code: 0, stdout: '', stderr: '', timedOut: false });
+
+    const neither = await executeOp(op, { alias: '', args: {} }, { transport: { runner } });
+    const both = await executeOp(
+      op,
+      { alias: 'web-a', args: { all: true } },
+      { transport: { runner } },
+    );
+    const one = await executeOp(op, { alias: 'web-a', args: {} }, { transport: { runner } });
+
+    expect(neither.error?.code).toBe('VALIDATION_ERROR');
+    expect(both.error?.code).toBe('VALIDATION_ERROR');
+    expect(one.data).toEqual({ closed: 1 });
+  });
+});
+
+describe('executeOp — a timed-out command returns what it printed', () => {
+  test('COMMAND_TIMEOUT envelope carries data.partial_stdout and the budget', async () => {
+    const op = getOp('check', 'disk');
+    if (!op) {
+      throw new Error('check disk op missing');
+    }
+    const runner: SshRunner = async (args) =>
+      args.includes('timeout')
+        ? { code: 124, stdout: 'Filesystem\n', stderr: '', timedOut: false }
+        : { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false };
+
+    const envelope = await executeOp(
+      op,
+      { alias: 'web-a', args: {} },
+      { transport: { runner }, timeoutSec: 45 },
+    );
+
+    expect(envelope.error?.code).toBe('COMMAND_TIMEOUT');
+    expect(envelope.error?.budget_sec).toBe(45);
+    expect(envelope.data).toEqual({ partial_stdout: 'Filesystem\n' });
   });
 });

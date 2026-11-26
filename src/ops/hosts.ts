@@ -1,10 +1,12 @@
-import { DEFAULT_TIMEOUT_SEC } from '../op-args.ts';
+import { HOSTS_TEST_TIMEOUT_SEC } from '../limits.ts';
+import { arg, DEFAULT_TIMEOUT_SEC, optBool } from '../op-args.ts';
 import { parseOsRelease } from '../parsers/os-release.ts';
 import { splitSections } from '../parsers/sections.ts';
 import { listHostAliases } from '../parsers/ssh-config.ts';
 import { parseUptime } from '../parsers/uptime.ts';
 import { shellJoin } from '../quote.ts';
-import type { OpSpec } from '../types.ts';
+import { closeAllMasters, closeMaster } from '../transport.ts';
+import { OpRunLocalError, type OpSpec } from '../types.ts';
 
 // ---------------------------------------------------------------------------
 // hosts
@@ -45,7 +47,7 @@ const hostsTest: OpSpec<HostsTestResult> = {
   summary: 'Confirm the alias connects (latency is the envelope duration_ms).',
   args: [],
   mutating: false,
-  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  timeoutSec: HOSTS_TEST_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: () => shellJoin(['echo', 'sshepherd-ok']),
   shape: (parsed) => ({ reachable: (parsed as string).trim() === 'sshepherd-ok' }),
@@ -88,4 +90,40 @@ const hostsInfo: OpSpec<HostInfoResult> = {
   },
 };
 
-export const hostsOps = [hostsList, hostsTest, hostsInfo] as OpSpec[];
+interface HostsDisconnectResult {
+  closed: number;
+}
+
+const hostsDisconnect: OpSpec<HostsDisconnectResult> = {
+  group: 'hosts',
+  name: 'disconnect',
+  summary:
+    'Close the reused SSH connection for an alias, or every one with --all (they self-close after 5 idle minutes).',
+  args: [
+    arg('alias', 'positional', false, 'Alias whose connection to close.'),
+    arg('all', 'flag', false, 'Close the connection of every alias.'),
+  ],
+  mutating: false,
+  timeoutSec: DEFAULT_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: () => null,
+  shape: (parsed) => parsed as HostsDisconnectResult,
+  runLocal: async (ctx, _sshConfigPath, transport) => {
+    const all = optBool(ctx, 'all', false);
+    if (all && ctx.alias.length > 0) {
+      throw new OpRunLocalError(
+        'VALIDATION_ERROR',
+        'hosts disconnect: pass an alias or --all, not both',
+      );
+    }
+    if (all) {
+      return { closed: await closeAllMasters(transport) };
+    }
+    if (ctx.alias.length === 0) {
+      throw new OpRunLocalError('VALIDATION_ERROR', 'hosts disconnect: pass an alias or --all');
+    }
+    return { closed: (await closeMaster(ctx.alias, transport)) ? 1 : 0 };
+  },
+};
+
+export const hostsOps = [hostsList, hostsTest, hostsInfo, hostsDisconnect] as OpSpec[];

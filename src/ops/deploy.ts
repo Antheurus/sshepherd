@@ -1,3 +1,4 @@
+import { DEPLOY_TIMEOUT_SEC } from '../limits.ts';
 import {
   arg,
   type ComposePsEntry,
@@ -20,8 +21,6 @@ import {
   planRecipe,
 } from '../recipes.ts';
 import type { OpContext, OpSpec, RawResult } from '../types.ts';
-
-const DEPLOY_TIMEOUT_SEC = 300;
 
 // ---------------------------------------------------------------------------
 // deploy
@@ -49,15 +48,6 @@ const deployRun: OpSpec<DeployPlan | { output: string }> = {
       'flag',
       false,
       'Print the resolved plan; execute nothing, no confirmation needed.',
-    ),
-    arg(
-      'timeout',
-      'flag',
-      false,
-      `Override the whole-recipe timeout in seconds (default ${DEPLOY_TIMEOUT_SEC}). ` +
-        'A recipe with a known-slow step (a big SQL migration, a slow build) hits the ' +
-        'default budget as a flat SSH_TRANSPORT_ERROR/COMMAND_TIMEOUT with no signal ' +
-        "it was 'almost done' — raise this instead of retrying blind.",
     ),
   ],
   mutating: true,
@@ -132,15 +122,7 @@ const deployMigrate: OpSpec<{ output: string }> = {
   group: 'deploy',
   name: 'migrate',
   summary: 'Run only the migrate-kind steps of a recipe, in resolved order.',
-  args: [
-    arg('recipe', 'positional', true, 'Recipe name.'),
-    arg(
-      'timeout',
-      'flag',
-      false,
-      `Override the timeout in seconds (default ${DEPLOY_TIMEOUT_SEC}).`,
-    ),
-  ],
+  args: [arg('recipe', 'positional', true, 'Recipe name.')],
   mutating: true,
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   output: 'raw',

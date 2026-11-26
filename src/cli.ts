@@ -1,27 +1,30 @@
 #!/usr/bin/env bun
 
 import { readFileSync } from 'node:fs';
-import { printError, printJson, printPretty } from './output.ts';
+import { MAX_TIMEOUT_SEC } from './limits.ts';
+import { buildEnvelope, printError, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
 import { type ExecuteDeps, executeOp, getOp, listOps } from './registry.ts';
 import { runSetup } from './setup.ts';
 import { buildDbOpContext } from './targets.ts';
-import { closeMaster } from './transport.ts';
 import { runSupervisor } from './tunnel.ts';
-import type { ArgSpec, OpContext, OpSpec } from './types.ts';
+import type { ArgSpec, Envelope, OpContext, OpSpec } from './types.ts';
 
 const VERSION = '0.3.0';
 
-/** Flags declared as booleans across the registry's ArgSpecs (`ArgSpec` carries no type
- *  field, so this is the CLI's own small lookup — every other flag is a string value). */
-const BOOLEAN_FLAG_NAMES = new Set(['dry-run', 'keep-session']);
+/** Flags that never take a value: `parseArgv` must not let them swallow the next token
+ *  (`--yes r1` is a flag plus a positional), and `mapArgsToCtx` reads them as booleans.
+ *  `ArgSpec` carries no type field, so this is the CLI's own small lookup — every other
+ *  flag is a string value. */
+const BOOLEAN_FLAG_NAMES = new Set(['yes', 'dry-run', 'keep-session', 'pretty', 'help', 'all']);
 
 const GROUPS = [...new Set(listOps().map((op) => op.group))];
 
 /** First-positional convention per group — most groups take an ssh alias, `db`/`deploy`
  *  resolve a named target/recipe instead (see targets.ts/recipes.ts). */
 const GROUP_FIRST_POSITIONAL_NOTE: Record<string, string> = {
-  hosts: 'First positional (except `list`): <alias> — the ssh alias from ~/.ssh/config.',
+  hosts:
+    'First positional (except `list`, and optional for `disconnect`): <alias> — the ssh alias from ~/.ssh/config.',
   db: 'First positional (except `list`): <target> — a pg-target name declared in targets.toml.',
   deploy: 'First positional: <recipe> — a deploy recipe name (see recipes.md).',
   tunnel:
@@ -33,6 +36,7 @@ const DEFAULT_FIRST_POSITIONAL_NOTE =
 const GLOBAL_FLAGS = [
   '--yes              confirm a mutating op (required — sshepherd never prompts interactively)',
   '--dry-run          deploy run: print the resolved plan, execute nothing',
+  `--timeout <sec>    any op: seconds the remote command may run (1-${MAX_TIMEOUT_SEC}; each op has its own default)`,
   '--pretty           render a human table/key-value view instead of JSON',
   '--reveal <keys>    files cat: comma-separated env keys to unmask',
   '--from <path>      config put: local file to read + base64-encode (instead of --content-base64)',
@@ -55,11 +59,15 @@ export function parseArgv(tokens: string[]): { positionals: string[]; flags: Fla
     if (token === undefined) {
       continue;
     }
+    if (token === '--') {
+      positionals.push(...tokens.slice(index + 1));
+      break;
+    }
     if (token.startsWith('--')) {
       const name = token.slice(2);
       const next = tokens[index + 1];
       let value = 'true';
-      if (next !== undefined && !next.startsWith('--')) {
+      if (!BOOLEAN_FLAG_NAMES.has(name) && next !== undefined && !next.startsWith('--')) {
         value = next;
         index++;
       }
@@ -135,6 +143,10 @@ function buildOpContext(
 ): OpContext {
   if (group === 'hosts' && action === 'list') {
     return { alias: '', args: mapArgsToCtx(op, positionals, flags) };
+  }
+  if (group === 'hosts' && action === 'disconnect') {
+    const args = mapArgsToCtx(op, positionals, flags);
+    return { alias: typeof args.alias === 'string' ? args.alias : '', args };
   }
   if (group === 'db' && action === 'list') {
     return { alias: '', args: mapArgsToCtx(op, positionals, flags) };
@@ -235,7 +247,21 @@ function formatGroupHelp(group: string): string {
 
 // -- dispatch ---------------------------------------------------------------------------------
 
-async function run(argv: string[]): Promise<void> {
+/** Reads the global `--timeout <sec>`: an integer in 1..MAX_TIMEOUT_SEC, else a string
+ *  describing what was wrong (the caller wraps it in an `INVALID_ARGS` envelope). */
+function parseTimeoutFlag(flags: FlagMap): { sec?: number; problem?: string } {
+  const raw = getFlag(flags, 'timeout');
+  if (raw === undefined) {
+    return {};
+  }
+  const sec = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isInteger(sec) || sec < 1 || sec > MAX_TIMEOUT_SEC) {
+    return { problem: `--timeout must be a whole number of seconds from 1 to ${MAX_TIMEOUT_SEC}` };
+  }
+  return { sec };
+}
+
+export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<void> {
   const [first, ...rest] = argv;
   if (first === undefined || first === '--help' || first === '-h') {
     process.stdout.write(`${formatTopHelp()}\n`);
@@ -292,21 +318,28 @@ async function run(argv: string[]): Promise<void> {
 
   applyConfigPutFromFlag(group, action, flags);
   const ctx = buildOpContext(group, action, op, positionals, flags);
-  const deps: ExecuteDeps = { yes: hasFlag(flags, 'yes') };
-
-  try {
-    const envelope = await executeOp(op, ctx, deps);
-    if (hasFlag(flags, 'pretty')) {
-      printPretty(envelope);
-    } else {
-      printJson(envelope);
-    }
-    process.exitCode = envelope.ok ? 0 : 1;
-  } finally {
-    if (ctx.alias.length > 0) {
-      await closeMaster(ctx.alias).catch(() => {});
-    }
+  const timeout = parseTimeoutFlag(flags);
+  if (timeout.problem !== undefined) {
+    const envelope: Envelope<null> = buildEnvelope({
+      alias: ctx.alias,
+      command: `${group} ${action}`,
+      startedAtMs: Date.now(),
+      data: null,
+      error: { code: 'INVALID_ARGS', message: timeout.problem },
+    });
+    printJson(envelope);
+    process.exitCode = 2;
+    return;
   }
+
+  const deps: ExecuteDeps = { ...baseDeps, yes: hasFlag(flags, 'yes'), timeoutSec: timeout.sec };
+  const envelope = await executeOp(op, ctx, deps);
+  if (hasFlag(flags, 'pretty')) {
+    printPretty(envelope);
+  } else {
+    printJson(envelope);
+  }
+  process.exitCode = envelope.ok ? 0 : 1;
 }
 
 async function main(): Promise<void> {

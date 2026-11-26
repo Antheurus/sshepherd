@@ -1,16 +1,22 @@
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CONNECT_TIMEOUT_SEC, CONTROL_PERSIST_SEC, KILL_AFTER_SEC } from './limits.ts';
 import type { ErrorInfo, RawResult, SshErrorCode } from './types.ts';
 
 /** macOS caps a Unix-domain socket path at ~104 bytes (Linux at 108) — stay under 100. */
 const MAX_SOCKET_PATH_LENGTH = 100;
 
-const CONNECT_TIMEOUT_S = 10;
-const CONTROL_PERSIST_S = 60;
+/** Hex chars of the alias sha256 kept in the socket name: 64 bits, collision-free for any
+ *  realistic alias count, and short enough to keep the path under the socket limit. */
+const SOCKET_NAME_HEX_CHARS = 16;
+/** `-O exit` needs a host argument syntactically; with an explicit ControlPath it is never resolved. */
+const DISCONNECT_PLACEHOLDER_HOST = 'sshepherd-disconnect';
+/** Exit codes the remote `timeout` wrapper uses: 124 = TERM after the budget, 137 = KILL after `-k`. */
+const REMOTE_TIMEOUT_EXIT_CODES = [124, 137];
 const CONTROL_COMMAND_TIMEOUT_MS = 5_000;
 const VALIDATE_TIMEOUT_MS = 5_000;
-const MASTER_OPEN_TIMEOUT_MS = (CONNECT_TIMEOUT_S + 5) * 1_000;
+const MASTER_OPEN_TIMEOUT_MS = (CONNECT_TIMEOUT_SEC + 5) * 1_000;
 const LOCAL_TIMEOUT_BUFFER_MS = 2_000;
 /** A long-running remote command (a slow SQL DELETE, a big docker build) that produces no
  *  stdout/stderr for minutes leaves the TCP session looking idle. Idle-timeout middleboxes
@@ -55,6 +61,7 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   COMMAND_TIMEOUT: 'Remote command timed out',
   CONFIRMATION_REQUIRED: 'Mutating op refused: pass --yes (or confirm interactively) to proceed',
   VALIDATION_ERROR: 'invalid arguments',
+  INVALID_ARGS: 'Invalid command-line arguments',
 };
 
 /** Exported for the registry's mutating-op confirm gate — a `CONFIRMATION_REQUIRED`
@@ -67,20 +74,50 @@ export function errorInfo(code: SshErrorCode, remoteExit?: number): ErrorInfo {
   return info;
 }
 
+export interface ClassifyContext {
+  /** The `--timeout` budget the command ran under; lets a timeout error carry it. */
+  timeoutSec?: number;
+  /** Wall time of the phase being classified. */
+  elapsedMs?: number;
+}
+
+function connectTimeoutInfo(elapsedMs?: number): ErrorInfo {
+  const info = errorInfo('CONNECT_TIMEOUT');
+  info.phase = 'connect';
+  info.timeout_sec = CONNECT_TIMEOUT_SEC;
+  if (elapsedMs !== undefined) {
+    info.elapsed_ms = elapsedMs;
+  }
+  return info;
+}
+
+function commandTimeoutInfo(ctx: ClassifyContext): ErrorInfo {
+  const info = errorInfo('COMMAND_TIMEOUT');
+  info.phase = 'command';
+  if (ctx.timeoutSec !== undefined) {
+    info.timeout_sec = ctx.timeoutSec;
+    info.budget_sec = ctx.timeoutSec;
+  }
+  if (ctx.elapsedMs !== undefined) {
+    info.elapsed_ms = ctx.elapsedMs;
+  }
+  return info;
+}
+
 /**
  * Reads `raw.transportStderr` only to decide the code, never to build the message —
  * the stderr text is discarded after this function returns. No redaction allowlist:
  * OpenSSH stderr phrasing varies by version/locale, so discard-entirely is the only
  * shape that can't eventually leak an IP or hostname.
  */
-export function classify(raw: RawResult): ErrorInfo | null {
-  if (raw.timedOut) {
-    return errorInfo('COMMAND_TIMEOUT');
+export function classify(raw: RawResult, ctx: ClassifyContext = {}): ErrorInfo | null {
+  if (raw.timedOut || REMOTE_TIMEOUT_EXIT_CODES.includes(raw.code)) {
+    return commandTimeoutInfo(ctx);
   }
   if (raw.code === 255) {
     const text = raw.transportStderr;
     if (/connection timed out|operation timed out/i.test(text)) {
-      return errorInfo('CONNECT_TIMEOUT');
+      return connectTimeoutInfo(ctx.elapsedMs);
     }
     if (/permission denied|too many authentication failures/i.test(text)) {
       return errorInfo('AUTH_FAILED');
@@ -102,10 +139,15 @@ function socketDir(): string {
   return join(base, 'sshepherd');
 }
 
-/** Opaque, short, deterministic per alias — never `%h`/`%r`/`%p` (those leak host/user/port). */
+/** Opaque, short, deterministic per alias — never `%h`/`%r`/`%p` (those leak host/user/port).
+ *  sha256 prefix, not crc32: two aliases sharing a 32-bit checksum would share a master and
+ *  silently run one alias's commands on the other's host. */
 function socketPath(alias: string): string {
   const dir = socketDir();
-  const name = Bun.hash.crc32(alias).toString(36);
+  const name = new Bun.CryptoHasher('sha256')
+    .update(alias)
+    .digest('hex')
+    .slice(0, SOCKET_NAME_HEX_CHARS);
   const full = join(dir, `${name}.sock`);
   if (full.length >= MAX_SOCKET_PATH_LENGTH) {
     throw new Error(
@@ -121,7 +163,13 @@ async function validateAlias(alias: string, runner: SshRunner): Promise<boolean>
   return result.code === 0 && result.stdout.trim().length > 0;
 }
 
-async function ensureMaster(alias: string, runner: SshRunner): Promise<string> {
+type MasterOutcome = { sock: string; failure: null } | { sock: string; failure: TransportResult };
+
+/** Reuses a live master (`-O check`); otherwise opens one that persists `CONTROL_PERSIST_SEC`
+ *  past the last use, so the next sshepherd invocation finds it. The open's outcome decides
+ *  the result: a failed open is classified here instead of surfacing as a confusing second
+ *  failure from the command that follows. */
+async function ensureMaster(alias: string, runner: SshRunner): Promise<MasterOutcome> {
   mkdirSync(socketDir(), { recursive: true, mode: 0o700 });
   const sock = socketPath(alias);
 
@@ -130,18 +178,22 @@ async function ensureMaster(alias: string, runner: SshRunner): Promise<string> {
     CONTROL_COMMAND_TIMEOUT_MS,
   );
   if (check.code === 0) {
-    return sock;
+    return { sock, failure: null };
   }
 
-  // Defensively clear a stale socket left behind by a crashed prior run.
-  await runner(['-o', `ControlPath=${sock}`, '-O', 'exit', alias], CONTROL_COMMAND_TIMEOUT_MS);
+  // A socket file whose master died answers "Connection refused"; a missing socket does not
+  // need clearing, so `-O exit` runs only for the stale case.
+  if (/connection refused/i.test(check.stderr)) {
+    await runner(['-o', `ControlPath=${sock}`, '-O', 'exit', alias], CONTROL_COMMAND_TIMEOUT_MS);
+  }
 
-  await runner(
+  const openedAtMs = Date.now();
+  const open = await runner(
     [
       '-o',
       'BatchMode=yes',
       '-o',
-      `ConnectTimeout=${CONNECT_TIMEOUT_S}`,
+      `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
       '-o',
       'LogLevel=ERROR',
       '-o',
@@ -153,7 +205,7 @@ async function ensureMaster(alias: string, runner: SshRunner): Promise<string> {
       '-o',
       `ControlPath=${sock}`,
       '-o',
-      `ControlPersist=${CONTROL_PERSIST_S}`,
+      `ControlPersist=${CONTROL_PERSIST_SEC}`,
       '-M',
       '-N',
       '-f',
@@ -161,8 +213,20 @@ async function ensureMaster(alias: string, runner: SshRunner): Promise<string> {
     ],
     MASTER_OPEN_TIMEOUT_MS,
   );
+  if (open.code === 0 && !open.timedOut) {
+    return { sock, failure: null };
+  }
 
-  return sock;
+  const elapsedMs = Date.now() - openedAtMs;
+  const raw: RawResult = {
+    code: 255,
+    stdout: '',
+    transportStderr: open.stderr,
+    commandStderr: '',
+    timedOut: false,
+  };
+  const error = open.timedOut ? connectTimeoutInfo(elapsedMs) : classify(raw, { elapsedMs });
+  return { sock, failure: { raw, error } };
 }
 
 /**
@@ -186,12 +250,18 @@ export async function run(
     };
   }
 
-  const sock = await ensureMaster(alias, deps.runner);
+  const master = await ensureMaster(alias, deps.runner);
+  if (master.failure) {
+    return master.failure;
+  }
 
+  const startedAtMs = Date.now();
   const outcome = await deps.runner(
     [
       '-o',
       'BatchMode=yes',
+      '-o',
+      `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
       '-o',
       'LogLevel=ERROR',
       '-o',
@@ -199,19 +269,19 @@ export async function run(
       '-o',
       `ServerAliveCountMax=${KEEPALIVE_COUNT_MAX}`,
       '-o',
-      `ControlPath=${sock}`,
+      `ControlPath=${master.sock}`,
       alias,
       '--',
       'timeout',
-      // --kill-after: GNU `timeout` with no escalation sends a single SIGTERM to its
-      // direct child and gives up — a `sh -c` wrapper (or anything inside it that
-      // ignores SIGTERM, e.g. a `docker exec` whose signal never reaches the exec'd
-      // process inside the container) can survive that indefinitely. Escalating to
-      // SIGKILL 10s later guarantees the LOCAL process tree actually goes away, even
-      // though it still can't reach a process already running inside a container —
-      // see recipes.md for the docker-exec caveat and the recommended workaround
-      // (set a statement_timeout / equivalent server-side, don't rely on this).
-      '--kill-after=10',
+      // `-k <sec>` (not `--kill-after=`): busybox `timeout` has only the short form, GNU
+      // accepts both. Without escalation a single SIGTERM to the direct child is all it
+      // sends, and a `sh -c` wrapper (or a `docker exec` whose signal never reaches the
+      // process inside the container) can survive that indefinitely. KILL 10 s later makes
+      // sure the remote process tree actually goes away, though it still cannot reach a
+      // process already inside a container — see recipes.md for that caveat (set a
+      // statement_timeout / equivalent server-side, don't rely on this).
+      '-k',
+      String(KILL_AFTER_SEC),
       String(timeoutSec),
       remoteCmd,
     ],
@@ -227,16 +297,45 @@ export async function run(
     timedOut: outcome.timedOut,
   };
 
-  return { raw, error: classify(raw) };
+  return { raw, error: classify(raw, { timeoutSec, elapsedMs: Date.now() - startedAtMs }) };
 }
 
-/** CLI calls this at shutdown to tear down the ControlMaster for an alias. */
+/** Tears down one alias's ControlMaster (`hosts disconnect <alias>`); true when one was up. */
 export async function closeMaster(
   alias: string,
   deps: TransportDeps = { runner: defaultRunner },
-): Promise<void> {
+): Promise<boolean> {
   const sock = socketPath(alias);
-  await deps.runner(['-o', `ControlPath=${sock}`, '-O', 'exit', alias], CONTROL_COMMAND_TIMEOUT_MS);
+  const result = await deps.runner(
+    ['-o', `ControlPath=${sock}`, '-O', 'exit', alias],
+    CONTROL_COMMAND_TIMEOUT_MS,
+  );
+  return result.code === 0;
+}
+
+/** Tears down every sshepherd ControlMaster (`hosts disconnect --all`); returns how many
+ *  were up. Sockets are named by alias hash, so this walks the socket directory instead. */
+export async function closeAllMasters(
+  deps: TransportDeps = { runner: defaultRunner },
+): Promise<number> {
+  const dir = socketDir();
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((name) => name.endsWith('.sock'));
+  } catch {
+    return 0;
+  }
+  let closed = 0;
+  for (const name of names) {
+    const result = await deps.runner(
+      ['-o', `ControlPath=${join(dir, name)}`, '-O', 'exit', DISCONNECT_PLACEHOLDER_HOST],
+      CONTROL_COMMAND_TIMEOUT_MS,
+    );
+    if (result.code === 0) {
+      closed += 1;
+    }
+  }
+  return closed;
 }
 
 async function defaultRunner(args: string[], timeoutMs: number): Promise<SpawnOutcome> {
