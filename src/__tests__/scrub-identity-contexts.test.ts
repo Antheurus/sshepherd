@@ -124,3 +124,34 @@ describe('a lone prefixed END whose BEGIN was cut off', () => {
     expect(maskPemLines(lines)).toEqual(lines);
   });
 });
+
+describe('a common-word alias user in a sudo log line is identity context', () => {
+  const options: ScrubOptions = { identity: { user: 'app' } };
+  test('the user before `: TTY=` and the /home/<user> working directory', () => {
+    expect(
+      text(
+        'Nov 27 10:01:02 web sudo:      app : TTY=pts/0 ; PWD=/home/app ; USER=root ; COMMAND=/bin/ls /home/app/releases',
+        options,
+      ),
+    ).toBe(
+      'Nov 27 10:01:02 web sudo:      <user> : TTY=pts/0 ; PWD=/home/<user> ; USER=root ; COMMAND=/bin/ls /home/<user>/releases',
+    );
+  });
+
+  test('the word elsewhere stays: a package, a unit, a path segment that is not a home', () => {
+    const line = 'installed app@2.0.0; app.service started; /opt/app/current; app : ready';
+    expect(text(line, options)).toBe(line);
+  });
+});
+
+describe('the alias identity inside a base64 blob', () => {
+  test('a base64-encoded auth.log naming the alias user and host is masked whole', () => {
+    const options: ScrubOptions = {
+      identity: { user: 'deploybot7', hostname: 'ledger.example.net' },
+    };
+    const log =
+      'Nov 27 sshd[1]: Failed password for invalid user deploybot7 from ledger.example.net\n';
+    const blob = Buffer.from(log).toString('base64');
+    expect(text(`content=${blob}`, options)).toBe('content=***');
+  });
+});

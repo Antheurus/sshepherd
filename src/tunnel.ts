@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { readdirSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { CONNECT_TIMEOUT_SEC, TUNNEL_FORWARD_SETTLE_MS, TUNNEL_OPEN_WAIT_SEC } from './limits.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
 import { writeTextSecure } from './setup-file-io.ts';
-import { STRICT_HOST_KEY_ARGS, sshConfigArgs } from './transport.ts';
-import { OpRunLocalError } from './types.ts';
+import { classify, errorInfo, STRICT_HOST_KEY_ARGS, sshConfigArgs } from './transport.ts';
+import { type ErrorInfo, OpRunLocalError } from './types.ts';
 
 export type TunnelKind = 'local' | 'remote' | 'dynamic';
 
@@ -49,12 +50,8 @@ export function writeTunnelRecord(path: string, record: TunnelRecord): void {
 
 /** Binds an ephemeral local TCP listener, reads back the OS-assigned port, releases it
  *  immediately. There is a small window between release and ssh's own bind where another
- *  process could take the port; this is NOT actively verified. If ssh's bind fails for any
- *  reason (port taken, connection refused, auth failure), `openTunnel` still reports success —
- *  the supervisor spawn itself succeeded — and the failure surfaces later: the next `listTunnels`
- *  prunes a supervisor that already exited, or whatever tries to USE the forwarded port simply
- *  fails to connect. This is deliberate: the tunnel design is fire-and-forget and self-expiring,
- *  not synchronously verified at open time. */
+ *  process could take the port; ssh then exits (`ExitOnForwardFailure`) and `openTunnel`'s wait
+ *  reports it instead of a tunnel. */
 export function findFreePort(): number {
   const listener = Bun.listen({
     hostname: '127.0.0.1',
@@ -109,12 +106,75 @@ export function validateOpenParams(params: OpenTunnelParams): void {
  *  port sshepherd allocates). */
 export function buildSshArgs(params: OpenTunnelParams, localPort: number | null): string[] {
   if (params.kind === 'local') {
-    return [...STRICT_HOST_KEY_ARGS, '-N', '-L', `${localPort}:${params.remote}`, params.alias];
+    return [...TUNNEL_SSH_ARGS, '-N', '-L', `${localPort}:${params.remote}`, params.alias];
   }
   if (params.kind === 'dynamic') {
-    return [...STRICT_HOST_KEY_ARGS, '-N', '-D', String(localPort), params.alias];
+    return [...TUNNEL_SSH_ARGS, '-N', '-D', String(localPort), params.alias];
   }
-  return [...STRICT_HOST_KEY_ARGS, '-N', '-R', `${params.remote}:${params.local}`, params.alias];
+  return [...TUNNEL_SSH_ARGS, '-N', '-R', `${params.remote}:${params.local}`, params.alias];
+}
+
+/** Strict host keys; ssh exits when a forward cannot be set up rather than idling without it; a
+ *  bounded connect; and `VERBOSE` so its stderr says when it authenticated — the one line
+ *  `awaitForward` waits for. */
+const TUNNEL_SSH_ARGS = [
+  ...STRICT_HOST_KEY_ARGS,
+  '-o',
+  'ExitOnForwardFailure=yes',
+  '-o',
+  `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
+  '-o',
+  'LogLevel=VERBOSE',
+];
+
+const AUTHENTICATED_LINE = /^Authenticated to /m;
+const FORWARD_POLL_MS = 100;
+
+/** Waits for the tunnel's ssh to authenticate and keep running `TUNNEL_FORWARD_SETTLE_MS` more
+ *  (a refused local bind exits at once, a refused remote forward within one round trip), or to
+ *  exit, within `TUNNEL_OPEN_WAIT_SEC`. Returns null when the forward is up, else the error its
+ *  stderr classifies as (`HOST_KEY_UNKNOWN`, `HOST_KEY_CHANGED`, `AUTH_FAILED`, ...) — that stderr
+ *  is read here and discarded, never returned. */
+export async function awaitForward(
+  stderrPath: string,
+  exited: Promise<unknown>,
+  waitMs = TUNNEL_OPEN_WAIT_SEC * 1_000,
+): Promise<ErrorInfo | null> {
+  let gone = false;
+  void exited.then(() => {
+    gone = true;
+  });
+  const readStderr = (): string => {
+    try {
+      return readFileSync(stderrPath, 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  const deadline = Date.now() + waitMs;
+  let authenticatedAt: number | null = null;
+  while (Date.now() < deadline) {
+    await Bun.sleep(FORWARD_POLL_MS);
+    if (gone) {
+      const error = classify({
+        code: 255,
+        stdout: '',
+        transportStderr: readStderr(),
+        commandStderr: '',
+        timedOut: false,
+      });
+      return error ?? errorInfo('SSH_TRANSPORT_ERROR');
+    }
+    if (authenticatedAt === null && AUTHENTICATED_LINE.test(readStderr())) {
+      authenticatedAt = Date.now();
+    }
+    if (authenticatedAt !== null && Date.now() - authenticatedAt >= TUNNEL_FORWARD_SETTLE_MS) {
+      return null;
+    }
+  }
+  const timeout = errorInfo('CONNECT_TIMEOUT');
+  timeout.timeout_sec = TUNNEL_OPEN_WAIT_SEC;
+  return timeout;
 }
 
 /** Dev mode (`bun src/cli.ts ...`) needs `[bun, /path/to/cli.ts]` to re-invoke correctly —
@@ -144,7 +204,7 @@ export interface RunSupervisorParams {
  *  child) if the timer fires first. */
 export async function runSupervisor(params: RunSupervisorParams): Promise<number> {
   const proc = Bun.spawn([params.command, ...params.args], {
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ['ignore', 'ignore', 'inherit'],
   });
   const timer = setTimeout(() => {
     proc.kill('SIGKILL');
@@ -156,6 +216,10 @@ export async function runSupervisor(params: RunSupervisorParams): Promise<number
 
 export interface SpawnSupervisorResult {
   pid: number;
+  /** Where the supervisor's (so ssh's) stderr goes, and when the supervisor exits: given both,
+   *  `openTunnel` waits for the forward before it reports a tunnel. */
+  stderrPath?: string;
+  exited?: Promise<unknown>;
 }
 
 export interface OpenTunnelDeps {
@@ -173,6 +237,10 @@ function defaultSpawnSupervisor(
   sshArgs: string[],
 ): SpawnSupervisorResult {
   const selfInvocation = resolveSelfInvocation();
+  const dir = defaultTunnelStateDir();
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stderrPath = join(dir, `${id}.stderr`);
+  const stderrFd = openSync(stderrPath, 'w', 0o600);
   const proc = Bun.spawn(
     [
       ...selfInvocation,
@@ -185,12 +253,13 @@ function defaultSpawnSupervisor(
       ...sshArgs,
     ],
     {
-      stdio: ['ignore', 'ignore', 'ignore'],
+      stdio: ['ignore', 'ignore', stderrFd],
       detached: true,
     },
   );
+  closeSync(stderrFd);
   proc.unref();
-  return { pid: proc.pid };
+  return { pid: proc.pid, stderrPath, exited: proc.exited };
 }
 
 /** Ties validation, alias-authorization, port-finding, and the detached supervisor spawn into one
@@ -199,11 +268,11 @@ function defaultSpawnSupervisor(
  *  `transport.ts`, which guards aliases via `ssh -G`), so without this check a leading-dash alias
  *  like `-oProxyCommand=<cmd>` would reach ssh as an option, not a hostname — local command
  *  execution. */
-export function openTunnel(
+export async function openTunnel(
   params: OpenTunnelParams,
   sshConfigPath: string,
   deps: OpenTunnelDeps = {},
-): TunnelRecord {
+): Promise<TunnelRecord> {
   validateOpenParams(params);
 
   const declaredAliases = listHostAliases(sshConfigPath);
@@ -219,7 +288,20 @@ export function openTunnel(
   const sshArgs = buildSshArgs(params, localPort);
 
   const spawn = deps.spawnSupervisor ?? defaultSpawnSupervisor;
-  const { pid } = spawn(id, params.durationSec, sshArgs);
+  const { pid, stderrPath, exited } = spawn(id, params.durationSec, sshArgs);
+  if (stderrPath !== undefined && exited !== undefined) {
+    // Unlinked once the wait is over: ssh keeps its descriptor, nothing keeps the text.
+    const failure = await awaitForward(stderrPath, exited).finally(() =>
+      rmSync(stderrPath, { force: true }),
+    );
+    if (failure !== null) {
+      killProcessGroup(pid);
+      throw new OpRunLocalError(failure.code, failure.message, {
+        hint: failure.hint,
+        next: failure.next,
+      });
+    }
+  }
 
   const now = Date.now();
   const record: TunnelRecord = {

@@ -54,7 +54,7 @@ const tunnelOpen: OpSpec<TunnelOpenResult> = {
   output: 'raw',
   buildRemote: () => null,
   shape: (parsed) => parsed as TunnelOpenResult,
-  runLocal: (ctx, sshConfigPath) => {
+  runLocal: async (ctx, sshConfigPath) => {
     const kind = ctx.args.kind as TunnelKind;
     const durationSec =
       typeof ctx.args.duration === 'string' ? Number(ctx.args.duration) : DEFAULT_DURATION_SEC;
@@ -67,7 +67,7 @@ const tunnelOpen: OpSpec<TunnelOpenResult> = {
         `--duration must be a number, got '${ctx.args.duration}'`,
       );
     }
-    const record = openTunnel(
+    const record = await openTunnel(
       {
         alias: ctx.alias,
         kind,

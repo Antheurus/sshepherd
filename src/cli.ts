@@ -83,6 +83,8 @@ const USER_ERROR_CODES: ReadonlySet<SshErrorCode> = new Set([
   'UNKNOWN_ALIAS',
   'CONFIRMATION_REQUIRED',
   'PROFILE_DENIED',
+  'HOST_KEY_FINGERPRINT_MISMATCH',
+  'KNOWN_HOSTS_UNWRITABLE',
 ]);
 
 /** Prints an envelope the CLI built itself (doctor, an argument error, the catch-all), which never

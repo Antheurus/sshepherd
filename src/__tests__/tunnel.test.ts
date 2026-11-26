@@ -4,6 +4,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  awaitForward,
   buildSshArgs,
   closeTunnel,
   defaultTunnelStateDir,
@@ -25,12 +26,12 @@ function tempStateDir(): string {
   return mkdtempSync(join(tmpdir(), 'sshepherd-tunnel-test-'));
 }
 
-function withTempStateDir<T>(fn: () => T): T {
+async function withTempStateDir<T>(fn: () => T | Promise<T>): Promise<T> {
   const dir = tempStateDir();
   const original = process.env.SSHEPHERD_TUNNEL_STATE_DIR;
   process.env.SSHEPHERD_TUNNEL_STATE_DIR = dir;
   try {
-    return fn();
+    return await fn();
   } finally {
     if (original === undefined) {
       delete process.env.SSHEPHERD_TUNNEL_STATE_DIR;
@@ -165,6 +166,19 @@ describe('validateOpenParams', () => {
   });
 });
 
+/** Strict host keys, exit when a forward fails, a bounded connect, and the VERBOSE stderr line the
+ *  open waits for. */
+const TUNNEL_ARGS = [
+  '-o',
+  'StrictHostKeyChecking=yes',
+  '-o',
+  'ExitOnForwardFailure=yes',
+  '-o',
+  'ConnectTimeout=10',
+  '-o',
+  'LogLevel=VERBOSE',
+];
+
 describe('buildSshArgs', () => {
   test('local kind', () => {
     expect(
@@ -172,13 +186,12 @@ describe('buildSshArgs', () => {
         { alias: 'web-01', kind: 'local', remote: 'localhost:5432', durationSec: 60 },
         54321,
       ),
-    ).toEqual(['-o', 'StrictHostKeyChecking=yes', '-N', '-L', '54321:localhost:5432', 'web-01']);
+    ).toEqual([...TUNNEL_ARGS, '-N', '-L', '54321:localhost:5432', 'web-01']);
   });
 
   test('dynamic kind', () => {
     expect(buildSshArgs({ alias: 'web-01', kind: 'dynamic', durationSec: 60 }, 1080)).toEqual([
-      '-o',
-      'StrictHostKeyChecking=yes',
+      ...TUNNEL_ARGS,
       '-N',
       '-D',
       '1080',
@@ -198,14 +211,7 @@ describe('buildSshArgs', () => {
         },
         null,
       ),
-    ).toEqual([
-      '-o',
-      'StrictHostKeyChecking=yes',
-      '-N',
-      '-R',
-      '0.0.0.0:8080:localhost:3000',
-      'web-01',
-    ]);
+    ).toEqual([...TUNNEL_ARGS, '-N', '-R', '0.0.0.0:8080:localhost:3000', 'web-01']);
   });
 });
 
@@ -255,10 +261,10 @@ describe('runSupervisor', () => {
 });
 
 describe('openTunnel', () => {
-  test('local kind: assigns a port, spawns via the injected fn, writes a state record', () => {
-    withTempStateDir(() => {
+  test('local kind: assigns a port, spawns via the injected fn, writes a state record', async () => {
+    await withTempStateDir(async () => {
       const sshConfigPath = tempSshConfig(['web-01']);
-      const record = openTunnel(
+      const record = await openTunnel(
         { alias: 'web-01', kind: 'local', remote: 'localhost:5432', durationSec: 120 },
         sshConfigPath,
         { spawnSupervisor: () => ({ pid: 424242 }) },
@@ -276,10 +282,10 @@ describe('openTunnel', () => {
     });
   });
 
-  test('remote kind: no localPort assigned, records localTarget', () => {
-    withTempStateDir(() => {
+  test('remote kind: no localPort assigned, records localTarget', async () => {
+    await withTempStateDir(async () => {
       const sshConfigPath = tempSshConfig(['web-01']);
-      const record = openTunnel(
+      const record = await openTunnel(
         {
           alias: 'web-01',
           kind: 'remote',
@@ -296,29 +302,29 @@ describe('openTunnel', () => {
     });
   });
 
-  test('propagates validation errors before ever calling spawnSupervisor', () => {
-    withTempStateDir(() => {
+  test('propagates validation errors before ever calling spawnSupervisor', async () => {
+    await withTempStateDir(async () => {
       const sshConfigPath = tempSshConfig(['web-01']);
       let spawnCalled = false;
-      expect(() =>
+      await expect(
         openTunnel({ alias: 'web-01', kind: 'local', durationSec: 120 }, sshConfigPath, {
           spawnSupervisor: () => {
             spawnCalled = true;
             return { pid: 1 };
           },
         }),
-      ).toThrow(OpRunLocalError);
+      ).rejects.toThrow(OpRunLocalError);
       expect(spawnCalled).toBe(false);
     });
   });
 
-  test('rejects an alias that is not declared in the ssh config, before spawning', () => {
-    withTempStateDir(() => {
+  test('rejects an alias that is not declared in the ssh config, before spawning', async () => {
+    await withTempStateDir(async () => {
       const sshConfigPath = tempSshConfig(['web-01']); // 'evil-alias' is NOT declared
       let spawnCalled = false;
       let caught: unknown;
       try {
-        openTunnel(
+        await openTunnel(
           { alias: '-oProxyCommand=touch /tmp/pwned', kind: 'dynamic', durationSec: 120 },
           sshConfigPath,
           {
@@ -354,11 +360,11 @@ describe('listTunnels / closeTunnel', () => {
     return proc;
   }
 
-  test('listTunnels returns an active, non-expired record with remainingSec', () => {
-    withTempStateDir(() => {
+  test('listTunnels returns an active, non-expired record with remainingSec', async () => {
+    await withTempStateDir(async () => {
       const proc = spawnRealGroupLeader();
       const sshConfigPath = tempSshConfig(['web-01']);
-      const record = openTunnel(
+      const record = await openTunnel(
         { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
         sshConfigPath,
         { spawnSupervisor: () => ({ pid: proc.pid }) },
@@ -374,13 +380,13 @@ describe('listTunnels / closeTunnel', () => {
     });
   });
 
-  test('listTunnels prunes a record whose PID is dead', () => {
-    withTempStateDir(() => {
+  test('listTunnels prunes a record whose PID is dead', async () => {
+    await withTempStateDir(async () => {
       // `spawnSync` runs `true` to completion AND reaps it before returning, so its pid is a
       // genuinely dead (non-zombie) pid the moment we read it — no retry/poll needed.
       const deadPid = Bun.spawnSync(['true'], { stdio: ['ignore', 'ignore', 'ignore'] }).pid;
       const sshConfigPath = tempSshConfig(['web-01']);
-      const record = openTunnel(
+      const record = await openTunnel(
         { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
         sshConfigPath,
         { spawnSupervisor: () => ({ pid: deadPid }) },
@@ -395,9 +401,9 @@ describe('listTunnels / closeTunnel', () => {
 
   test('closeTunnel kills a real process group and removes the state file', async () => {
     const proc = spawnRealGroupLeader();
-    withTempStateDir(() => {
+    await withTempStateDir(async () => {
       const sshConfigPath = tempSshConfig(['web-01']);
-      const rec = openTunnel(
+      const rec = await openTunnel(
         { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
         sshConfigPath,
         { spawnSupervisor: () => ({ pid: proc.pid }) },
@@ -442,9 +448,9 @@ describe('listTunnels / closeTunnel', () => {
     }
     expect(childPid).toBeGreaterThan(0);
 
-    const record = withTempStateDir(() => {
+    const record = await withTempStateDir(async () => {
       const sshConfigPath = tempSshConfig(['web-01']);
-      const rec = openTunnel(
+      const rec = await openTunnel(
         { alias: 'web-01', kind: 'dynamic', durationSec: 120 },
         sshConfigPath,
         { spawnSupervisor: () => ({ pid: parentPid }) },
@@ -474,9 +480,60 @@ describe('listTunnels / closeTunnel', () => {
     expect(childAlive).toBe(false);
   });
 
-  test('closeTunnel on an unknown id is idempotent (closed: false, no throw)', () => {
-    withTempStateDir(() => {
+  test('closeTunnel on an unknown id is idempotent (closed: false, no throw)', async () => {
+    await withTempStateDir(async () => {
       expect(closeTunnel('t-does-not-exist')).toEqual({ id: 't-does-not-exist', closed: false });
     });
+  });
+});
+
+describe('awaitForward', () => {
+  const AUTHENTICATED = 'Authenticated to 127.0.0.1 ([127.0.0.1]:2222) using "publickey".\n';
+
+  /** A stand-in for the tunnel's ssh: a real child that writes `stderr` to the file openTunnel
+   *  would hand it, then runs `then` (exit, or stay up). */
+  function child(stderr: string, then: string): { path: string; proc: Bun.Subprocess } {
+    const path = join(mkdtempSync(join(tmpdir(), 'sshepherd-await-forward-')), 'ssh.stderr');
+    const proc = Bun.spawn(
+      ['sh', '-c', `printf '%s' "$1" 2>/dev/null >"$0"; ${then}`, path, stderr],
+      {
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    return { path, proc };
+  }
+
+  test('ssh refusing an unknown host key exits at once: HOST_KEY_UNKNOWN, not a tunnel', async () => {
+    const { path, proc } = child(
+      'No ED25519 host key is known for [127.0.0.1]:2222 and you have requested strict checking.\nHost key verification failed.\n',
+      'exit 255',
+    );
+    expect((await awaitForward(path, proc.exited))?.code).toBe('HOST_KEY_UNKNOWN');
+  });
+
+  test('a refused local bind after authenticating is a failure, not a tunnel', async () => {
+    const { path, proc } = child(
+      `${AUTHENTICATED}Could not request local forwarding.\n`,
+      'exit 255',
+    );
+    expect((await awaitForward(path, proc.exited))?.code).toBe('SSH_TRANSPORT_ERROR');
+  });
+
+  test('authenticated and still running after the settle time: the forward is up', async () => {
+    const { path, proc } = child(AUTHENTICATED, 'exec sleep 5');
+    try {
+      expect(await awaitForward(path, proc.exited)).toBeNull();
+    } finally {
+      proc.kill();
+    }
+  });
+
+  test('neither authenticated nor exited within the wait: CONNECT_TIMEOUT', async () => {
+    const { path, proc } = child('', 'exec sleep 5');
+    try {
+      expect((await awaitForward(path, proc.exited, 500))?.code).toBe('CONNECT_TIMEOUT');
+    } finally {
+      proc.kill();
+    }
   });
 });

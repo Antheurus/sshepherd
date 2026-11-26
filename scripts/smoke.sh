@@ -6,9 +6,15 @@
 # docker command here is scoped to that project; nothing else on the daemon is started, stopped or
 # removed.
 #
-#   scripts/smoke.sh                 up, run the matrix on both sshd variants, always tear down
+#   scripts/smoke.sh                 up, run the matrix on both sshd variants and the canary leak
+#                                    gate, then tear down what this run brought up
 #   scripts/smoke.sh up | down       bring the fixture up / tear it down
+#   scripts/smoke.sh canary-gate     up, run only the canary leak gate, tear down
 #   scripts/smoke.sh canary <alias>  read-only ops against a real alias; key-set diff only
+#
+# One fixture per project: `up` refuses when the project's containers are already running (another
+# agent's fixture, or a leftover), and `down` refuses while a `smoke`/`canary-gate` run holds the
+# project. Two agents at once each set their own SSHEPHERD_SMOKE_PROJECT.
 #
 # The ssh aliases live in a fixture-only ssh config ($STATE/ssh_config, reached through
 # SSHEPHERD_SSH_CONFIG_PATH), never in ~/.ssh/config. The keypair is generated per run and never
@@ -32,6 +38,11 @@ else
   ALPINE_PORT=""
 fi
 KEYDIR="$STATE/keys"
+# The pid of the `smoke`/`canary-gate` run holding the project; `down` leaves a live holder alone.
+HOLDER_FILE="$STATE/holder.pid"
+CANARY_TEST="src/__tests__/canary-leak.test.ts"
+# Set once this run has started bringing the project up: only then does its exit tear it down.
+OWNED=false
 LIVE_DIR="src/__tests__/fixtures/live"
 CANARY_DIR="src/__tests__/fixtures/canary"
 VARIANTS=(debian alpine)
@@ -79,6 +90,10 @@ host_keys() {
 # -- bring-up / tear-down ---------------------------------------------------------------------
 
 fixture_up() {
+  if [[ -n "$(compose ps -aq 2>/dev/null)" ]]; then
+    echo "smoke: compose project $COMPOSE_PROJECT is already running (another agent's fixture, or a leftover); set another SSHEPHERD_SMOKE_PROJECT, or run 'just smoke-down' with this one if it is yours" >&2
+    exit 1
+  fi
   for port in "$DEBIAN_PORT" "$ALPINE_PORT"; do
     if [[ -n "$port" ]] && lsof -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
       echo "smoke: host port $port is already listening; free it or set SSHEPHERD_SMOKE_*_PORT" >&2
@@ -87,6 +102,7 @@ fixture_up() {
   done
 
   step "generate ephemeral ssh keypair + fixture-only ssh config"
+  OWNED=true
   mkdir -p "$KEYDIR" "$STATE/run" "$STATE/state" "$STATE/tunnels"
   chmod 700 "$STATE"
   rm -f "$KEYDIR/id_ed25519" "$KEYDIR/id_ed25519.pub"
@@ -167,8 +183,43 @@ fixture_up() {
 }
 
 fixture_down() {
+  local holder=""
+  [[ -f "$HOLDER_FILE" ]] && holder="$(cat "$HOLDER_FILE")"
+  if [[ -n "$holder" && "$holder" != "$$" ]] && kill -0 "$holder" 2>/dev/null; then
+    echo "smoke: compose project $COMPOSE_PROJECT is held by a running smoke (pid $holder); not tearing it down" >&2
+    exit 1
+  fi
   compose down --volumes --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$STATE"
+}
+
+# EXIT trap of a `smoke`/`canary-gate` run: tears down only a fixture this run started bringing up.
+release_fixture() {
+  if [[ "$OWNED" == true ]]; then
+    fixture_down
+  fi
+}
+
+hold_fixture() {
+  trap release_fixture EXIT
+  fixture_up
+  echo "$$" >"$HOLDER_FILE"
+}
+
+# The leak gate against the running fixture. A skipped canary reads green, so a skip fails it too.
+run_canary_gate() {
+  step "canary leak gate: $CANARY_TEST against the $COMPOSE_PROJECT fixture"
+  local log="$STATE/canary-gate.log" rc=0
+  SSHEPHERD_SMOKE_PROJECT="$COMPOSE_PROJECT" bun test "$CANARY_TEST" >"$log" 2>&1 || rc=$?
+  grep -E '^ *[0-9]+ (pass|fail|skip)$' "$log" || true
+  if [[ "$rc" -ne 0 ]]; then
+    grep -E '^\(fail\)' "$log" >&2 || true
+    fail "canary leak gate failed (log: $log)"
+  fi
+  if grep -qE '^ *[1-9][0-9]* skip$' "$log"; then
+    fail "canary leak gate skipped tests: the fixture was not seen"
+  fi
+  pass "canary leak gate: 0 fail, 0 skip"
 }
 
 # -- CLI drive helpers ------------------------------------------------------------------------
@@ -276,6 +327,8 @@ run_matrix() {
   known_name="[127.0.0.1]:$(port_for "$variant")"
   fingerprints="$(host_keys "$variant" | ssh-keygen -lf - | awk '{print $2}')"
   ssh-keygen -R "$known_name" -f "$STATE/known_hosts" >/dev/null 2>&1
+  # A master left by an earlier run on this state dir would answer without a key exchange.
+  run_cli hk_pre_disconnect hosts disconnect "$alias"
   run_cli_any hk_unknown hosts test "$alias"
   assert_json "[$variant] no known_hosts entry: HOST_KEY_UNKNOWN, next names hosts trust" hk_unknown \
     "d['ok'] is False and d['error']['code'] == 'HOST_KEY_UNKNOWN' and 'hosts trust' in d['error']['next']"
@@ -287,8 +340,8 @@ run_matrix() {
     fail "[$variant] hosts trust --dry-run fingerprint is not one of the container's host keys"
   fi
   run_cli_any hk_wrong hosts trust "$alias" --fingerprint "SHA256:$(printf 'x%.0s' $(seq 1 43))" --yes
-  assert_json "[$variant] hosts trust with a fingerprint the host did not present: refused" hk_wrong \
-    "d['ok'] is False and d['error']['code'] == 'HOST_KEY_CHANGED'"
+  assert_json "[$variant] hosts trust with a fingerprint the host did not present, nothing trusted yet: HOST_KEY_FINGERPRINT_MISMATCH" hk_wrong \
+    "d['ok'] is False and d['error']['code'] == 'HOST_KEY_FINGERPRINT_MISMATCH'"
   if ssh-keygen -F "$known_name" -f "$STATE/known_hosts" >/dev/null; then
     fail "[$variant] a refused hosts trust still wrote known_hosts"
   fi
@@ -625,15 +678,20 @@ case "${1:-all}" in
   up) fixture_up ;;
   down) fixture_down ;;
   canary) shift; canary "$@" ;;
+  canary-gate)
+    hold_fixture
+    run_canary_gate
+    printf '\n%d PASS, %d FAIL\n' "$PASS_COUNT" "$FAIL_COUNT"
+    ;;
   all)
-    trap fixture_down EXIT
-    fixture_up
+    hold_fixture
     use_fixture_env
     for variant in "${VARIANTS[@]}"; do
       run_matrix "$variant"
     done
     record_outputs
+    run_canary_gate
     printf '\n%d PASS, %d FAIL\n' "$PASS_COUNT" "$FAIL_COUNT"
     ;;
-  *) echo "usage: scripts/smoke.sh [up|down|canary <alias>]" >&2; exit 2 ;;
+  *) echo "usage: scripts/smoke.sh [up|down|canary-gate|canary <alias>]" >&2; exit 2 ;;
 esac

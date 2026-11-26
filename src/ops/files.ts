@@ -23,6 +23,7 @@ import { parseDu } from '../parsers/du.ts';
 import { capLines, recountLines } from '../parsers/logs-shape.ts';
 import { parseLs } from '../parsers/ls.ts';
 import { shellJoin, shq } from '../quote.ts';
+import { niced } from '../remote-nice.ts';
 import { isEnvFile, maskEnvContent, maskPemLines, scrubText } from '../scrub.ts';
 import { type OpContext, OpError, type OpSpec, Premasked } from '../types.ts';
 import { loadFilesAllowlist, loadScrubExtraPatterns, revealKeysOf } from './config.ts';
@@ -340,14 +341,16 @@ const filesGrep: OpSpec<FilesGrepResult> = {
     const skipped = GREP_SKIPPED_NAMES.flatMap((name) => ['!', '-name', name]);
     const grepFlags = context > 0 ? ['-InHE', '-C', String(context)] : ['-InHE'];
     const search = `find "$r" -type f ${shellJoin(skipped)} -exec grep ${shellJoin(grepFlags)} -e ${shq(pattern)} -- {} +`;
-    return shellJoin([
-      'sh',
-      '-c',
-      [
-        searchRootScript(reqStr(ctx, 'path'), ctx.alias),
-        `${search} | head -n ${MAX_GREP_MATCH_LINES + 1}`,
-      ].join('; '),
-    ]);
+    return niced(
+      shellJoin([
+        'sh',
+        '-c',
+        [
+          searchRootScript(reqStr(ctx, 'path'), ctx.alias),
+          `${search} | head -n ${MAX_GREP_MATCH_LINES + 1}`,
+        ].join('; '),
+      ]),
+    );
   },
   shape: (parsed, ctx) => {
     const text = parsed as string;
@@ -409,14 +412,16 @@ const filesFind: OpSpec<FilesFindResult> = {
       assertSearchText('files find', '--name', name, MAX_FIND_NAME_CHARS);
     }
     const nameTest = name === null ? '' : ` -name ${shq(name)}`;
-    return shellJoin([
-      'sh',
-      '-c',
-      [
-        searchRootScript(reqStr(ctx, 'path'), ctx.alias),
-        `find "$r"${nameTest} | head -n ${MAX_FIND_RESULTS + 1}`,
-      ].join('; '),
-    ]);
+    return niced(
+      shellJoin([
+        'sh',
+        '-c',
+        [
+          searchRootScript(reqStr(ctx, 'path'), ctx.alias),
+          `find "$r"${nameTest} | head -n ${MAX_FIND_RESULTS + 1}`,
+        ].join('; '),
+      ]),
+    );
   },
   shape: (parsed, ctx) => {
     const text = parsed as string;
@@ -625,7 +630,7 @@ const filesDiskUsage: OpSpec<FilesDiskUsageResult> = {
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
-  buildRemote: (ctx) => shellJoin(['du', '-sb', '--', reqStr(ctx, 'path')]),
+  buildRemote: (ctx) => niced(shellJoin(['du', '-sb', '--', reqStr(ctx, 'path')])),
   shape: (parsed, ctx) => {
     const entries = parseDu(parsed as string);
     const first = entries[0];

@@ -1,4 +1,12 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describeError, errorInfo } from './errors.ts';
@@ -6,6 +14,7 @@ import {
   CONNECT_TIMEOUT_SEC,
   CONTROL_PERSIST_SEC,
   KILL_AFTER_SEC,
+  MASTER_HOST_KEY_RECHECK_SEC,
   MAX_STDOUT_BYTES,
 } from './limits.ts';
 import { configMayDeclare, readSshConfigNames } from './parsers/ssh-config.ts';
@@ -232,6 +241,65 @@ export async function resolveAlias(
 
 type MasterOutcome = { sock: string; failure: null } | { sock: string; failure: TransportResult };
 
+/** How long ago the master's socket was made, or last passed `hostKeyVerdict`; 0 when unreadable. */
+function masterAgeMs(sock: string): number {
+  try {
+    return Date.now() - statSync(sock).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** Restarts the recheck clock. A socket whose time cannot be set is rechecked on every reuse
+ *  instead: slower, never less strict. */
+function markMasterChecked(sock: string): void {
+  try {
+    const now = new Date();
+    utimesSync(sock, now, now);
+  } catch {
+    // see above: the next reuse simply checks again
+  }
+}
+
+/** A fresh key exchange outside the master, under strict checking against the alias's own
+ *  known_hosts, offering no authentication: a master authenticated once, so a key that changed or
+ *  left known_hosts since would otherwise go unseen for as long as it lives. Only a host-key
+ *  verdict counts; any other failure is the next command's to report. */
+async function hostKeyVerdict(alias: string, runner: SshRunner): Promise<TransportResult | null> {
+  const probe = await runner(
+    [
+      ...STRICT_HOST_KEY_ARGS,
+      '-T',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
+      '-o',
+      'LogLevel=ERROR',
+      '-o',
+      'ControlMaster=no',
+      '-o',
+      'ControlPath=none',
+      '-o',
+      'PreferredAuthentications=none',
+      alias,
+      'true',
+    ],
+    MASTER_OPEN_TIMEOUT_MS,
+  );
+  const raw: RawResult = {
+    code: 255,
+    stdout: '',
+    transportStderr: probe.stderr,
+    commandStderr: '',
+    timedOut: false,
+  };
+  const error = probe.code === 255 ? classify(raw) : null;
+  return error?.code === 'HOST_KEY_CHANGED' || error?.code === 'HOST_KEY_UNKNOWN'
+    ? { raw, error }
+    : null;
+}
+
 /** Reuses a live master (`-O check`); otherwise opens one that persists `CONTROL_PERSIST_SEC`
  *  past the last use, so the next sshepherd invocation finds it. The open's outcome decides
  *  the result: a failed open is classified here instead of surfacing as a confusing second
@@ -245,6 +313,15 @@ async function ensureMaster(alias: string, runner: SshRunner): Promise<MasterOut
     CONTROL_COMMAND_TIMEOUT_MS,
   );
   if (check.code === 0) {
+    if (masterAgeMs(sock) < MASTER_HOST_KEY_RECHECK_SEC * 1_000) {
+      return { sock, failure: null };
+    }
+    const verdict = await hostKeyVerdict(alias, runner);
+    if (verdict !== null) {
+      await runner(['-o', `ControlPath=${sock}`, '-O', 'exit', alias], CONTROL_COMMAND_TIMEOUT_MS);
+      return { sock, failure: { raw: verdict.raw, error: verdict.error } };
+    }
+    markMasterChecked(sock);
     return { sock, failure: null };
   }
 
@@ -445,11 +522,20 @@ async function knownHostsConfig(
   return { knownHostsFile, hashNames: /^hashknownhosts\s+yes/im.test(result.stdout) };
 }
 
-/** The key the host presents, fetched the way ssh itself would see it (same `-F` config, so the
- *  same HostName/Port/HostKeyAlias): one connection that may record the key only into a
- *  throwaway known_hosts, offers no authentication method so nothing runs on the unverified host,
- *  and bypasses any ControlMaster so a real key exchange happens. The caller decides whether the
- *  key is trusted; the real known_hosts is never touched here. */
+/** Host key families, one connection each: ssh negotiates a single key type per connection, so a
+ *  scan that let it pick would see only the preferred one (ed25519) and refuse a human-confirmed
+ *  RSA or ECDSA fingerprint of the very same host. */
+const HOST_KEY_FAMILIES = [
+  'ssh-ed25519',
+  'ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521',
+  'rsa-sha2-512,rsa-sha2-256,ssh-rsa',
+];
+
+/** The keys the host presents, fetched the way ssh itself would see them (same `-F` config, so the
+ *  same HostName/Port/HostKeyAlias): one connection per key family, each of which may record the
+ *  key only into a throwaway known_hosts, offers no authentication method so nothing runs on the
+ *  unverified host, and bypasses any ControlMaster so a real key exchange happens. The caller
+ *  decides whether a key is trusted; the real known_hosts is never touched here. */
 export async function scanHostKeys(
   alias: string,
   deps: TransportDeps = { runner: defaultRunner },
@@ -463,61 +549,77 @@ export async function scanHostKeys(
     return { error: errorInfo('SSH_TRANSPORT_ERROR') };
   }
   const scratch = mkdtempSync(join(tmpdir(), 'sshepherd-hostkey-'));
-  const scratchFile = join(scratch, 'known_hosts');
   try {
     const startedAtMs = Date.now();
-    const outcome = await deps.runner(
-      [
-        '-T',
-        '-o',
-        'BatchMode=yes',
-        '-o',
-        `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
-        '-o',
-        'LogLevel=ERROR',
-        '-o',
-        'ControlMaster=no',
-        '-o',
-        'ControlPath=none',
-        '-o',
-        'StrictHostKeyChecking=accept-new',
-        '-o',
-        `UserKnownHostsFile=${scratchFile}`,
-        '-o',
-        'GlobalKnownHostsFile=/dev/null',
-        '-o',
-        'HashKnownHosts=no',
-        '-o',
-        'UpdateHostKeys=no',
-        '-o',
-        'PreferredAuthentications=none',
-        alias,
-        'true',
-      ],
-      MASTER_OPEN_TIMEOUT_MS,
+    const probes = await Promise.all(
+      HOST_KEY_FAMILIES.map(async (algorithms, index) => {
+        const scratchFile = join(scratch, `known_hosts.${index}`);
+        const outcome = await deps.runner(
+          [
+            '-T',
+            '-o',
+            'BatchMode=yes',
+            '-o',
+            `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
+            '-o',
+            'LogLevel=ERROR',
+            '-o',
+            'ControlMaster=no',
+            '-o',
+            'ControlPath=none',
+            '-o',
+            'StrictHostKeyChecking=accept-new',
+            '-o',
+            `UserKnownHostsFile=${scratchFile}`,
+            '-o',
+            'GlobalKnownHostsFile=/dev/null',
+            '-o',
+            'HashKnownHosts=no',
+            '-o',
+            'UpdateHostKeys=no',
+            '-o',
+            `HostKeyAlgorithms=${algorithms}`,
+            '-o',
+            'PreferredAuthentications=none',
+            alias,
+            'true',
+          ],
+          MASTER_OPEN_TIMEOUT_MS,
+        );
+        let text = '';
+        try {
+          text = readFileSync(scratchFile, 'utf8');
+        } catch {
+          // no file: ssh never got as far as the key exchange (or the host has no key of this family)
+        }
+        return { outcome, text };
+      }),
     );
-    let text = '';
-    try {
-      text = readFileSync(scratchFile, 'utf8');
-    } catch {
-      // no file: ssh never got as far as the key exchange
+    const keys: ScannedHostKey[] = [];
+    for (const { text } of probes) {
+      for (const line of text.split('\n')) {
+        const [name, type, key] = line.trim().split(/\s+/);
+        if (name === undefined || type === undefined || key === undefined) {
+          continue;
+        }
+        if (!keys.some((seen) => seen.type === type && seen.key === key)) {
+          keys.push({ name, type, key });
+        }
+      }
     }
-    const keys = text
-      .split('\n')
-      .map((line) => line.trim().split(/\s+/))
-      .filter((fields): fields is [string, string, string] => fields.length >= 3)
-      .map(([name, type, key]) => ({ name, type, key }));
     if (keys.length > 0) {
       return { keys, ...config, error: null };
     }
     const elapsedMs = Date.now() - startedAtMs;
-    if (outcome.timedOut) {
+    if (probes.some(({ outcome }) => outcome.timedOut)) {
       return { error: connectTimeoutInfo(elapsedMs) };
     }
+    const telling =
+      probes.find(({ outcome }) => !/no matching host key type/i.test(outcome.stderr)) ?? probes[0];
     const raw: RawResult = {
       code: 255,
       stdout: '',
-      transportStderr: outcome.stderr,
+      transportStderr: telling?.outcome.stderr ?? '',
       commandStderr: '',
       timedOut: false,
     };

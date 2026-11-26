@@ -121,12 +121,14 @@ export const SETUP_PROFILES: Record<string, Profile> = {
   'reveal-allowlist scaffold': 'admin',
 };
 
+/** Code points of an unrecognised `SSHEPHERD_PROFILE` echoed back: enough to see the typo, and cut
+ *  by code point so an emoji is never split into a lone surrogate a strict JSON parser rejects. */
 const PROFILE_VALUE_MAX_CHARS = 32;
 
 function unknownProfileError(envProfile: string): ErrorInfo {
   return describeError(
     'PROFILE_DENIED',
-    `SSHEPHERD_PROFILE='${envProfile.slice(0, PROFILE_VALUE_MAX_CHARS)}' is not a profile; expected one of ${PROFILES.join(', ')}`,
+    `SSHEPHERD_PROFILE='${Array.from(envProfile).slice(0, PROFILE_VALUE_MAX_CHARS).join('')}' is not a profile; expected one of ${PROFILES.join(', ')}`,
   );
 }
 

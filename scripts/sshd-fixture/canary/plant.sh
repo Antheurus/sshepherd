@@ -37,6 +37,8 @@ FILES=(
   "deploy-error.tmpl:/opt/canary/deploy-error.log"
   "journalctl.tmpl:/usr/bin/journalctl"
 )
+SYSTEMCTL_STANDIN=/usr/bin/systemctl
+SYSTEMCTL_MARKER='Canary stand-in for systemctl'
 READY_LINE="canary app ready"
 READY_WAIT_SEC=30
 
@@ -84,6 +86,10 @@ plant() {
       render "${pair%%:*}" | docker exec -i "$container" sh -c "cat > '${pair#*:}'"
     done
     docker exec "$container" chmod 755 /usr/bin/journalctl
+    if ! docker exec "$container" sh -c 'command -v systemctl' >/dev/null 2>&1; then
+      render systemctl.tmpl | docker exec -i "$container" sh -c "cat > '$SYSTEMCTL_STANDIN'"
+      docker exec "$container" chmod 755 "$SYSTEMCTL_STANDIN"
+    fi
     add_user "$container"
     docker exec "$container" /usr/sbin/sshd -o "ListenAddress=$PEER_LISTEN" -o "PidFile=$LISTENER_PIDFILE"
   done
@@ -110,6 +116,7 @@ clean() {
         rm -f '"$USER_RECORD"'
       fi
     '
+    docker exec "$container" sh -c 'grep -qs "$1" "$2" && rm -f "$2"; exit 0' sh "$SYSTEMCTL_MARKER" "$SYSTEMCTL_STANDIN"
     docker exec "$container" rm -rf /opt/canary /var/log/nginx/access.log /var/log/nginx/error.log \
       /var/log/auth.log /usr/bin/journalctl
   done

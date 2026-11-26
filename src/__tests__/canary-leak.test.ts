@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { buildDeployOpContext } from '../recipes.ts';
 import { executeOp, listOps } from '../registry.ts';
 import * as scrubModule from '../scrub.ts';
@@ -12,11 +13,14 @@ import type { OpContext, OpSpec } from '../types.ts';
 
 /**
  * The leak gate: a random canary is planted on the running smoke fixture (`just smoke-up`) in every
- * secret-shaped place a server keeps one, then EVERY op that exposes output runs against both sshd
- * variants and the canary must appear in none of what sshepherd hands back: the envelope (data,
- * error, stderr_tail), the audit row it wrote, or a file `files download` wrote. Each planted value
- * ends in a placement tag; the raw ssh output is recorded so the test also proves every placement
- * was actually read by some op (a canary nobody reads would make "0 hits" meaningless).
+ * secret-shaped place a server keeps one, then EVERY op runs against both sshd variants — whatever
+ * its `exposes` label claims, since a label is not proof — and the canary must appear in none of
+ * what sshepherd hands back: the envelope (data, error, stderr_tail), the audit row it wrote, or a
+ * file `files download` wrote, in plain text or base64/base64url/hex/URL-encoded/gzip+base64. Each
+ * op needs at least one drive that succeeded (an op erroring on every drive read nothing). Each
+ * planted value ends in a placement tag; the raw ssh output is recorded so the test also proves
+ * every placement was actually read by some op (a canary nobody reads would make "0 hits"
+ * meaningless).
  *
  * The aliases connect under a canary identity too: a HostName that resolves nowhere (reached through
  * a ProxyCommand to the fixture's published port), a canary uid-0 user and a non-22 port. The remote
@@ -81,6 +85,7 @@ const PLACEMENTS: Record<string, string> = {
   ne: 'nginx error log Authorization: Bearer',
   db: 'db column password',
   dt: 'db column api_token',
+  nj: 'compose env JAVA_OPTS nested -Dspring.datasource.password= (and its log line)',
 };
 
 /** psql error texts that quote the value that failed (scrub.ts `PSQL_DATA_ECHO_RULES`), each one a
@@ -144,10 +149,20 @@ function addressPlacements(id: Identity): Record<string, { where: string; marker
   };
 }
 
-/** Exposing ops this test cannot drive, each with the reason a reviewer accepted. Growing it means
- *  raising REVIEWED_SKIP_COUNT in the same change, so a skip is never silent. */
-const SKIP: Record<string, string> = {};
-const REVIEWED_SKIP_COUNT = 0;
+/** Ops this test does not drive, each with the reason a reviewer accepted. Growing it means raising
+ *  REVIEWED_SKIP_COUNT in the same change, so a skip is never silent. Each one is a mutating op
+ *  labelled `exposes: 'none'` whose drive would change state the other placements are read from;
+ *  `executeOp` scrubs its data regardless of the label. */
+const SKIP: Record<string, string> = {
+  'services restart':
+    'restarts the canary container mid-run, so later log drives can miss its placements',
+  'files upload': 'writes a remote file from a local one; nothing remote is read back',
+  'config put': 'overwrites a planted file (and backs it up), changing what later drives read',
+  'security harden':
+    "rewrites the fixture sshd's config and restarts it, cutting the run's connections",
+  'tunnel open': 'starts a long-lived forward process; its open path is driven by audit07a-live',
+};
+const REVIEWED_SKIP_COUNT = 5;
 
 const CANARY_FILES = [
   '/opt/canary/.env',
@@ -179,6 +194,8 @@ function argValues(alias: string): Record<string, string[]> {
     sql: ['SELECT * FROM canary_users', ...Object.values(DB_ECHO_PROBES).map((probe) => probe.sql)],
     recipe: ['canary-ok', 'canary-fail'],
     pattern: ['.'],
+    service: ['canary'],
+    id: ['t-canary-unknown'],
   };
 }
 
@@ -195,10 +212,11 @@ function argOverrides(alias: string): Record<string, Record<string, string[]>> {
 /** Ops whose args are alternatives or paired (`env keys` takes a container or a path, `env diff` a
  *  remote file and a local reference), so the one-value-per-arg product would build calls the op
  *  refuses; each entry lists the exact argument sets to run. */
-function explicitDrives(): Record<string, Record<string, string>[]> {
+function explicitDrives(): Record<string, Record<string, string | boolean>[]> {
   return {
     'env keys': [{ container: CANARY_CONTAINER }, ...CANARY_FILES.map((path) => ({ path }))],
     'env diff': CANARY_FILES.map((path) => ({ path, against: referenceEnvPath })),
+    'hosts trust': [{ 'dry-run': true }],
   };
 }
 
@@ -272,6 +290,8 @@ const ENV_KEYS = [
   'SSHEPHERD_REVEAL_ALLOWLIST_PATH',
   'SSHEPHERD_RECIPE_PATH',
   'SSHEPHERD_PROFILE',
+  'SSHEPHERD_AUDIT_PATH',
+  'SSHEPHERD_TUNNEL_STATE_DIR',
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -487,17 +507,77 @@ interface DriveResult {
   peerShown: boolean;
 }
 
-/** Each planted value, as the test searches for it: `where` it may never appear. The identity
- *  and the peer address are envelope-and-audit only — a file `files download` writes is the user's
- *  own bytes and keeps its addresses by design. */
+/** `value` as an op could hand it back encoded: hex (either case), percent-encoded bytes, and the
+ *  base64/base64url core it has at each of the three byte alignments inside a longer payload. */
+function encodedForms(value: string): string[] {
+  const bytes = Buffer.from(value);
+  const hex = bytes.toString('hex');
+  const forms = [
+    hex,
+    hex.toUpperCase(),
+    [...bytes].map((byte) => `%${byte.toString(16).padStart(2, '0')}`).join(''),
+  ];
+  for (let offset = 0; offset < 3; offset += 1) {
+    const padded = Buffer.concat([Buffer.alloc(offset), bytes]);
+    const skip = Math.ceil((offset * 4) / 3) + (offset === 0 ? 0 : 1);
+    const base64 = padded.toString('base64').replace(/=+$/, '');
+    const core = base64.slice(skip, base64.length - 2);
+    forms.push(core, core.replaceAll('+', '-').replaceAll('/', '_'));
+  }
+  return forms;
+}
+
+/** The text with every encoded run decoded beside it: base64/base64url (gunzipped too when it is
+ *  gzip), hex, and percent-encoding, so a needle finds a value however an op wrapped it. */
+function decodedViews(text: string): string {
+  const views = [text];
+  for (const run of text.match(/[A-Za-z0-9+/_-]{16,}={0,2}/g) ?? []) {
+    const bytes = Buffer.from(run.replaceAll('-', '+').replaceAll('_', '/'), 'base64');
+    views.push(bytes.toString('latin1'));
+    if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+      try {
+        views.push(gunzipSync(bytes).toString('latin1'));
+      } catch {
+        // a truncated gzip stream decodes to nothing; the base64 view above still stands
+      }
+    }
+  }
+  for (const run of text.match(/(?:[0-9a-fA-F]{2}){8,}/g) ?? []) {
+    views.push(Buffer.from(run, 'hex').toString('latin1'));
+  }
+  views.push(
+    text.replace(/(?:%[0-9a-fA-F]{2})+/g, (run) => {
+      try {
+        return decodeURIComponent(run);
+      } catch {
+        return run;
+      }
+    }),
+  );
+  return views.join('\n');
+}
+
+/** Each planted value, as the test searches for it: `where` it may never appear, in plain text or
+ *  any encoding `encodedForms`/`decodedViews` cover. The identity and the peer address are
+ *  envelope-and-audit only — a file `files download` writes is the user's own bytes and keeps its
+ *  addresses by design. The port is digits only, so it is matched in plain text only. */
 function needles(): { name: string; found: (text: string) => boolean; envelopeOnly: boolean }[] {
-  const lower = (needle: string) => (text: string) => text.toLowerCase().includes(needle);
+  const anyForm = (value: string, fold: boolean) => {
+    const forms = encodedForms(value);
+    return (text: string) => {
+      const plain = fold ? decodedViews(text).toLowerCase() : decodedViews(text);
+      return (
+        plain.includes(fold ? value.toLowerCase() : value) ||
+        forms.some((form) => text.includes(form))
+      );
+    };
+  };
   const portPattern = new RegExp(`(?<![\\d.])${identity.port}(?!\\d)`);
   return [
-    { name: 'canary', found: (text) => text.includes(canary), envelopeOnly: false },
-    { name: 'digits', found: (text) => text.includes(digits), envelopeOnly: false },
-    { name: 'identity-user', found: lower(identity.user), envelopeOnly: true },
-    { name: 'identity-host', found: lower(identity.host), envelopeOnly: true },
+    { name: 'canary', found: anyForm(canary, false), envelopeOnly: false },
+    { name: 'digits', found: anyForm(digits, false), envelopeOnly: false },
+    { name: 'identity-user', found: anyForm(identity.user, true), envelopeOnly: true },
+    { name: 'identity-host', found: anyForm(identity.host, true), envelopeOnly: true },
     { name: 'identity-port', found: (text) => portPattern.test(text), envelopeOnly: true },
   ];
 }
@@ -565,12 +645,16 @@ async function drive(
 const exposingOps = (): OpSpec[] => listOps().filter((op) => op.exposes !== 'none');
 
 describe('canary skip-list is explicit and reviewed', () => {
-  test('every skipped op exposes output, carries a reason, and the count is the reviewed one', () => {
-    const exposing = exposingOps().map((op) => `${op.group} ${op.name}`);
+  test('every skipped op is registered, carries a reason, and the count is the reviewed one', () => {
+    const registered = listOps().map((op) => `${op.group} ${op.name}`);
     for (const [name, reason] of Object.entries(SKIP)) {
-      expect({ name, exposes: exposing.includes(name), reason: reason.trim().length > 0 }).toEqual({
+      expect({
         name,
-        exposes: true,
+        registered: registered.includes(name),
+        reason: reason.trim().length > 0,
+      }).toEqual({
+        name,
+        registered: true,
         reason: true,
       });
     }
@@ -621,6 +705,8 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
     process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = join(scratch, 'files-allowlist.toml');
     process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = join(scratch, 'config-allowlist.toml');
     process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = join(scratch, 'reveal-allowlist.toml');
+    process.env.SSHEPHERD_AUDIT_PATH = join(scratch, 'audit-tail-source.jsonl');
+    process.env.SSHEPHERD_TUNNEL_STATE_DIR = join(scratch, 'tunnels');
     delete process.env.SSHEPHERD_PROFILE;
     runPlant('plant', canary, digits, identity.user, identity.host, identity.port);
   }, 120_000);
@@ -642,11 +728,11 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
   }, 60_000);
 
   for (const variant of VARIANTS) {
-    test(`${variant}: every op with exposes != none returns, audits and downloads 0 canary hits`, async () => {
+    test(`${variant}: every op, whatever its exposes label, returns, audits and downloads 0 canary hits`, async () => {
       const alias = `smoke-${variant}`;
       const results: DriveResult[] = [];
       let index = 0;
-      for (const op of exposingOps()) {
+      for (const op of listOps()) {
         if (SKIP[`${op.group} ${op.name}`] !== undefined) {
           continue;
         }
@@ -660,10 +746,11 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
           `[${variant}] ${result.label}: ${result.status}; reached ${result.reached.join(',') || '-'}; hits ${result.hits.join(',') || '0'}`,
         );
       }
-      const driven = new Set(
-        results.map((result) => result.label.split(' ').slice(0, 2).join(' ')),
-      );
-      expect(exposingOps().length - Object.keys(SKIP).length).toBe(driven.size);
+      const opOf = (result: DriveResult): string => result.label.split(' ').slice(0, 2).join(' ');
+      const driven = new Set(results.map(opOf));
+      expect(listOps().length - Object.keys(SKIP).length).toBe(driven.size);
+      const okDriven = new Set(results.filter((result) => result.status === 'ok').map(opOf));
+      expect([...driven].filter((name) => !okDriven.has(name))).toEqual([]);
 
       const hits = results
         .filter((result) => result.hits.length > 0)
@@ -751,7 +838,7 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
       const hookOn = process.env[IDENTITY_HOOK] === '1';
       const spies = hookOn ? [] : installIdentityScrubber();
       try {
-        const names = new Set(['env keys', 'env diff', 'services inspect']);
+        const names = new Set(['env keys', 'env diff', 'services inspect', 'services ps']);
         const results: DriveResult[] = [];
         let index = 20_000;
         for (const op of exposingOps().filter((candidate) =>
@@ -772,6 +859,17 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
         expect(
           results.filter((result) => result.hits.length > 0).map((r) => `${r.label}: ${r.hits}`),
         ).toEqual([]);
+        // No planted value crossed the wire at all: the host reduced Env to key names (inspect)
+        // or docker was asked for a template without Config.Env (ps).
+        expect(
+          results
+            .filter((result) => /^services (ps|inspect)\b/.test(result.label))
+            .map((result) => `${result.label}: ${result.reached.join(',') || '-'}`),
+        ).toEqual(
+          results
+            .filter((result) => /^services (ps|inspect)\b/.test(result.label))
+            .map((result) => `${result.label}: -`),
+        );
 
         const envelope = await executeOp(
           exposingOps().find((op) => op.group === 'env' && op.name === 'keys') as OpSpec,

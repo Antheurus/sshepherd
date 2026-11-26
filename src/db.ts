@@ -213,8 +213,33 @@ END {
 }
 `;
 
+/** Masks the URL's own host(s) and user in psql's stderr as `<db-host>`/`<db-user>`, read from the
+ *  decoded `PG*` environment (never argv): a connect error names both (`connection to server at
+ *  "<host>"`, `for user "<user>"`), and they are known only inside the container — the local scrubber
+ *  could never mask what it was never told. A match counts only as a whole name. */
+const MASK_PG_IDENTITY_AWK = `
+function word(c) { return c ~ /[A-Za-z0-9_.-]/ }
+function lit(s, v, m,   out, i, n) {
+  if (v == "") return s
+  out = ""; n = length(v)
+  while ((i = index(s, v)) > 0) {
+    if ((i == 1 || !word(substr(s, i - 1, 1))) && !word(substr(s, i + n, 1))) out = out substr(s, 1, i - 1) m
+    else out = out substr(s, 1, i - 1 + n)
+    s = substr(s, i + n)
+  }
+  return out s
+}
+{
+  line = $0
+  n = split(ENVIRON["PGHOST"], hosts, ",")
+  for (k = 1; k <= n; k++) line = lit(line, hosts[k], "<db-host>")
+  print lit(line, ENVIRON["PGUSER"], "<db-user>")
+}
+`;
+
 /** The shell that runs psql from a URL held in `$<varName>`: decode it into `PG*`, drop every
- *  copy of the URL, then exec psql with the SQL buffers from its own argv (`"$@"`). */
+ *  copy of the URL, then run psql with the SQL buffers from its own argv (`"$@"`), its stdout
+ *  straight through and its stderr held back until `MASK_PG_IDENTITY_AWK` has masked it. */
 export function envUrlPsqlScript(varName: string): string {
   return [
     `u=\${${varName}:-}`,
@@ -224,7 +249,12 @@ export function envUrlPsqlScript(varName: string): string {
     `unset u ${varName === 'SSHEPHERD_PGURL' ? 'SSHEPHERD_PGURL' : ''}`.trimEnd(),
     'eval "$pg_env"',
     'unset pg_env',
-    `exec psql ${PSQL_FLAGS.join(' ')} "$@"`,
+    'exec 3>&1',
+    `err=$(psql ${PSQL_FLAGS.join(' ')} "$@" 2>&1 1>&3)`,
+    'rc=$?',
+    'exec 3>&-',
+    `[ -z "$err" ] || printf '%s\\n' "$err" | awk '${MASK_PG_IDENTITY_AWK}' >&2`,
+    'exit $rc',
   ].join('\n');
 }
 

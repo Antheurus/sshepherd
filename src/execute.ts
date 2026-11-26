@@ -108,8 +108,9 @@ function hiddenValues(op: OpSpec, ctx: OpContext): string[] {
 }
 
 /**
- * The one scrub pass over an envelope: the shaped data when the op exposes anything, every
- * error (message, `data`, partial stdout on the error path) and the command's stderr, which then
+ * The one scrub pass over an envelope: the shaped data, whatever the op's `exposes` label says (a
+ * label is a claim about the op, never a switch on the scrubber), every error (message, `data`,
+ * partial stdout on the error path) and the command's stderr, which then
  * becomes `stderr_tail`. Revealed keys are honoured only on success — an error never unmasks —
  * and an op's `hiddenArgs` values are masked only in errors, where they would be echoed. The
  * alias's identity is always masked, and IP literals are too unless the alias opted out (also
@@ -122,20 +123,19 @@ function scrubEnvelope(
   commandStderr: string,
   options: ScrubOptions,
 ): Envelope<unknown> {
-  const scrubData = envelope.error !== null || op.exposes !== 'none';
   const withAddresses = { ...options, maskAddresses: options.maskAddresses ?? true };
   const effective =
     envelope.error === null
       ? withAddresses
       : { ...withAddresses, revealKeys: new Set<string>(), literals: hiddenValues(op, ctx) };
   const { value, count } = scrub(
-    { data: scrubData ? envelope.data : null, error: envelope.error, stderr: commandStderr },
+    { data: envelope.data, error: envelope.error, stderr: commandStderr },
     effective,
   );
   const tail = stderrTail(value.stderr);
   const error =
     value.error !== null && tail.length > 0 ? { ...value.error, stderr_tail: tail } : value.error;
-  return { ...envelope, data: scrubData ? value.data : envelope.data, error, scrubbed: count };
+  return { ...envelope, data: value.data, error, scrubbed: count };
 }
 
 export interface ExecuteDeps {

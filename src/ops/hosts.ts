@@ -1,5 +1,13 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import { type DiagnoseStage, type DiagnoseStageName, diagnoseHost } from '../hosts-diagnose.ts';
 import { HOSTS_TEST_TIMEOUT_SEC } from '../limits.ts';
@@ -188,26 +196,147 @@ function isEntryFor(line: string, names: string[]): boolean {
   return field.split(',').some((entry) => names.includes(entry));
 }
 
-/** Appends the key and drops this host's older entries, in place (a symlinked known_hosts stays
- *  a symlink); returns how many entries were dropped. */
-function recordKnownHost(file: string, key: ScannedHostKey, hashNames: boolean): number {
-  let existing = '';
+interface KnownHostEntry {
+  line: string;
+  type: string;
+  key: string;
+}
+
+function readKnownHosts(file: string): string {
   try {
-    existing = readFileSync(file, 'utf8');
+    return readFileSync(file, 'utf8');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return '';
+    }
+    throw unwritable(err);
+  }
+}
+
+/** This host's plain and hashed entries in `text`. */
+function entriesFor(text: string, names: string[]): KnownHostEntry[] {
+  return text
+    .split('\n')
+    .filter((line) => isEntryFor(line, names))
+    .map((line) => {
+      const [, type = '', key = ''] = line.trim().split(/\s+/);
+      return { line, type, key };
+    });
+}
+
+const UNWRITABLE_REASONS: Record<string, string> = {
+  EACCES: 'permission denied',
+  EPERM: 'permission denied',
+  EROFS: 'it is on a read-only file system',
+  ENOSPC: 'the disk is full',
+};
+
+/** A known_hosts the trust cannot write, named by kind only: its path sits under the user's home. */
+function unwritable(err: unknown): OpRunLocalError {
+  const code = (err as NodeJS.ErrnoException).code ?? '';
+  const reason = UNWRITABLE_REASONS[code] ?? `the write failed (${code || 'unknown error'})`;
+  return new OpRunLocalError(
+    'KNOWN_HOSTS_UNWRITABLE',
+    `hosts trust: the alias's known_hosts cannot be written: ${reason}; nothing was recorded`,
+  );
+}
+
+/** Refuses before anything is written when the file is a sink that keeps nothing (`/dev/null`, any
+ *  device or other non-regular file) or cannot be written, so a trust never reports `written` for a
+ *  key the next connection will not find. */
+function assertRecordable(file: string): void {
+  if (file === '/dev/null') {
+    throw new OpRunLocalError(
+      'KNOWN_HOSTS_UNWRITABLE',
+      "hosts trust: the alias's UserKnownHostsFile is /dev/null, which keeps nothing, so strict checking can never find a trusted key; nothing was recorded",
+      {
+        hint: "Point the alias's UserKnownHostsFile at a real file (or remove that line to use ~/.ssh/known_hosts), then run hosts trust again.",
+      },
+    );
+  }
+  let target = file;
+  try {
+    if (!statSync(file).isFile()) {
+      throw new OpRunLocalError(
+        'KNOWN_HOSTS_UNWRITABLE',
+        "hosts trust: the alias's known_hosts is not a regular file, so it cannot keep a trusted key; nothing was recorded",
+      );
+    }
+  } catch (err) {
+    if (err instanceof OpRunLocalError) {
       throw err;
     }
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw unwritable(err);
+    }
+    target = existingAncestor(dirname(file));
   }
-  const names = key.name.split(',');
+  try {
+    accessSync(target, constants.W_OK);
+  } catch (err) {
+    throw unwritable(err);
+  }
+}
+
+function existingAncestor(dir: string): string {
+  let current = dir;
+  while (!existsSync(current) && dirname(current) !== current) {
+    current = dirname(current);
+  }
+  return current;
+}
+
+/** Records `trusted` and drops this host's stale entries — every one whose key the host no longer
+ *  presents — in place (a symlinked known_hosts stays a symlink). An entry the host still presents
+ *  is kept, so trusting RSA leaves a valid ed25519 entry alone and a repeat trust adds no
+ *  duplicate. Returns how many stale entries were dropped. */
+function recordKnownHosts(
+  file: string,
+  trusted: ScannedHostKey[],
+  presented: ScannedHostKey[],
+  hashNames: boolean,
+): number {
+  const names = (trusted[0]?.name ?? '').split(',');
+  const existing = readKnownHosts(file);
   const lines = existing.length === 0 ? [] : existing.replace(/\n$/, '').split('\n');
-  const kept = lines.filter((line) => !isEntryFor(line, names));
-  const name = hashNames ? hashedName(names[0] ?? key.name, randomBytes(20)) : key.name;
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  writeFileSync(file, `${[...kept, `${name} ${key.type} ${key.key}`].join('\n')}\n`, {
-    mode: 0o600,
+  const isPresented = (type: string, key: string): boolean =>
+    presented.some((candidate) => candidate.type === type && candidate.key === key);
+  const kept = lines.filter((line) => {
+    if (!isEntryFor(line, names)) {
+      return true;
+    }
+    const [, type = '', key = ''] = line.trim().split(/\s+/);
+    return isPresented(type, key);
   });
+  const keptEntries = entriesFor(kept.join('\n'), names);
+  const added = trusted
+    .filter((key) => !keptEntries.some((entry) => entry.type === key.type && entry.key === key.key))
+    .map((key) => {
+      const name = hashNames ? hashedName(names[0] ?? key.name, randomBytes(20)) : key.name;
+      return `${name} ${key.type} ${key.key}`;
+    });
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, `${[...kept, ...added].join('\n')}\n`, { mode: 0o600 });
+  } catch (err) {
+    throw unwritable(err);
+  }
   return lines.length - kept.length;
+}
+
+/** The trusted keys as the file now holds them; a write that did not stick is refused. */
+function assertRecorded(file: string, trusted: ScannedHostKey[]): void {
+  const names = (trusted[0]?.name ?? '').split(',');
+  const entries = entriesFor(readKnownHosts(file), names);
+  const missing = trusted.filter(
+    (key) => !entries.some((entry) => entry.type === key.type && entry.key === key.key),
+  );
+  if (missing.length > 0) {
+    throw new OpRunLocalError(
+      'KNOWN_HOSTS_UNWRITABLE',
+      "hosts trust: the alias's known_hosts was written but reading it back does not find the trusted key; nothing that ssh will use was recorded",
+    );
+  }
 }
 
 const TRUST_HINT =
@@ -217,15 +346,21 @@ const hostsTrust: OpSpec<HostsTrustResult> = {
   group: 'hosts',
   name: 'trust',
   summary:
-    "Show the host key fingerprint the alias presents (--dry-run), or record it in the alias's known_hosts once --fingerprint matches it (--yes).",
+    "Show every host key fingerprint the alias presents (--dry-run), or record the key whose fingerprint --fingerprint names in the alias's known_hosts (--yes; --all-types records every presented key).",
   args: [
     arg(
       'fingerprint',
       'flag',
       false,
-      'SHA256:... fingerprint a human confirmed out of band; the key is recorded only when the host presents exactly this one.',
+      'SHA256:... fingerprint a human confirmed out of band; recorded only when the host presents a key with exactly this one.',
     ),
     arg('dry-run', 'flag', false, 'Show the presented fingerprints; record nothing.'),
+    arg(
+      'all-types',
+      'flag',
+      false,
+      'Once --fingerprint matches one presented key, record every key type the host presents, not only that one.',
+    ),
   ],
   mutating: true,
   exposes: 'none',
@@ -259,16 +394,31 @@ const hostsTrust: OpSpec<HostsTrustResult> = {
     }
     const match = scan.keys.find((key) => fingerprintOf(key) === expected);
     if (match === undefined) {
+      const presented = fingerprints.map((entry) => entry.fingerprint).join(', ');
+      const known = entriesFor(
+        readKnownHosts(scan.knownHostsFile),
+        (scan.keys[0]?.name ?? '').split(','),
+      );
+      const changed =
+        known.length > 0 &&
+        !known.some((entry) =>
+          scan.keys.some((key) => key.type === entry.type && key.key === entry.key),
+        );
       throw new OpRunLocalError(
-        'HOST_KEY_CHANGED',
-        `hosts trust: the host presents ${fingerprints.map((entry) => entry.fingerprint).join(', ')}, not ${expected}; nothing was recorded`,
+        changed ? 'HOST_KEY_CHANGED' : 'HOST_KEY_FINGERPRINT_MISMATCH',
+        `hosts trust: the host presents ${presented}, not ${expected}; nothing was recorded`,
         {
-          hint: 'The key the host presents is not the one that was confirmed; find out why before trusting anything.',
+          hint: changed
+            ? 'known_hosts holds a key for this host that it no longer presents, and none it presents is the one that was confirmed; find out why before trusting anything.'
+            : 'compare with the fingerprint from the provider console (or ssh-keygen -l on the host itself) and pass the one the host presents; nothing was trusted for this host yet.',
           next: `sshepherd hosts trust ${ctx.alias} --dry-run`,
         },
       );
     }
-    const replaced = recordKnownHost(scan.knownHostsFile, match, scan.hashNames);
+    assertRecordable(scan.knownHostsFile);
+    const trusted = optBool(ctx, 'all-types', false) ? scan.keys : [match];
+    const replaced = recordKnownHosts(scan.knownHostsFile, trusted, scan.keys, scan.hashNames);
+    assertRecorded(scan.knownHostsFile, trusted);
     return { fingerprints, written: true, replaced_entries: replaced };
   },
 };

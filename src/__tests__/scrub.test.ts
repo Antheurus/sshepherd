@@ -253,3 +253,36 @@ describe('loadScrubExtraPatterns — reveal-allowlist.toml [<alias>.scrub]', () 
     );
   });
 });
+
+describe('a base64 blob that decodes to a secret is masked whole', () => {
+  const secret = 'Rk7pQ2vXw9LmZ4tHqN8sY3bC';
+  test('one line, and the wrapped lines `base64` prints', () => {
+    const file = `APP_NAME=shop\nAPI_TOKEN=${secret}\n${'PADDING_LINE=keep-this-visible\n'.repeat(4)}`;
+    const flat = Buffer.from(file).toString('base64');
+    const wrapped = (flat.match(/.{1,76}/g) ?? []).join('\n');
+    for (const blob of [flat, wrapped]) {
+      const { value, count } = scrubText(`content: ${blob}\n`);
+      expect(value).toBe(`content: ${MASK}\n`);
+      expect(count).toBe(1);
+    }
+  });
+
+  test('base64url, and a secret nested one encoding deeper', () => {
+    const url = Buffer.from(`password=${secret}??>>`).toString('base64url');
+    expect(scrubText(url).value).toBe(MASK);
+    const twice = Buffer.from(Buffer.from(`token=${secret}`).toString('base64')).toString('base64');
+    expect(scrubText(twice).value).toBe(MASK);
+  });
+
+  test('a binary blob (a public key), plain text that decodes to nothing, and a harmless encoded line stay', () => {
+    const key = 'AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl';
+    const harmless = Buffer.from('APP_NAME=shop\nLOG_LEVEL=info\n').toString('base64');
+    for (const line of [
+      `ssh-ed25519 ${key} ops@example.net`,
+      '/usr/local/lib/node_modules/pkg',
+      harmless,
+    ]) {
+      expect(scrubText(line)).toEqual({ value: line, count: 0 });
+    }
+  });
+});

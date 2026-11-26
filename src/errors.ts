@@ -14,6 +14,9 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   AUTH_FAILED: 'SSH authentication failed for this alias',
   HOST_KEY_CHANGED: 'Remote host key does not match the known_hosts entry for this alias',
   HOST_KEY_UNKNOWN: 'known_hosts has no key for this alias and strict host key checking is on',
+  HOST_KEY_FINGERPRINT_MISMATCH:
+    'The host presents no key with the fingerprint that was confirmed, and known_hosts has no entry for it yet',
+  KNOWN_HOSTS_UNWRITABLE: "The alias's known_hosts file cannot record a trusted key",
   SSH_TRANSPORT_ERROR: 'SSH transport failed before the command could run',
   COMMAND_FAILED: 'Remote command exited with a non-zero status',
   COMMAND_TIMEOUT: 'Remote command timed out',
@@ -61,6 +64,15 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
     hint: 'sshepherd never accepts an unknown host key on first use; show its fingerprint, have a human confirm it out of band, then record it with hosts trust --fingerprint <SHA256:...> --yes.',
     retryable: false,
     next: `sshepherd hosts trust ${ALIAS_PLACEHOLDER} --dry-run`,
+  },
+  HOST_KEY_FINGERPRINT_MISMATCH: {
+    hint: 'Nothing was trusted yet, so this is a fingerprint that does not match rather than a changed key: compare with the fingerprint from the provider console (or ssh-keygen -l on the host itself) and pass the one the host presents.',
+    retryable: false,
+    next: `sshepherd hosts trust ${ALIAS_PLACEHOLDER} --dry-run`,
+  },
+  KNOWN_HOSTS_UNWRITABLE: {
+    hint: "Make the alias's known_hosts writable by this user (chmod u+w on the file and its directory), or point the alias's UserKnownHostsFile at a writable file, then run hosts trust again.",
+    retryable: false,
   },
   SSH_TRANSPORT_ERROR: {
     hint: 'ssh failed before the command ran; the connection test shows whether the host is reachable at all.',

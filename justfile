@@ -28,17 +28,21 @@ rollback:
 check-skill: install
     bun test src/__tests__/skill-doc.test.ts
 
-# Bring the smoke fixture (debian + alpine sshd, postgres, nginx) up under compose project sshepherd-smoke (SSHEPHERD_SMOKE_PROJECT names another, on ephemeral ports).
+# Bring the smoke fixture (debian + alpine sshd, postgres, nginx) up under compose project sshepherd-smoke (SSHEPHERD_SMOKE_PROJECT names another, on ephemeral ports). Refuses when that project is already running.
 smoke-up:
     bash scripts/smoke.sh up
 
-# Tear the fixture down. Only that compose project (sshepherd-smoke, or SSHEPHERD_SMOKE_PROJECT) is touched.
+# Tear the fixture down. Only that compose project (sshepherd-smoke, or SSHEPHERD_SMOKE_PROJECT) is touched, and not while a smoke run holds it.
 smoke-down:
     bash scripts/smoke.sh down
 
-# Live matrix on both sshd variants; records outputs under src/__tests__/fixtures/live/. Always tears down.
+# Live matrix on both sshd variants, then the canary leak gate (canary-leak.test.ts); records outputs under src/__tests__/fixtures/live/. Tears down what it brought up.
 smoke: build
     bash scripts/smoke.sh
+
+# The leak gate on its own: smoke-up, canary-leak.test.ts (fails on any hit, any skip, or an op with no ok drive), smoke-down. CI cannot run it (no Docker fixture there); this recipe is the gate.
+canary-fixture: build
+    bash scripts/smoke.sh canary-gate
 
 # Read-only ops against a real alias; diffs envelope key sets against src/__tests__/fixtures/canary/.
 canary alias:
