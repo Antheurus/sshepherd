@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { DOWNLOAD_MAX_BYTES, DOWNLOAD_MAX_STDOUT_BYTES } from '../limits.ts';
 import {
   arg,
   DEFAULT_LOG_TAIL,
@@ -8,14 +9,14 @@ import {
   reqStr,
 } from '../op-args.ts';
 import { parseDu } from '../parsers/du.ts';
+import { capLines, recountLines } from '../parsers/logs-shape.ts';
 import { parseLs } from '../parsers/ls.ts';
 import { shellJoin, shq } from '../quote.ts';
 import { isEnvFile, maskEnvContent, maskPemLines, scrubText } from '../scrub.ts';
-import { OpError, type OpSpec } from '../types.ts';
+import { OpError, type OpSpec, Premasked } from '../types.ts';
 import { loadScrubExtraPatterns, revealKeysOf } from './config.ts';
 
 const DOWNLOAD_TIMEOUT_SEC = 30;
-const DOWNLOAD_MAX_BYTES = 10_485_760; // 10 MiB
 
 // ---------------------------------------------------------------------------
 // files
@@ -46,6 +47,16 @@ interface FilesCatResult {
   content: string | null;
 }
 
+/** `files cat`'s `truncated` also covers a `content` that `--max-bytes` (or the transport) cut. */
+function recountCat(before: unknown, after: unknown, sourceCut: boolean): unknown {
+  if (typeof after !== 'object' || after === null || !Object.hasOwn(after, 'truncated')) {
+    return after;
+  }
+  const content = (after as { content?: unknown }).content;
+  const original = (before as { content?: unknown } | null)?.content;
+  return sourceCut || content !== original ? { ...after, truncated: true } : after;
+}
+
 const filesCat: OpSpec<FilesCatResult> = {
   group: 'files',
   name: 'cat',
@@ -68,6 +79,7 @@ const filesCat: OpSpec<FilesCatResult> = {
     { kind: 'path', scope: 'files', argName: 'path' },
     { kind: 'reveal-keys', argName: 'reveal' },
   ],
+  recount: recountCat,
   buildRemote: (ctx) => {
     const path = reqStr(ctx, 'path');
     const script = [
@@ -124,6 +136,9 @@ const filesTail: OpSpec<FilesTailResult> = {
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
+  truncateKeeps: 'tail',
+  capLines,
+  recount: recountLines,
   buildRemote: (ctx) =>
     shellJoin([
       'tail',
@@ -134,13 +149,13 @@ const filesTail: OpSpec<FilesTailResult> = {
     ]),
   shape: (parsed, ctx) => {
     const text = parsed as string;
-    const lines = maskPemLines(
-      (isEnvFile(reqStr(ctx, 'path')) ? maskEnvContent(text, new Set()) : text)
-        .split('\n')
-        .map((line) => line.trimEnd())
-        .filter((line) => line.length > 0),
-    );
-    return { lines, lines_returned: lines.length };
+    const unmasked = (isEnvFile(reqStr(ctx, 'path')) ? maskEnvContent(text, new Set()) : text)
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0);
+    const lines = maskPemLines(unmasked);
+    const masked = lines.filter((line, index) => line !== unmasked[index]).length;
+    return new Premasked({ lines, lines_returned: lines.length }, masked);
   },
 };
 
@@ -170,12 +185,11 @@ function decodeText(bytes: Buffer): string | null {
  *  except on an env-shaped path, where its `KEY=` lines are masked on the bytes (read as latin1,
  *  one char per byte, so every other byte is written back unchanged). */
 function downloadBytes(
-  contentBase64: string,
+  raw: Buffer,
   path: string,
   alias: string,
   revealKeys: Set<string>,
 ): { bytes: Buffer; masked: boolean } {
-  const raw = Buffer.from(contentBase64, 'base64');
   const text = decodeText(raw);
   if (text === null) {
     if (!isEnvFile(path)) {
@@ -230,6 +244,7 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
   mutating: false,
   exposes: 'content',
   timeoutSec: DOWNLOAD_TIMEOUT_SEC,
+  maxStdoutBytes: DOWNLOAD_MAX_STDOUT_BYTES,
   output: 'raw',
   allowlist: [
     { kind: 'path', scope: 'files', argName: 'path' },
@@ -278,10 +293,20 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
       };
     }
     const ok = /^__OK__:(\d+)/.exec(firstLine);
-    const size = ok?.[1];
+    const size = ok?.[1] !== undefined ? Number.parseInt(ok[1], 10) : null;
     const contentBase64 = newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim();
+    const raw = Buffer.from(contentBase64, 'base64');
+    if (size !== null && raw.length !== size) {
+      throw new OpError(
+        'OUTPUT_TOO_LARGE',
+        `files download: received ${raw.length} of the ${size} bytes of '${reqStr(ctx, 'path')}', so nothing was written to '${localPath}'`,
+        {
+          hint: `The read stopped before the whole file arrived (the ceiling is ${DOWNLOAD_MAX_STDOUT_BYTES} bytes of base64, enough for a ${DOWNLOAD_MAX_BYTES}-byte file), or the file changed while it was read; run it again, and use files tail for a file that is still being written.`,
+        },
+      );
+    }
     const { bytes, masked } = downloadBytes(
-      contentBase64,
+      raw,
       reqStr(ctx, 'path'),
       ctx.alias,
       revealKeysOf(ctx, 'reveal'),
@@ -290,7 +315,7 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
     return {
       found: true,
       truncated: false,
-      size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
+      size_bytes: size,
       written: true,
       masked,
       local_path: localPath,

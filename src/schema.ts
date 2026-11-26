@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { listOps } from './registry.ts';
+import type { SetupErrorInfo, SetupResult } from './setup-types.ts';
 import type { Envelope, ErrorInfo, OpSpec } from './types.ts';
 
 export type JsonSchema = Record<string, unknown>;
@@ -66,6 +67,28 @@ const REQUIRED_ENVELOPE_FIELDS = [
   'data',
   'error',
 ];
+
+/** `setup *` prints its own result shape (no alias, no duration); same completeness guarantee. */
+const SETUP_ERROR_FIELDS: Record<keyof SetupErrorInfo, JsonSchema> = {
+  code: {
+    type: 'string',
+    description: 'Stable setup error code; see SetupErrorCode in src/setup-types.ts.',
+  },
+  message: { type: 'string' },
+  hint: { type: 'string' },
+  retryable: { type: 'boolean' },
+  next: { type: 'string' },
+  did_you_mean: { type: 'array', items: { type: 'string' } },
+};
+
+const SETUP_FIELDS: Record<keyof SetupResult<unknown>, JsonSchema> = {
+  schema_version: ENVELOPE_FIELDS.schema_version,
+  ok: { type: 'boolean' },
+  command: { type: 'string' },
+  ran_at: { type: 'string', format: 'date-time' },
+  data: {},
+  error: { anyOf: [{ type: 'null' }, { type: 'object', properties: SETUP_ERROR_FIELDS }] },
+};
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -183,6 +206,20 @@ export function buildEnvelopeSchema(): JsonSchema {
   };
 }
 
+export function buildSetupSchema(): JsonSchema {
+  return {
+    $schema: DRAFT,
+    $id: 'sshepherd/setup',
+    title: 'sshepherd setup result',
+    description:
+      'What every `setup` action prints, instead of the op envelope. Additions are non-breaking within schema_version 1.',
+    type: 'object',
+    required: Object.keys(SETUP_FIELDS),
+    properties: { ...SETUP_FIELDS },
+    additionalProperties: true,
+  };
+}
+
 export function buildOpSchema(op: OpSpec, dataShape: JsonSchema | undefined): JsonSchema {
   const properties = envelopeProperties();
   properties.command = { const: `${op.group} ${op.name}` };
@@ -208,11 +245,12 @@ export function buildOpSchema(op: OpSpec, dataShape: JsonSchema | undefined): Js
   };
 }
 
-/** file name -> pretty JSON text, for `envelope.json` and one file per registry op. */
+/** file name -> pretty JSON text, for `envelope.json`, `setup.json` and one file per registry op. */
 export function generateSchemas(fixtureDirs: string[]): Map<string, string> {
   const shapes = dataShapesFromFixtures(fixtureDirs);
   const files = new Map<string, string>();
   files.set('envelope.json', `${JSON.stringify(buildEnvelopeSchema(), null, 2)}\n`);
+  files.set('setup.json', `${JSON.stringify(buildSetupSchema(), null, 2)}\n`);
   for (const op of listOps()) {
     const schema = buildOpSchema(op, shapes.get(`${op.group} ${op.name}`));
     files.set(`${op.group}-${op.name}.json`, `${JSON.stringify(schema, null, 2)}\n`);

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sshepherd/setup",
+  "title": "sshepherd setup result",
+  "description": "What every `setup` action prints, instead of the op envelope. Additions are non-breaking within schema_version 1.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "ran_at",
+    "data",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Fields are only ever added within a version."
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "command": {
+      "type": "string"
+    },
+    "ran_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "data": {},
+    "error": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "Stable setup error code; see SetupErrorCode in src/setup-types.ts."
+            },
+            "message": {
+              "type": "string"
+            },
+            "hint": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "next": {
+              "type": "string"
+            },
+            "did_you_mean": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "additionalProperties": true
+}

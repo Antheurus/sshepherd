@@ -102,6 +102,15 @@ export class OpError extends Error {
   }
 }
 
+/** What a `shape` returns when it masked values itself (the PEM line pass over `logs *` and
+ *  `files tail`), so the count reaches the envelope's `scrubbed` with the scrubber's own. */
+export class Premasked<T> {
+  constructor(
+    public readonly data: T,
+    public readonly count: number,
+  ) {}
+}
+
 /**
  * Thrown by an `OpSpec.runLocal` implementation that needs to fail with a structured,
  * agent-facing error instead of always succeeding — `executeOp` catches this specifically and
@@ -183,9 +192,17 @@ export interface OpSpec<T = unknown> {
   /** Which end of an over-long payload survives a byte cap: `tail` for output whose last lines
    *  decide the outcome (deploy steps); default `head`. */
   truncateKeeps?: 'head' | 'tail';
+  /** Stdout read ceiling for this op in place of `MAX_STDOUT_BYTES` (`files download` writes its
+   *  payload to disk, so it reads up to its own file limit). */
+  maxStdoutBytes?: number;
+  /** Line-shaped output: holds every line to `MAX_LINE_BYTES`, after the scrubber has seen it whole. */
+  capLines?: (data: unknown) => { data: unknown; cut: boolean };
+  /** Re-derives the counters in `data` (`lines_returned`, `truncated`, `next_since`) once
+   *  `--limit`/`--max-bytes` cut it; `sourceCut` says the transport already stopped reading early. */
+  recount?: (before: unknown, after: unknown, sourceCut: boolean) => unknown;
   output: OutputMode;
   buildRemote: (ctx: OpContext) => string | null;
-  shape: (parsed: unknown, ctx: OpContext) => T;
+  shape: (parsed: unknown, ctx: OpContext) => T | Premasked<T>;
   /** Optional: called on the failure path (`result.error` set) to pull additional
    *  structured context out of the raw transport result's stdout — e.g. which recipe
    *  step failed. Reads `raw.stdout` only, never `transportStderr`/`commandStderr`.
