@@ -74,7 +74,7 @@ function opErrorInfo(err: OpError): ErrorInfo {
 
 /** Anything else that escapes an op: the message is withheld (a JSON.parse error quotes the
  *  remote output, which can carry file contents) — only the error class names what broke. */
-function internalErrorInfo(command: string, err: unknown): ErrorInfo {
+export function internalErrorInfo(command: string, err: unknown): ErrorInfo {
   const kind = err instanceof Error ? err.name : typeof err;
   return describeError('INTERNAL_ERROR', `'${command}' failed inside sshepherd (${kind})`);
 }
@@ -91,10 +91,11 @@ interface OpResult {
  * (the single execution path), parse per `output`, then `shape` into the final payload.
  * `deploy run --dry-run` executes nothing and mutates nothing, so it is exempt from the
  * gate/audit — every other mutating op requires `--yes` (or an interactive confirm the CLI
- * resolves into `deps.yes`) and always writes exactly one audit line in `finally`, whether
- * the op succeeded, failed, was refused, or threw. Nothing escapes as an exception: a throw
+ * resolves into `deps.yes`) and always writes exactly one audit line once the op has ended,
+ * whether it succeeded, failed, was refused, or threw. Nothing escapes as an exception: a throw
  * becomes an `INVALID_ARGS`/`VALIDATION_ERROR` envelope (the caller's input) or an
- * `INTERNAL_ERROR` one (ours). The CLI is the only intended caller in production; tests call
+ * `INTERNAL_ERROR` one (ours), and an audit line that cannot be written becomes
+ * `AUDIT_WRITE_FAILED` carrying the op's own result. The CLI is the only intended caller in production; tests call
  * this directly with a scripted transport so no real ssh/network is ever touched.
  */
 export async function executeOp(
@@ -118,12 +119,36 @@ export async function executeOp(
       data: null,
       error: fillNext(error, ctx.alias),
     });
-  } finally {
-    if (requiresConfirm) {
-      auditFor(deps, ctx.alias, command, ctx, outcome);
-    }
+  }
+  if (!requiresConfirm) {
+    return envelope;
+  }
+  try {
+    auditFor(deps, ctx.alias, command, ctx, outcome);
+  } catch {
+    return unauditedEnvelope(envelope, command, outcome);
   }
   return envelope;
+}
+
+/** The op has already run (or been refused) by the time its audit line fails, so its result is
+ *  kept and flagged instead of discarded. The fs error is withheld: it quotes the log path. */
+function unauditedEnvelope(
+  envelope: Envelope<unknown>,
+  command: string,
+  outcome: AuditOutcome,
+): Envelope<unknown> {
+  const error: ErrorInfo = {
+    ...describeError(
+      'AUDIT_WRITE_FAILED',
+      `'${command}' finished with outcome '${outcome}' but its audit line could not be written to the audit log`,
+    ),
+    op_outcome: outcome,
+  };
+  if (envelope.error !== null) {
+    error.op_error = envelope.error;
+  }
+  return { ...envelope, ok: false, error };
 }
 
 async function runOp(

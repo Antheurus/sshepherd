@@ -31,6 +31,8 @@ export type SshErrorCode =
   | 'INVALID_ARGS'
   | 'PARSE_ERROR'
   | 'UNKNOWN_SUBGROUP'
+  | 'CONFIG_PARSE_ERROR'
+  | 'AUDIT_WRITE_FAILED'
   | 'INTERNAL_ERROR';
 
 /**
@@ -57,6 +59,10 @@ export interface ErrorInfo {
   budget_sec?: number;
   /** Timeout errors only: wall time spent in that phase before it was cut off. */
   elapsed_ms?: number;
+  /** `AUDIT_WRITE_FAILED` only: how the op itself ended — `ok`/`error` mean it ran, `refused` that it did not. */
+  op_outcome?: 'ok' | 'error' | 'refused';
+  /** `AUDIT_WRITE_FAILED` only: the op's own error, when it had one; `data` keeps its result. */
+  op_error?: ErrorInfo;
 }
 
 /** Optional guidance a raiser attaches to an `OpError`; each field overrides the per-code default. */

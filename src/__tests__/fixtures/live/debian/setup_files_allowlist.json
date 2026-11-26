@@ -1,7 +1,7 @@
 {
   "ok": true,
   "command": "setup files-allowlist scaffold",
-  "ran_at": "2026-11-26T06:43:52.928Z",
+  "ran_at": "2026-11-26T06:53:45.002Z",
   "data": {
     "alias": "smoke-debian",
     "paths": [

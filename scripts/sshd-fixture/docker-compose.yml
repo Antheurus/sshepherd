@@ -8,7 +8,7 @@
 #   app          - a minimal long-running nginx standing in for a deployed app.
 #
 # scripts/smoke.sh sets SSHEPHERD_SMOKE_KEYDIR (an ephemeral generated keypair) and the two host
-# ports (SSHEPHERD_SMOKE_DEBIAN_PORT 8422, SSHEPHERD_SMOKE_ALPINE_PORT 8423) before invoking
+# ports (SSHEPHERD_SMOKE_DEBIAN_PORT 8413, SSHEPHERD_SMOKE_ALPINE_PORT 8414) before invoking
 # `docker compose -p sshepherd-smoke up`.
 
 name: sshepherd-smoke
@@ -34,7 +34,7 @@ services:
       dockerfile: Dockerfile.debian
     container_name: sshepherd-fixture-sshd-debian
     ports:
-      - '127.0.0.1:${SSHEPHERD_SMOKE_DEBIAN_PORT:-8422}:22'
+      - '127.0.0.1:${SSHEPHERD_SMOKE_DEBIAN_PORT:-8413}:22'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SSHEPHERD_SMOKE_KEYDIR:-./.smoke-keys}/authorized_keys:/root/.ssh/authorized_keys:ro
@@ -48,7 +48,7 @@ services:
       dockerfile: Dockerfile.alpine
     container_name: sshepherd-fixture-sshd-alpine
     ports:
-      - '127.0.0.1:${SSHEPHERD_SMOKE_ALPINE_PORT:-8423}:22'
+      - '127.0.0.1:${SSHEPHERD_SMOKE_ALPINE_PORT:-8414}:22'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${SSHEPHERD_SMOKE_KEYDIR:-./.smoke-keys}/authorized_keys:/root/.ssh/authorized_keys:ro

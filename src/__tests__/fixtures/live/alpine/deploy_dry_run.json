@@ -1,9 +1,9 @@
 {
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T06:43:59.358Z",
+  "ran_at": "2026-11-26T06:53:51.289Z",
   "command": "deploy run",
-  "duration_ms": 1,
+  "duration_ms": 0,
   "data": {
     "recipe": "smoke-alpine",
     "alias": "smoke-alpine",

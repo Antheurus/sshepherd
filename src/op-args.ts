@@ -35,9 +35,9 @@ export function optBool(ctx: OpContext, key: string, fallback: boolean): boolean
 
 /** Names an ssh alias, container, unit, service, stream, tunnel id, recipe or pg-target. */
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.@:+~-]*$/;
-/** A local or remote file path: the shell quoting in `shellJoin` handles spaces, this only
- *  keeps control characters, quotes and glob/redirect characters out. */
-const PATH_PATTERN = /^[A-Za-z0-9_./@:+=,~% -]+$/;
+/** A local or remote file path: `shellJoin` quotes every other character, so only a NUL or a
+ *  line break — which no quoting carries through a remote command line intact — is refused. */
+const PATH_FORBIDDEN = /[\0\r\n]/;
 
 /** Positional values that name something (as opposed to free text such as `sql`), by arg name. */
 const NAME_ARGS = new Set([
@@ -69,17 +69,21 @@ export function assertPositional(name: string, value: string): void {
       },
     );
   }
-  const pattern = NAME_ARGS.has(name) ? NAME_PATTERN : PATH_ARGS.has(name) ? PATH_PATTERN : null;
-  if (pattern !== null && !pattern.test(value)) {
+  if (PATH_ARGS.has(name)) {
+    if (PATH_FORBIDDEN.test(value)) {
+      throw new OpError(
+        'INVALID_ARGS',
+        `argument '${name}' contains a NUL or line-break character (got ${JSON.stringify(value)})`,
+        { hint: 'Pass the path on one line; a path with a NUL or line break cannot be sent.' },
+      );
+    }
+    return;
+  }
+  if (NAME_ARGS.has(name) && !NAME_PATTERN.test(value)) {
     throw new OpError(
       'INVALID_ARGS',
       `argument '${name}' has characters outside the allowed set (got '${value}')`,
-      {
-        hint:
-          pattern === NAME_PATTERN
-            ? 'Use letters, digits and . _ - @ : + ~ only.'
-            : 'Use letters, digits, spaces and . _ - / @ : + = , ~ % only.',
-      },
+      { hint: 'Use letters, digits and . _ - @ : + ~ only.' },
     );
   }
 }

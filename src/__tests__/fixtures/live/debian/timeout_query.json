@@ -1,9 +1,9 @@
 {
   "ok": false,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T06:43:55.868Z",
+  "ran_at": "2026-11-26T06:53:47.920Z",
   "command": "db query",
-  "duration_ms": 2033,
+  "duration_ms": 2031,
   "data": null,
   "error": {
     "code": "COMMAND_TIMEOUT",
@@ -13,6 +13,6 @@
     "phase": "command",
     "timeout_sec": 2,
     "budget_sec": 2,
-    "elapsed_ms": 2015
+    "elapsed_ms": 2013
   }
 }

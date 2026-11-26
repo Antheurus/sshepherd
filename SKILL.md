@@ -349,7 +349,7 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 
 | Code | Meaning |
 |---|---|
-| `UNKNOWN_ALIAS` | the ssh alias isn't defined in `~/.ssh/config` |
+| `UNKNOWN_ALIAS` | the ssh alias isn't defined in `~/.ssh/config` (or any file it `Include`s) and no wildcard `Host` line or `Match` block could apply to it |
 | `CONNECT_TIMEOUT` | couldn't reach the host within the connect timeout |
 | `AUTH_FAILED` | SSH authentication failed for this alias |
 | `HOST_KEY_MISMATCH` | the remote host key doesn't match the known-hosts entry |
@@ -360,6 +360,8 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `PARSE_ERROR` | an unknown or malformed flag (`did_you_mean` lists the near flags) |
 | `UNKNOWN_SUBGROUP` | an unknown group, action or setup sub-group (`did_you_mean` lists the valid names) |
 | `VALIDATION_ERROR` | an argument or config value the op refuses locally: an unknown pg-target or recipe (`did_you_mean` lists near names), a path not on its allowlist, a non-SELECT query |
+| `CONFIG_PARSE_ERROR` | a sshepherd config file is malformed: the message names the file (`targets.toml`) and the line, never the line's content |
+| `AUDIT_WRITE_FAILED` | a mutating op finished but its audit line could not be written; `data` keeps the op's result, `error.op_outcome` says how it ended (`ok`/`error` ran, `refused` did not) and `error.op_error` holds its own error — do not re-run it just to record it |
 | `INTERNAL_ERROR` | sshepherd failed while running the op (a bug or an unparseable reply from the host); the message names only the error class |
 | `CONFIRMATION_REQUIRED` | a mutating op ran without `--yes` — refused before any ssh call |
 
@@ -368,6 +370,6 @@ same command can succeed on a re-run) and, when one exists, `next` (an exact com
 `did_you_mean` (close names). Usage errors print the envelope on stdout too, never bare stderr text.
 
 Exit codes: `0` on `ok: true`; `1` when the run failed (`COMMAND_FAILED`, a timeout, a transport
-or internal error); `2` when the command line or its config was wrong (`INVALID_ARGS`,
-`PARSE_ERROR`, `UNKNOWN_SUBGROUP`, `VALIDATION_ERROR`, `UNKNOWN_ALIAS`, `CONFIRMATION_REQUIRED`) —
+or internal error, `AUDIT_WRITE_FAILED`); `2` when the command line or its config was wrong (`INVALID_ARGS`,
+`PARSE_ERROR`, `UNKNOWN_SUBGROUP`, `VALIDATION_ERROR`, `CONFIG_PARSE_ERROR`, `UNKNOWN_ALIAS`, `CONFIRMATION_REQUIRED`) —
 no ssh command is ever run for an exit-`2` other than the alias check behind `UNKNOWN_ALIAS`.

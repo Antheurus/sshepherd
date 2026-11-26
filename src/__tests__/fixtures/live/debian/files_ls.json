@@ -1,7 +1,7 @@
 {
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T06:43:53.056Z",
+  "ran_at": "2026-11-26T06:53:45.126Z",
   "command": "files ls",
   "duration_ms": 23,
   "data": [
@@ -24,7 +24,7 @@
       "owner": "root",
       "group": "root",
       "size_bytes": 26,
-      "modified_at": "2026-11-26T06:43",
+      "modified_at": "2026-11-26T06:53",
       "is_dir": true,
       "is_symlink": false,
       "link_target": null
@@ -60,7 +60,7 @@
       "owner": "root",
       "group": "root",
       "size_bytes": 30,
-      "modified_at": "2026-11-26T06:43",
+      "modified_at": "2026-11-26T06:53",
       "is_dir": true,
       "is_symlink": false,
       "link_target": null

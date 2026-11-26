@@ -10,15 +10,15 @@
 #
 # The ssh aliases live in a fixture-only ssh config ($STATE/ssh_config, reached through
 # SSHEPHERD_SSH_CONFIG_PATH), never in ~/.ssh/config. The keypair is generated per run and never
-# committed. Host ports: 8422 (debian) and 8423 (alpine), override with
+# committed. Host ports: 8413 (debian) and 8414 (alpine), override with
 # SSHEPHERD_SMOKE_DEBIAN_PORT / SSHEPHERD_SMOKE_ALPINE_PORT.
 set -euo pipefail
 
 BIN="${BIN:-./dist/sshepherd}"
 FIXTURE_DIR="scripts/sshd-fixture"
 COMPOSE_PROJECT="sshepherd-smoke"
-DEBIAN_PORT="${SSHEPHERD_SMOKE_DEBIAN_PORT:-8422}"
-ALPINE_PORT="${SSHEPHERD_SMOKE_ALPINE_PORT:-8423}"
+DEBIAN_PORT="${SSHEPHERD_SMOKE_DEBIAN_PORT:-8413}"
+ALPINE_PORT="${SSHEPHERD_SMOKE_ALPINE_PORT:-8414}"
 STATE="${SSHEPHERD_SMOKE_STATE_DIR:-/tmp/sshepherd-smoke}"
 KEYDIR="$STATE/keys"
 LIVE_DIR="src/__tests__/fixtures/live"

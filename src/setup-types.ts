@@ -61,6 +61,7 @@ export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
   | 'UNKNOWN_SUBGROUP'
   | 'INVALID_ARGS'
+  | 'PARSE_ERROR'
   | 'CONFIRMATION_REQUIRED'
   | 'ALIAS_EXISTS'
   | 'ALIAS_NOT_FOUND'
@@ -99,6 +100,10 @@ const SETUP_GUIDANCE: Record<SetupErrorCode, SetupGuidance> = {
     hint: 'Fix the argument the message names; --help on the sub-group lists the actions.',
     retryable: false,
     next: 'sshepherd setup --help',
+  },
+  PARSE_ERROR: {
+    hint: 'A flag is unknown for this action; did_you_mean lists the near flags it accepts.',
+    retryable: false,
   },
   CONFIRMATION_REQUIRED: {
     hint: 'This writes local config; once a human has approved it, run the same command again with --yes.',
@@ -166,6 +171,7 @@ const SETUP_GUIDANCE: Record<SetupErrorCode, SetupGuidance> = {
 const SETUP_USER_ERROR_CODES: ReadonlySet<SetupErrorCode> = new Set([
   'UNKNOWN_SUBGROUP',
   'INVALID_ARGS',
+  'PARSE_ERROR',
   'VALIDATION_ERROR',
 ]);
 

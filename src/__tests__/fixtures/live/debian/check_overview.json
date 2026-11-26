@@ -1,33 +1,33 @@
 {
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T06:43:52.378Z",
+  "ran_at": "2026-11-26T06:53:44.485Z",
   "command": "check overview",
-  "duration_ms": 30,
+  "duration_ms": 31,
   "data": {
     "nproc": 10,
     "mem": {
       "mem": {
         "total": 4179505152,
-        "used": 2055147520,
-        "free": 671817728,
-        "shared": 152477696,
-        "buff_cache": 1797840896,
-        "available": 2124357632
+        "used": 2002690048,
+        "free": 666550272,
+        "shared": 152494080,
+        "buff_cache": 1855647744,
+        "available": 2176815104
       },
       "swap": {
         "total": 5253238784,
-        "used": 851132416,
-        "free": 4402106368
+        "used": 850862080,
+        "free": 4402376704
       }
     },
     "disk": [
       {
         "filesystem": "overlay",
-        "size_bytes": 69256347648,
-        "used_bytes": 23099576320,
-        "avail_bytes": 46156771328,
-        "use_percent": 34,
+        "size_bytes": 65632468992,
+        "used_bytes": 23141548032,
+        "avail_bytes": 42490920960,
+        "use_percent": 36,
         "mounted_on": "/"
       },
       {
@@ -48,17 +48,17 @@
       },
       {
         "filesystem": "/dev/vdb1",
-        "size_bytes": 69256347648,
-        "used_bytes": 23099576320,
-        "avail_bytes": 46156771328,
-        "use_percent": 34,
+        "size_bytes": 65632468992,
+        "used_bytes": 23141548032,
+        "avail_bytes": 42490920960,
+        "use_percent": 36,
         "mounted_on": "/etc/hosts"
       },
       {
         "filesystem": "mac",
         "size_bytes": 494384795648,
-        "used_bytes": 445720207360,
-        "avail_bytes": 48664588288,
+        "used_bytes": 448524165120,
+        "avail_bytes": 45860630528,
         "use_percent": 91,
         "mounted_on": "/root/.ssh/authorized_keys"
       },
@@ -80,12 +80,12 @@
       }
     ],
     "uptime": {
-      "time": "06:43:52",
-      "uptime": "1 day,  1:12",
+      "time": "06:53:44",
+      "uptime": "1 day,  1:22",
       "users": 0,
-      "load_1m": 0.29,
-      "load_5m": 0.82,
-      "load_15m": 0.72
+      "load_1m": 1.54,
+      "load_5m": 0.89,
+      "load_15m": 0.79
     },
     "psi_mem": null,
     "dead_end_risk": true

@@ -2,6 +2,7 @@
 
 import { readFileSync } from 'node:fs';
 import { describeError } from './errors.ts';
+import { internalErrorInfo } from './execute.ts';
 import { MAX_TIMEOUT_SEC } from './limits.ts';
 import { buildEnvelope, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
@@ -59,6 +60,7 @@ const USER_ERROR_CODES: ReadonlySet<SshErrorCode> = new Set([
   'PARSE_ERROR',
   'UNKNOWN_SUBGROUP',
   'VALIDATION_ERROR',
+  'CONFIG_PARSE_ERROR',
   'UNKNOWN_ALIAS',
   'CONFIRMATION_REQUIRED',
 ]);
@@ -454,20 +456,18 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  const command = argv.slice(0, 2).join(' ');
   try {
     await run(argv);
   } catch (err) {
     const error =
       err instanceof OpError
         ? describeError(err.code, err.message, err.extras)
-        : describeError(
-            'INTERNAL_ERROR',
-            err instanceof Error ? err.message : 'sshepherd failed unexpectedly',
-          );
+        : internalErrorInfo(command.length > 0 ? command : 'sshepherd', err);
     printJson(
       buildEnvelope({
         alias: '',
-        command: argv.slice(0, 2).join(' '),
+        command,
         startedAtMs: Date.now(),
         data: null,
         error,

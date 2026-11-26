@@ -21,6 +21,8 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   INVALID_ARGS: 'Invalid command-line arguments',
   PARSE_ERROR: 'Command line could not be parsed',
   UNKNOWN_SUBGROUP: 'Unknown group or action',
+  CONFIG_PARSE_ERROR: 'A sshepherd config file could not be parsed',
+  AUDIT_WRITE_FAILED: 'The op finished but its audit line could not be written',
   INTERNAL_ERROR: 'sshepherd failed while running the op',
 };
 
@@ -83,6 +85,14 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
     hint: 'Pick one of the names in did_you_mean; --help lists every group and action.',
     retryable: false,
     next: 'sshepherd --help',
+  },
+  CONFIG_PARSE_ERROR: {
+    hint: 'Fix the file and line the message names (TOML syntax), then run the command again.',
+    retryable: false,
+  },
+  AUDIT_WRITE_FAILED: {
+    hint: 'The op already finished (op_outcome) and is missing from the audit log; point SSHEPHERD_STATE_DIR or SSHEPHERD_AUDIT_PATH at a writable directory before the next mutating op, and do not re-run this one just to record it.',
+    retryable: false,
   },
   INTERNAL_ERROR: {
     hint: 'This is a bug in sshepherd or an unexpected reply from the host; re-running rarely helps, report the command.',

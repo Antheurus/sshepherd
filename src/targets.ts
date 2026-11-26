@@ -30,9 +30,29 @@ export function defaultTargetsPath(): string {
   return join(homedir(), '.config', 'sshepherd', 'targets.toml');
 }
 
+const TARGETS_HINT =
+  'Fix that entry in targets.toml (SSHEPHERD_TARGETS_PATH, else ~/.config/sshepherd/targets.toml); targets.example.toml shows every field.';
+
+function targetsError(message: string): OpError {
+  return new OpError('CONFIG_PARSE_ERROR', message, { hint: TARGETS_HINT });
+}
+
+/** Bun's TOML parser throws a BuildMessage, not an Error: its `message` and `position.line`
+ *  name the problem; `position.lineText` is never copied, since a target line can hold a secret. */
+function tomlSyntaxError(err: unknown): OpError {
+  const record = typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : {};
+  const reason = typeof record.message === 'string' ? record.message : 'invalid TOML';
+  const position =
+    typeof record.position === 'object' && record.position !== null
+      ? (record.position as Record<string, unknown>)
+      : {};
+  const line = typeof position.line === 'number' ? ` at line ${position.line}` : '';
+  return targetsError(`targets.toml is not valid TOML${line}: ${reason}`);
+}
+
 function readTarget(name: string, raw: unknown): PgTarget {
   if (typeof raw !== 'object' || raw === null) {
-    throw new Error(`targets.toml: target '${name}' is not a table`);
+    throw targetsError(`targets.toml: target '${name}' is not a table`);
   }
   const record = raw as Record<string, unknown>;
   const alias = typeof record.alias === 'string' ? record.alias : '';
@@ -43,15 +63,15 @@ function readTarget(name: string, raw: unknown): PgTarget {
   const database = typeof record.database === 'string' ? record.database : '';
 
   if (alias.length === 0) {
-    throw new Error(`targets.toml: target '${name}' is missing 'alias'`);
+    throw targetsError(`targets.toml: target '${name}' is missing 'alias'`);
   }
   if (user.length === 0 || database.length === 0) {
-    throw new Error(`targets.toml: target '${name}' is missing 'user' or 'database'`);
+    throw targetsError(`targets.toml: target '${name}' is missing 'user' or 'database'`);
   }
 
   const hasCompose = composeFile !== null && service !== null;
   if (hasCompose && container !== null) {
-    throw new Error(
+    throw targetsError(
       `targets.toml: target '${name}' declares both compose_file/service and container — pick one`,
     );
   }
@@ -61,7 +81,7 @@ function readTarget(name: string, raw: unknown): PgTarget {
   if (container !== null) {
     return { alias, composeFile: null, service: null, container, user, database };
   }
-  throw new Error(
+  throw targetsError(
     `targets.toml: target '${name}' needs either {compose_file, service} or {container}`,
   );
 }
@@ -74,7 +94,12 @@ export function loadTargets(path: string = defaultTargetsPath()): Record<string,
   } catch {
     return {};
   }
-  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  } catch (err) {
+    throw tomlSyntaxError(err);
+  }
   const targets: Record<string, PgTarget> = {};
   for (const [name, raw] of Object.entries(parsed)) {
     targets[name] = readTarget(name, raw);

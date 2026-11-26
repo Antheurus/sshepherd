@@ -1,12 +1,12 @@
 {
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T06:43:58.275Z",
+  "ran_at": "2026-11-26T06:53:50.265Z",
   "command": "services ps",
-  "duration_ms": 210,
+  "duration_ms": 190,
   "data": [
     {
-      "id": "611e772f83db",
+      "id": "f43eeec5e55e",
       "name": "sshepherd-fixture-sshd-debian",
       "image": "sshepherd-smoke-sshd-debian",
       "state": "running",
@@ -21,7 +21,7 @@
       "ports": [
         {
           "host_ip": "127.0.0.1",
-          "host_port": 8422,
+          "host_port": 8413,
           "container_port": 22,
           "proto": "tcp"
         }
@@ -30,7 +30,7 @@
       "compose_service": "sshd-debian"
     },
     {
-      "id": "101c9be0082e",
+      "id": "14316abe532e",
       "name": "sshepherd-fixture-sshd-alpine",
       "image": "sshepherd-smoke-sshd-alpine",
       "state": "running",
@@ -45,7 +45,7 @@
       "ports": [
         {
           "host_ip": "127.0.0.1",
-          "host_port": 8423,
+          "host_port": 8414,
           "container_port": 22,
           "proto": "tcp"
         }
@@ -54,7 +54,7 @@
       "compose_service": "sshd-alpine"
     },
     {
-      "id": "75f9e2dfb9f2",
+      "id": "1c1eeec1a676",
       "name": "sshepherd-fixture-postgres",
       "image": "postgres:16-alpine",
       "state": "running",
@@ -78,7 +78,7 @@
       "compose_service": "postgres"
     },
     {
-      "id": "c28d8d03065a",
+      "id": "b6b7dc230afa",
       "name": "sshepherd-fixture-app",
       "image": "nginx:alpine",
       "state": "running",

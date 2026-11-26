@@ -11,7 +11,7 @@ import {
   type SetupResult,
   setupExitCode,
 } from './setup-types.ts';
-import { didYouMeanOrAll } from './suggest.ts';
+import { didYouMean, didYouMeanOrAll } from './suggest.ts';
 
 /**
  * A `setup` sub-group's declared action names — data-driven the same way `registry.ts`
@@ -59,6 +59,46 @@ export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
     actions: ['scaffold'],
   },
 ];
+
+/** Flags every setup action accepts. */
+const SETUP_GLOBAL_FLAGS = ['pretty', 'yes'];
+
+/** The flags each setup action reads, by `<sub-group> <action>`; any other flag is refused. */
+const SETUP_ACTION_FLAGS: Record<string, string[]> = {
+  'ssh-alias register': ['host', 'user', 'port', 'overwrite'],
+  'ssh-alias update': ['host', 'user', 'port'],
+  'db-target scaffold': ['alias', 'user', 'database', 'compose-file', 'service', 'container'],
+  'config-allowlist scaffold': ['paths'],
+  'files-allowlist scaffold': ['paths'],
+  'reveal-allowlist scaffold': ['keys'],
+  'deploy-recipe scaffold': ['alias', 'workdir'],
+};
+
+/** Refuses a flag the action does not read, so a typo such as `--ovewrite` never runs as if
+ *  it were absent; true when it printed the refusal. */
+function rejectUnknownSetupFlags(
+  sub: SetupSubGroupSpec,
+  action: string,
+  argTail: string[],
+): boolean {
+  const known = [...SETUP_GLOBAL_FLAGS, ...(SETUP_ACTION_FLAGS[`${sub.name} ${action}`] ?? [])];
+  const unknown = [...parseArgv(argTail).flags.keys()].find((name) => !known.includes(name));
+  if (unknown === undefined) {
+    return false;
+  }
+  const result = buildSetupResult({
+    command: `setup ${sub.name} ${action}`,
+    error: {
+      code: 'PARSE_ERROR',
+      message: `unknown flag --${unknown} for 'setup ${sub.name} ${action}'. Flags: ${known.map((flag) => `--${flag}`).join(', ')}`,
+      next: `sshepherd setup ${sub.name} --help`,
+      did_you_mean: didYouMean(unknown, known).map((flag) => `--${flag}`),
+    },
+  });
+  printSetupResult(result, false);
+  process.exitCode = setupExitCode(result);
+  return true;
+}
 
 function formatSetupTopHelp(): string {
   return [
@@ -474,6 +514,10 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (argTail.includes('--help') || argTail.includes('-h')) {
     process.stdout.write(`${formatSetupSubGroupHelp(subGroup)}\n`);
+    return;
+  }
+
+  if (rejectUnknownSetupFlags(subGroup, actionOrHelp, argTail)) {
     return;
   }
 

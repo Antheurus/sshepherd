@@ -6,7 +6,12 @@
 - `sshepherd --version` now reports the real version plus the git commit, build time and a hash of the command list, so you can tell which build is running.
 - `just release <version>` tests, builds and installs the binary in one atomic step, keeping the previous one; `just rollback` puts it back. A symlinked install is replaced by a real file and the old target is left untouched.
 - Commands that hit their `--timeout` on Alpine/busybox hosts now report `COMMAND_TIMEOUT` instead of a generic failure.
-- `just smoke` now runs live against a Debian and an Alpine test server (ports 8422 and 8423) and no longer touches `~/.ssh/config`; `just canary <alias>` checks a real host read-only.
+- `just smoke` now runs live against a Debian and an Alpine test server (ports 8413 and 8414) and no longer touches `~/.ssh/config`; `just canary <alias>` checks a real host read-only.
+- A mutating command whose audit line cannot be written (for example a state directory that is really a file) now still returns its result, flagged `AUDIT_WRITE_FAILED` with how the command ended, instead of a raw file-system error; unexpected internal errors no longer print file paths.
+- A malformed `targets.toml` now reports `CONFIG_PARSE_ERROR` with the line number and how to fix it (exit 2), instead of "sshepherd failed unexpectedly".
+- Aliases defined in a file your ssh config `Include`s, matched by a wildcard `Host` line, or set by a `Match` block are no longer refused as unknown; `hosts list` also shows the aliases from `Include`d files.
+- File paths with spaces, brackets, `#`, accents or other characters now work in the `files` and `config` commands; only a leading `-`, a NUL or a line break is refused.
+- `setup` commands now refuse an unknown flag with `PARSE_ERROR` (exit 2) instead of silently ignoring it.
 
 ## v0.4.0-rc.3 — Errors now tell you the next command
 

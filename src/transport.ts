@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describeError, errorInfo } from './errors.ts';
 import { CONNECT_TIMEOUT_SEC, CONTROL_PERSIST_SEC, KILL_AFTER_SEC } from './limits.ts';
-import { listHostAliases } from './parsers/ssh-config.ts';
+import { configMayDeclare, readSshConfigNames } from './parsers/ssh-config.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { didYouMean } from './suggest.ts';
 import type { ErrorInfo, RawResult } from './types.ts';
@@ -154,8 +154,10 @@ function socketPath(alias: string): string {
 }
 
 /** `ssh -G <anything>` exits 0 even for a name no config declares — it just echoes the name back
- *  as the hostname. So an alias is unknown when `-G` fails, or when it resolved to itself AND no
- *  `Host` stanza declares it. The hostname is compared and dropped, never kept or returned. */
+ *  as the hostname. So an alias is unknown when `-G` fails, or when it resolved to itself AND
+ *  nothing in the config (followed through `Include`) can apply to it: no literal `Host` entry,
+ *  no matching wildcard `Host` line, no `Match` block. The hostname is compared and dropped,
+ *  never kept or returned. */
 async function unknownAliasError(alias: string, deps: TransportDeps): Promise<ErrorInfo | null> {
   const result = await deps.runner(['-G', alias], VALIDATE_TIMEOUT_MS);
   const resolved = result.code === 0 && result.stdout.trim().length > 0;
@@ -164,12 +166,12 @@ async function unknownAliasError(alias: string, deps: TransportDeps): Promise<Er
   if (resolved && !echoed) {
     return null;
   }
-  const declared = listHostAliases(deps.sshConfigPath ?? defaultSshConfigPath());
-  if (resolved && declared.includes(alias)) {
+  const names = readSshConfigNames(deps.sshConfigPath ?? defaultSshConfigPath());
+  if (resolved && configMayDeclare(names, alias)) {
     return null;
   }
   return describeError('UNKNOWN_ALIAS', `ssh alias '${alias}' is not defined in ssh config`, {
-    did_you_mean: didYouMean(alias, declared),
+    did_you_mean: didYouMean(alias, names.aliases),
   });
 }
 

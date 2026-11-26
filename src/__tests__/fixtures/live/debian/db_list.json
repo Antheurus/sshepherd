@@ -1,9 +1,9 @@
 {
   "ok": true,
   "alias": "",
-  "ran_at": "2026-11-26T06:43:53.297Z",
+  "ran_at": "2026-11-26T06:53:45.355Z",
   "command": "db list",
-  "duration_ms": 0,
+  "duration_ms": 1,
   "data": {
     "targets": [
       "smoke-debian"

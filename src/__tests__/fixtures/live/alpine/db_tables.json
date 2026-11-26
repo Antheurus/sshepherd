@@ -1,9 +1,9 @@
 {
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T06:43:59.069Z",
+  "ran_at": "2026-11-26T06:53:51.015Z",
   "command": "db tables",
-  "duration_ms": 71,
+  "duration_ms": 60,
   "data": [
     {
       "schema": "public",

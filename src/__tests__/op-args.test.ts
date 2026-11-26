@@ -44,8 +44,20 @@ describe('assertPositional', () => {
     for (const value of ['a;b', 'a b', '$(id)', 'a\nb', 'a`b`']) {
       expect(() => assertPositional('container', value)).toThrow(OpError);
     }
-    for (const value of ['/etc/a;b', '/etc/$(id)', '/etc/a\nb', '/etc/a`b`']) {
+    for (const value of ['/etc/a\nb', '/etc/a\rb', '/etc/a\0b']) {
       expect(() => assertPositional('path', value)).toThrow(OpError);
+    }
+  });
+
+  test('a path takes any other character: shellJoin quotes it', () => {
+    for (const value of [
+      '/var/www/My Site (1)/x.txt',
+      '/srv/café/a',
+      '/srv/a#b/c',
+      '/srv/[x]/c',
+      "/srv/it's/a;b",
+    ]) {
+      expect(() => assertPositional('path', value)).not.toThrow();
     }
   });
 

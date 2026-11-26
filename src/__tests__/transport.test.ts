@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { errorInfo } from '../errors.ts';
 import { buildEnvelope } from '../output.ts';
+import { listHostAliases } from '../parsers/ssh-config.ts';
 import { executeOp, getOp } from '../registry.ts';
 import {
   classify,
@@ -599,5 +600,96 @@ describe('run — an alias no ssh config declares is UNKNOWN_ALIAS even though s
     const result = await run('bare-alias', 'echo hi', 10, { runner, sshConfigPath });
 
     expect(result.error).toBeNull();
+  });
+});
+
+describe('run — Include, wildcard Host and Match blocks are followed like ssh does', () => {
+  const tempDir = mkdtempSync(join(tmpdir(), 'sshepherd-include-test-'));
+  const sshConfigPath = join(tempDir, 'config');
+  writeFileSync(join(tempDir, 'extra.conf'), 'Host inc2\n  User u\n');
+  writeFileSync(
+    sshConfigPath,
+    'Include extra.conf\n\nHost *.internal\n  User ops\n\nMatch host m2\n  User x\n',
+  );
+  const bareConfigPath = join(tempDir, 'bare-config');
+  writeFileSync(bareConfigPath, 'Host web-prod\n  HostName 10.0.0.9\n');
+
+  /** `-G` goes to the real ssh, which only parses the temp config; every other call is
+   *  answered locally so no connection is ever attempted. */
+  function realParseRunner(configPath: string): SshRunner {
+    return async (args) => {
+      if (!args.includes('-G')) {
+        return { code: 255, stdout: '', stderr: 'no network in tests', timedOut: false };
+      }
+      const proc = Bun.spawn(['ssh', '-F', configPath, ...args], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+      return { code, stdout, stderr, timedOut: false };
+    };
+  }
+
+  for (const alias of ['inc2', 'x.internal', 'm2']) {
+    test(`${alias} is not refused as UNKNOWN_ALIAS`, async () => {
+      const result = await run(alias, 'echo hi', 10, {
+        runner: realParseRunner(sshConfigPath),
+        sshConfigPath,
+      });
+      expect(result.error?.code).not.toBe('UNKNOWN_ALIAS');
+    });
+  }
+
+  test('a name no pattern can match is still UNKNOWN_ALIAS', async () => {
+    const result = await run('totally-undeclared', 'echo hi', 10, {
+      runner: realParseRunner(bareConfigPath),
+      sshConfigPath: bareConfigPath,
+    });
+    expect(result.error?.code).toBe('UNKNOWN_ALIAS');
+  });
+
+  test('hosts list names the literal aliases of an Included file, never a wildcard', () => {
+    expect(listHostAliases(sshConfigPath)).toEqual(['inc2']);
+  });
+});
+
+describe('executeOp — an audit line that cannot be written keeps the op result', () => {
+  test('scripted success + audit path under a regular file -> AUDIT_WRITE_FAILED envelope, data kept, no throw', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-audit-fail-'));
+    const notADir = join(dir, 'state-file');
+    writeFileSync(notADir, '');
+    const op = getOp('services', 'restart');
+    if (!op) {
+      throw new Error('services restart op missing');
+    }
+    let calls = 0;
+    const outcomes: SpawnOutcome[] = [
+      { code: 0, stdout: 'hostname 10.0.0.9\n', stderr: '', timedOut: false },
+      { code: 0, stdout: '', stderr: '', timedOut: false },
+      { code: 0, stdout: 'web\n', stderr: '', timedOut: false },
+    ];
+    const scripted = scriptedRunner(outcomes);
+    const runner: SshRunner = async (args, timeoutMs) => {
+      calls += 1;
+      return scripted(args, timeoutMs);
+    };
+
+    const envelope = await executeOp(
+      op,
+      { alias: 'web-01', args: { container: 'web' } },
+      { transport: { runner }, yes: true, auditLogPath: join(notADir, 'audit.jsonl') },
+    );
+
+    expect(calls).toBe(3);
+    expect(envelope.ok).toBe(false);
+    expect(envelope.alias).toBe('web-01');
+    expect(envelope.error?.code).toBe('AUDIT_WRITE_FAILED');
+    expect(envelope.error?.op_outcome).toBe('ok');
+    expect(envelope.error?.message).not.toContain(dir);
+    expect(envelope.data).toEqual({ container: 'web', restarted: true });
   });
 });
