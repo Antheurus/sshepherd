@@ -177,6 +177,7 @@ describe.skipIf(!fixtureUp())('bounded db reads (smoke fixture)', () => {
         rows: [{ u: 'sshepherd_ro', n: 2 }],
         row_count: 1,
         truncated: false,
+        masked_columns: [],
       });
       const count = await run('count', `${alias}-host`, { table: 'users', 'where-eq': 'id=1' });
       expect(count.data).toEqual({ count: 1 });

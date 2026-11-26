@@ -10,6 +10,7 @@ import {
   statementTimeoutFor,
 } from '../db.ts';
 import { DB_QUERY_ROW_LIMIT } from '../limits.ts';
+import { pendingMigrations } from '../ops/db.ts';
 import { executeOp, getOp } from '../registry.ts';
 import { parseDiscover, roRole } from '../setup-db-target.ts';
 import { loadTargets } from '../targets.ts';
@@ -91,7 +92,12 @@ describe('db query: bounded, with the {rows, row_count, truncated} shape', () =>
       {},
       commands,
     );
-    expect(envelope.data).toEqual({ rows: [{ n: 1 }, { n: 2 }], row_count: 2, truncated: true });
+    expect(envelope.data).toEqual({
+      rows: [{ n: 1 }, { n: 2 }],
+      row_count: 2,
+      truncated: true,
+      masked_columns: [],
+    });
     const remote = unquote(commands.at(-1));
     expect(remote).toContain('LIMIT 3');
     expect(remote).toContain("SET statement_timeout = '60s'; SET lock_timeout = '2s'");
@@ -101,13 +107,18 @@ describe('db query: bounded, with the {rows, row_count, truncated} shape', () =>
   test(`no --max-rows: the limit is ${DB_QUERY_ROW_LIMIT}`, async () => {
     const commands: string[] = [];
     const envelope = await drive('query', { sql: 'SELECT 1 AS a' }, ok('[{"a":1}]'), {}, commands);
-    expect(envelope.data).toEqual({ rows: [{ a: 1 }], row_count: 1, truncated: false });
+    expect(envelope.data).toEqual({
+      rows: [{ a: 1 }],
+      row_count: 1,
+      truncated: false,
+      masked_columns: [],
+    });
     expect(commands.at(-1)).toContain(`LIMIT ${DB_QUERY_ROW_LIMIT + 1}`);
   });
 
   test('zero rows (json_agg NULL) is an empty rows list', async () => {
     const envelope = await drive('query', { sql: 'SELECT 1 WHERE false' }, ok(''));
-    expect(envelope.data).toEqual({ rows: [], row_count: 0, truncated: false });
+    expect(envelope.data).toEqual({ rows: [], row_count: 0, truncated: false, masked_columns: [] });
   });
 
   test('--max-rows outside 1..10000 is INVALID_ARGS before any ssh call', async () => {
@@ -128,7 +139,12 @@ describe('db query: bounded, with the {rows, row_count, truncated} shape', () =>
   test('--limit cuts rows and recounts row_count; --fields data.rows keeps only rows', async () => {
     const rows = JSON.stringify([{ n: 1 }, { n: 2 }, { n: 3 }]);
     const limited = await drive('query', { sql: 'SELECT n FROM t' }, ok(rows), { limit: 1 });
-    expect(limited.data).toEqual({ rows: [{ n: 1 }], row_count: 1, truncated: true });
+    expect(limited.data).toEqual({
+      rows: [{ n: 1 }],
+      row_count: 1,
+      truncated: true,
+      masked_columns: [],
+    });
     expect(limited.output_truncated).toBe(true);
     const fields = await drive('query', { sql: 'SELECT n FROM t' }, ok(rows), {
       fields: [['rows']],
@@ -257,9 +273,138 @@ describe('db describe / count / migrations', () => {
       },
     ]);
     const envelope = await drive('migrations', {}, ok(stdout));
-    expect(envelope.data).toEqual({ tables: JSON.parse(stdout) });
+    expect(envelope.data).toEqual({
+      tables: [
+        { ...JSON.parse(stdout)[0], current: '20261001_init', pending: null },
+        { ...JSON.parse(stdout)[1], current: '1', pending: null },
+      ],
+    });
     const none = await drive('migrations', {}, ok('[]'));
     expect(none.data).toEqual({ tables: [] });
+  });
+
+  test('migrations --table reads one known table, schema-qualified; anything else is refused', async () => {
+    const commands: string[] = [];
+    const stdout = JSON.stringify([
+      {
+        framework: 'rails',
+        table: 'app.schema_migrations',
+        migrations: [{ name: '20261015000000', applied_at: null }],
+      },
+    ]);
+    const envelope = await drive(
+      'migrations',
+      { table: 'app.schema_migrations' },
+      ok(stdout),
+      {},
+      commands,
+    );
+    expect((envelope.data as { tables: { current: string }[] }).tables[0]?.current).toBe(
+      '20261015000000',
+    );
+    const remote = unquote(commands.at(-1));
+    expect(remote).toContain('FROM "app"."schema_migrations"');
+    expect(remote).not.toContain('_prisma_migrations');
+    for (const bad of ['users', 'x;drop', 'a.b.schema_migrations']) {
+      const refused = await drive('migrations', { table: bad }, ok('[]'));
+      expect(refused.error?.code).toBe('INVALID_ARGS');
+    }
+    const absent = await drive('migrations', { table: 'schema_migrations' }, ok('[]'));
+    expect(absent.error?.code).toBe('VALIDATION_ERROR');
+  });
+
+  test('migrations --dir is allowlist-gated and lists the entries no applied name accounts for', async () => {
+    const allowlist = join(scratch, 'files-allowlist.toml');
+    writeFileSync(
+      allowlist,
+      `[${ALIAS}]\npaths = ["/opt/app/prisma/migrations", "/opt/app/db/migrate"]\n`,
+    );
+    const saved = process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlist;
+    try {
+      const commands: string[] = [];
+      const off = await drive('migrations', { dir: '/etc' }, ok('[]'), {}, commands);
+      expect(off.error?.code).toBe('VALIDATION_ERROR');
+      expect(commands.filter((line) => line.includes('psql'))).toEqual([]);
+
+      const tables = JSON.stringify([
+        {
+          framework: 'prisma',
+          table: '_prisma_migrations',
+          migrations: [
+            { name: '20261102103000_add_nickname', applied_at: '2026-11-02T10:30:00+00:00' },
+          ],
+          names: ['20261102103000_add_nickname', '20261001090000_init'],
+        },
+      ]);
+      const listing = [
+        '20261001090000_init',
+        '20261102103000_add_nickname',
+        '20261120080000_add_orgs',
+        'migration_lock.toml',
+      ];
+      const envelope = await drive(
+        'migrations',
+        { dir: '/opt/app/prisma/migrations' },
+        ok(`${tables}\n__DIR__\n${listing.join('\n')}\n`),
+        {},
+        commands,
+      );
+      expect((envelope.data as { tables: unknown[] }).tables).toEqual([
+        {
+          framework: 'prisma',
+          table: '_prisma_migrations',
+          current: '20261102103000_add_nickname',
+          migrations: [
+            { name: '20261102103000_add_nickname', applied_at: '2026-11-02T10:30:00+00:00' },
+          ],
+          pending: ['20261120080000_add_orgs'],
+        },
+      ]);
+      expect(unquote(commands.at(-1))).toContain("'names'");
+
+      const missing = await drive(
+        'migrations',
+        { dir: '/opt/app/db/migrate' },
+        ok('[]\n__DIR__\n__NO_DIR__\n'),
+      );
+      expect(missing.error?.code).toBe('VALIDATION_ERROR');
+    } finally {
+      if (saved === undefined) {
+        delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+      } else {
+        process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = saved;
+      }
+    }
+  });
+
+  test('pendingMigrations: rails versions, typeorm class names, knex and laravel file names', () => {
+    expect(
+      pendingMigrations(
+        [
+          '20260901000000_create_users.rb',
+          '20261015000000_add_orgs.rb',
+          '20261120000000_x.rb',
+          'schema.rb',
+        ],
+        ['20260901000000', '20261015000000'],
+      ),
+    ).toEqual(['20261120000000_x.rb']);
+    expect(
+      pendingMigrations(
+        ['1700000000000-Init.ts', '1700000000001-AddUsers.ts'],
+        ['Init1700000000000'],
+      ),
+    ).toEqual(['1700000000001-AddUsers.ts']);
+    expect(
+      pendingMigrations(['20261001_init.js', '20261001_users.js'], ['20261001_init.js']),
+    ).toEqual(['20261001_users.js']);
+    expect(
+      pendingMigrations(
+        ['2014_10_12_000000_create_users_table.php', '2026_11_01_000000_add_orgs.php'],
+        ['2014_10_12_000000_create_users_table'],
+      ),
+    ).toEqual(['2026_11_01_000000_add_orgs.php']);
   });
 });
 
@@ -545,5 +690,126 @@ describe('setup db-target ro-role and discover', () => {
       ],
       compose_projects: ['shop'],
     });
+  });
+});
+
+describe('db query: deny_columns masking', () => {
+  test('values of denied columns are masked after the fetch and named in masked_columns', async () => {
+    const rows = JSON.stringify([
+      {
+        id: 1,
+        email: 'rina@example.com',
+        password_hash: 'x1',
+        api_key: null,
+        rolpassword: 'SCRAM-SHA-256$4096:aa',
+      },
+      { id: 2, email: 'budi@example.com', password_hash: 'x2', api_key: 'k2', rolpassword: null },
+    ]);
+    const envelope = await drive('query', { sql: 'SELECT * FROM users' }, ok(rows));
+    expect(envelope.data).toEqual({
+      rows: [
+        {
+          id: 1,
+          email: 'rina@example.com',
+          password_hash: '***',
+          api_key: null,
+          rolpassword: '***',
+        },
+        {
+          id: 2,
+          email: 'budi@example.com',
+          password_hash: '***',
+          api_key: '***',
+          rolpassword: null,
+        },
+      ],
+      row_count: 2,
+      truncated: false,
+      masked_columns: ['api_key', 'password_hash', 'rolpassword'],
+    });
+    expect(JSON.stringify(envelope)).not.toContain('SCRAM-SHA-256$4096:aa');
+  });
+
+  test("a target's own deny_columns replaces the default list", async () => {
+    const rows = JSON.stringify([{ ssn: '123', password: 'p' }]);
+    const envelope = await drive('query', { sql: 'SELECT 1', deny_columns: '["^ssn$"]' }, ok(rows));
+    const data = envelope.data as { rows: Record<string, unknown>[]; masked_columns: string[] };
+    expect(data.rows[0]?.ssn).toBe('***');
+    expect(data.masked_columns).toEqual(['ssn']);
+  });
+});
+
+describe('db query: the caller SQL cannot leave the row-limit wrapper', () => {
+  const refused = [
+    "SELECT id, repeat('x', 5000) AS pad FROM big) sshepherd_q) t --",
+    'SELECT * FROM big) a) t, (SELECT * FROM (SELECT 1',
+    'SELECT 1 --\r) a) t, (SELECT (SELECT 1',
+    'SELECT 1 /* open',
+    'SELECT 1 /* /* nested */ still open',
+    '/* x */ ) x --',
+    "SELECT 'open",
+    'SELECT "open',
+    'SELECT $q$ open',
+    'SELECT (1',
+  ];
+  for (const sql of refused) {
+    test(`refused before ssh: ${JSON.stringify(sql)}`, async () => {
+      const commands: string[] = [];
+      const envelope = await drive('query', { sql }, ok('[]'), {}, commands);
+      expect(envelope.error?.code).toBe('VALIDATION_ERROR');
+      expect(commands.filter((line) => line.includes('psql'))).toEqual([]);
+    });
+  }
+
+  const accepted = [
+    'SELECT id FROM big -- a trailing comment',
+    "SELECT '--' AS dashes, '/*' AS opener, ')' AS paren",
+    "SELECT 'it''s' AS quote",
+    "SELECT E'a\\'b)' AS e",
+    "SELECT E'\\' ) x) t --' AS one_string",
+    "SELECT '\\' AS backslash, ')' AS p",
+    'SELECT $$ ) $$ AS d, $tag$ ( $tag$ AS t',
+    'SELECT "odd)name" FROM t /* ( */ WHERE (a = 1)',
+    'SELECT 1 /* nested /* ) */ */',
+    'SELECT a$b FROM t WHERE x = $1',
+  ];
+  for (const sql of accepted) {
+    test(`accepted and wrapped on its own lines: ${JSON.stringify(sql)}`, async () => {
+      const commands: string[] = [];
+      const envelope = await drive('query', { sql, 'max-rows': '1' }, ok('[]'), {}, commands);
+      expect(envelope.error?.code).toBeUndefined();
+      const remote = unquote(commands.at(-1));
+      expect(remote).toContain(`(\n${sql}\n) sshepherd_q LIMIT 2\n) t`);
+      expect(remote).toContain('SET standard_conforming_strings = on');
+    });
+  }
+});
+
+describe('setup db-target ro-role --tables-only', () => {
+  test('names the pg_authid exposure by default and grants only app tables with --tables-only', () => {
+    const path = join(scratch, 'ro-role-targets.toml');
+    writeFileSync(
+      path,
+      '[prod]\nalias = "web-1"\ncontainer = "db"\nuser = "app"\ndatabase = "app"\n',
+    );
+    const full = roRole('prod', { printSql: true }, path);
+    const tables = roRole('prod', { printSql: true, tablesOnly: true }, path);
+    if (!('sql' in full) || !('sql' in tables)) {
+      throw new Error('expected SQL');
+    }
+    expect(full.sql).toContain('pg_authid');
+    expect(full.sql).toContain('GRANT pg_read_all_data TO sshepherd_ro;');
+    expect(full.sql).toContain(
+      "has_table_privilege('sshepherd_ro', 'pg_authid', 'SELECT'); -- expect: t",
+    );
+    expect(tables.sql).not.toContain('GRANT pg_read_all_data');
+    expect(tables.sql).toContain('GRANT USAGE ON SCHEMA public TO sshepherd_ro;');
+    expect(tables.sql).toContain('GRANT SELECT ON ALL TABLES IN SCHEMA public TO sshepherd_ro;');
+    expect(tables.sql).toContain(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO sshepherd_ro;',
+    );
+    expect(tables.sql).toContain(
+      "has_table_privilege('sshepherd_ro', 'pg_authid', 'SELECT'); -- expect: f",
+    );
   });
 });

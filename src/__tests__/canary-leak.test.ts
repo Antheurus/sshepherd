@@ -212,11 +212,23 @@ function argOverrides(alias: string): Record<string, Record<string, string[]>> {
 /** Ops whose args are alternatives or paired (`env keys` takes a container or a path, `env diff` a
  *  remote file and a local reference), so the one-value-per-arg product would build calls the op
  *  refuses; each entry lists the exact argument sets to run. */
-function explicitDrives(): Record<string, Record<string, string | boolean>[]> {
+function explicitDrives(alias: string): Record<string, Record<string, string | boolean>[]> {
+  const ranged = CANARY_FILES.flatMap((path): Record<string, string>[] => [
+    { path },
+    { path, lines: '2:4' },
+  ]);
   return {
     'env keys': [{ container: CANARY_CONTAINER }, ...CANARY_FILES.map((path) => ({ path }))],
     'env diff': CANARY_FILES.map((path) => ({ path, against: referenceEnvPath })),
     'hosts trust': [{ 'dry-run': true }],
+    'files head': ranged,
+    'files tail': ranged,
+    'files cat': ranged,
+    'db migrations': [
+      ...(argValues(alias).target ?? []).map((target) => ({ target })),
+      { target: alias, table: 'schema_migrations' },
+      { target: alias, dir: '/opt/canary' },
+    ],
   };
 }
 
@@ -369,7 +381,7 @@ function writeFixtureConfig(): void {
   const aliases = VARIANTS.map((variant) => `smoke-${variant}`);
   const targets = aliases
     .flatMap((alias) => [
-      `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
+      `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\ncontainers = ["${CANARY_CONTAINER}"]\n`,
       `[${pgConnectTarget(alias)}]\nalias = "${alias}"\ncontainer = "${PREFIX}-canary-pg"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
       `[${envUrlTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\n`,
       `[${envViaTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\nenv_key = "DATABASE_URL"\npsql_container = "${PREFIX}-postgres"\n`,
@@ -443,7 +455,7 @@ function writeFixtureConfig(): void {
  *  is never skipped); `files download` writes into the scratch dir so the file can be searched. */
 function drivesFor(op: OpSpec, alias: string): Drive[] {
   const name = `${op.group} ${op.name}`;
-  const explicit = explicitDrives()[name];
+  const explicit = explicitDrives(alias)[name];
   if (explicit !== undefined) {
     return explicit.map((args) => ({
       label: `${name} ${Object.entries(args)

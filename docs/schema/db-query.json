@@ -78,6 +78,9 @@
         {
           "type": "object",
           "properties": {
+            "masked_columns": {
+              "type": "array"
+            },
             "row_count": {
               "type": "integer"
             },

@@ -20,6 +20,11 @@
         "name": "reveal",
         "kind": "flag",
         "required": false
+      },
+      {
+        "name": "lines",
+        "kind": "flag",
+        "required": false
       }
     ]
   },

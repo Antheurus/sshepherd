@@ -170,3 +170,9 @@ export const LOG_PAGE_MAX_BYTES = MAX_STDOUT_BYTES - 65_536;
  *  trip answers in milliseconds, so a master still silent after 3 s is hung, and every op that
  *  reuses it would stall behind it. */
 export const DIAGNOSE_MASTER_CHECK_TIMEOUT_SEC = 3;
+/** `db migrations --dir`: applied names read and directory entries listed for the pending
+ *  comparison. 10,000 migrations is decades of a busy app; past it the comparison would be cut,
+ *  so the op refuses instead of reporting a partial `pending`. */
+export const DB_MIGRATIONS_COMPARE_MAX = 10_000;
+/** `files head|tail|cat --lines A:B`: the widest range one call returns, the same as `MAX_HEAD_LINES`. */
+export const MAX_FILES_LINE_SPAN = 5_000;

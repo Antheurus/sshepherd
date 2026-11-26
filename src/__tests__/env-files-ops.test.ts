@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   MAX_FILES_GREP_PATTERN_CHARS,
+  MAX_FILES_LINE_SPAN,
   MAX_FIND_NAME_CHARS,
   MAX_FIND_RESULTS,
   MAX_GREP_MATCH_LINES,
@@ -27,18 +28,30 @@ const ALIAS = 'web-01';
 let dir = '';
 let allowlistPath = '';
 const savedAllowlist = process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+const savedTargets = process.env.SSHEPHERD_TARGETS_PATH;
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), 'sshepherd-env-files-'));
   allowlistPath = join(dir, 'files-allowlist.toml');
   process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+  const targetsPath = join(dir, 'targets.toml');
+  writeFileSync(
+    targetsPath,
+    `[app-db]\nalias = "${ALIAS}"\ncontainer = "app-db"\nuser = "ro"\ndatabase = "app"\ncontainers = ["app"]\n`,
+  );
+  process.env.SSHEPHERD_TARGETS_PATH = targetsPath;
 });
 
 afterAll(() => {
-  if (savedAllowlist === undefined) {
-    delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
-  } else {
-    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = savedAllowlist;
+  for (const [key, value] of [
+    ['SSHEPHERD_FILES_ALLOWLIST_PATH', savedAllowlist],
+    ['SSHEPHERD_TARGETS_PATH', savedTargets],
+  ] as const) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
   }
 });
 
@@ -166,6 +179,70 @@ describe('env keys — the host reduces to key names, values never cross the wir
     ]);
   });
 
+  test('a .env file: multi-line quoted values, KEY = value, export, CRLF, comments, empty and = in a value', () => {
+    const file = join(dir, 'multi.env');
+    writeFileSync(
+      file,
+      [
+        '# comment line',
+        '   # indented comment KEY_IN_COMMENT=x',
+        'SSH_KEY="-----BEGIN OPENSSH PRIVATE KEY-----',
+        'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAE',
+        'CANARYml==',
+        '-----END OPENSSH PRIVATE KEY-----"',
+        "JSON_CFG='{",
+        '  "inner": "INNERKEY=canary-json"',
+        "}'",
+        'B64="aGVsbG8K',
+        'CANARYb64=="',
+        'ESCAPED="a \\"quoted\\" word',
+        'NOTAKEY=still-inside"',
+        'SPACED = value',
+        'export EXPORTED=1',
+        'WIN=crlf\r',
+        'EMPTY=',
+        'EQUALS=a=b=c',
+        'LAST=ok',
+        '',
+      ].join('\n'),
+    );
+    const { code, stdout } = runRemote(remoteOf('env', 'keys', { path: file }));
+    expect(code).toBe(0);
+    expect(stdout.split('\n').filter((line) => line.length > 0)).toEqual([
+      'SSH_KEY\tset\t33+',
+      'JSON_CFG\tset\t33+',
+      'B64\tset\t9-32',
+      'ESCAPED\tset\t33+',
+      'SPACED\tset\t1-8',
+      'EXPORTED\tset\t1-8',
+      'WIN\tset\t1-8',
+      'EMPTY\tempty\t0',
+      'EQUALS\tset\t1-8',
+      'LAST\tset\t1-8',
+    ]);
+    expect(stdout).not.toContain('CANARY');
+    expect(stdout).not.toContain('INNERKEY');
+    expect(stdout).not.toContain('NOTAKEY');
+    expect(stdout).not.toContain('KEY_IN_COMMENT');
+  });
+
+  test('an unterminated quoted value is one key to the end of the file, its lines never keys', () => {
+    const file = join(dir, 'open.env');
+    writeFileSync(file, 'A=1\nOPEN="never closed\nLEAKED=text\n');
+    const { stdout } = runRemote(remoteOf('env', 'keys', { path: file }));
+    expect(stdout.split('\n').filter((line) => line.length > 0)).toEqual([
+      'A\tset\t1-8',
+      'OPEN\tset\t9-32',
+    ]);
+  });
+
+  test('--container must be declared for the alias in targets.toml, before any ssh call', async () => {
+    const { envelope, ssh } = await run('env', 'keys', { container: 'billing' });
+    expect(envelope.error?.code).toBe('VALIDATION_ERROR');
+    expect(envelope.error?.message).toContain("container 'billing' is not declared for alias");
+    expect(ssh).toBe(0);
+  });
+
   test('a missing file answers __NOT_FOUND__ and the op refuses it', async () => {
     allow('/opt/app/.env');
     const { envelope } = await run('env', 'keys', { path: '/opt/app/.env' }, '__NOT_FOUND__\n');
@@ -243,8 +320,14 @@ describe('services inspect — env is key names only', () => {
     RestartCount: 0,
     State: { Status: 'running', Health: { Status: 'healthy' } },
     HostConfig: { Privileged: false },
-    NetworkSettings: { Ports: { '80/tcp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] } },
-    Config: { Image: 'nginx', Labels: null },
+    NetworkSettings: {
+      Ports: { '80/tcp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] },
+      Networks: {
+        web_default: { IPAddress: '172.18.0.4', MacAddress: '02:42:ac:12:00:04' },
+        bridge: { IPAddress: '' },
+      },
+    },
+    Config: { Image: 'nginx', Labels: null, Cmd: ['nginx', '-g', 'daemon off;'] },
     Mounts: [{ Type: 'bind', Source: '/srv/data', Destination: '/data', RW: false }],
   });
 
@@ -270,6 +353,28 @@ describe('services inspect — env is key names only', () => {
       { key: 'API_TOKEN', state: 'set', length_bucket: '33+' },
       { key: 'EMPTY', state: 'empty', length_bucket: '0' },
     ]);
+  });
+
+  test('networks (name and address) and cmd come back; --fields networks,cmd keeps exactly those', async () => {
+    const stdout = `${DOCUMENT}\n__ENV__\nA\tset\t1-8\n`;
+    const { runner } = spyRunner(stdout);
+    const envelope = await executeOp(
+      op('services', 'inspect'),
+      { alias: ALIAS, args: { container: 'web' } },
+      {
+        transport: { runner },
+        fields: [['networks'], ['cmd']],
+        auditLogPath: join(dir, 'audit.jsonl'),
+      },
+    );
+    const [detail] = envelope.data as Record<string, unknown>[];
+    expect(Object.keys(detail ?? {}).sort()).toEqual(['cmd', 'networks']);
+    expect(detail?.cmd).toEqual(['nginx', '-g', 'daemon off;']);
+    const networks = detail?.networks as { name: string; ip_address: string | null }[];
+    expect(networks.map((network) => network.name)).toEqual(['bridge', 'web_default']);
+    expect(networks[0]?.ip_address).toBeNull();
+    expect(JSON.stringify(envelope)).not.toContain('172.18.0.4');
+    expect(JSON.stringify(envelope)).not.toContain('02:42:ac');
   });
 
   test('--fields mounts,ports,health,env keeps exactly those', async () => {
@@ -362,7 +467,7 @@ describe('files grep / find — roots, patterns, and the shell', () => {
     expect(viaLink.stdout.trim()).toBe('__ESCAPE__');
 
     const grep = runRemote(remoteOf('files', 'grep', { path: root, pattern: 'ERROR' }));
-    expect(grep.stdout).toContain('app.log:1:ERROR boom');
+    expect(grep.stdout).toContain(`app.log\u00001:ERROR boom\n\u0000\u0000`);
     expect(grep.stdout).not.toContain('outside');
   });
 
@@ -434,18 +539,22 @@ describe('files grep / find — roots, patterns, and the shell', () => {
     }
   });
 
+  /** One file's block as the per-file grep script prints it: `path NUL lines NUL whole NUL`. */
+  const grepBlock = (path: string, lines: string[], whole = ''): string =>
+    `${path}\u0000${lines.join('\n')}\n\u0000${whole === '' ? '' : Buffer.from(whole).toString('base64')}\u0000`;
+
   test('grep lines from an env file are masked, a log line is not, and the cap says truncated', async () => {
     allow('/opt/myapp');
-    const lines = [
-      '/opt/myapp/.env:2:DB_PASSWORD=fake-secret-value-3',
-      '/opt/myapp/.env-3-APP_NAME=smoke',
-      '/opt/myapp/app.log:2:2026-11-27 ERROR upstream refused',
-    ];
+    const envText = 'APP=x\nDB_PASSWORD=fake-secret-value-3\nAPP_NAME=smoke\n';
     const { envelope } = await run(
       'files',
       'grep',
       { path: '/opt/myapp', pattern: '.' },
-      lines.join('\n'),
+      grepBlock(
+        '/opt/myapp/.env',
+        ['2:DB_PASSWORD=fake-secret-value-3', '3-APP_NAME=smoke'],
+        envText,
+      ) + grepBlock('/opt/myapp/app.log', ['2:2026-11-27 ERROR upstream refused']),
     );
     const data = envelope.data as { lines: string[]; truncated: boolean };
     expect(data.lines[0]).toBe('/opt/myapp/.env:2:DB_PASSWORD=***MASKED***');
@@ -454,19 +563,77 @@ describe('files grep / find — roots, patterns, and the shell', () => {
     expect(JSON.stringify(envelope)).not.toContain('fake-secret-value');
     expect(envelope.scrubbed).toBeGreaterThanOrEqual(2);
 
-    const many = Array.from(
-      { length: MAX_GREP_MATCH_LINES + 1 },
-      (_, i) => `/opt/myapp/a.log:${i}:x`,
-    );
+    const many = Array.from({ length: MAX_GREP_MATCH_LINES + 1 }, (_, i) => `${i}:x`);
     const capped = await run(
       'files',
       'grep',
       { path: '/opt/myapp', pattern: 'x' },
-      many.join('\n'),
+      grepBlock('/opt/myapp/a.log', many),
     );
     const cappedData = capped.envelope.data as { lines: string[]; truncated: boolean };
     expect(cappedData.lines.length).toBe(MAX_GREP_MATCH_LINES);
     expect(cappedData.truncated).toBe(true);
+  });
+
+  test('a dated directory keeps its env file masked: the path comes from its own slot, not a split', async () => {
+    allow('/opt/x');
+    const envText = 'NOTE=fake-secret-dated\n';
+    const { envelope } = await run(
+      'files',
+      'grep',
+      { path: '/opt/x', pattern: 'NOTE' },
+      grepBlock('/opt/x/rel-2026-11/.env', ['1:NOTE=fake-secret-dated'], envText),
+    );
+    expect((envelope.data as { lines: string[] }).lines).toEqual([
+      '/opt/x/rel-2026-11/.env:1:NOTE=***MASKED***',
+    ]);
+  });
+
+  test('PEM bodies are masked in any file, and a line inside a multi-line env value is masked whole', async () => {
+    allow('/opt/x');
+    const pem = [
+      '1:tls key backup',
+      '2:-----BEGIN RSA PRIVATE KEY-----',
+      '3:MIIEowFAKEBODYLINE',
+      '4:-----END RSA PRIVATE KEY-----',
+    ];
+    const envText =
+      'A=1\nKEY="-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\nFAKEINNERml==\n-----END OPENSSH PRIVATE KEY-----"\nZ=2\n';
+    const { envelope } = await run(
+      'files',
+      'grep',
+      { path: '/opt/x', pattern: '.' },
+      grepBlock('/opt/x/sub/backup.txt', pem) +
+        grepBlock('/opt/x/app.env', ['4:FAKEINNERml==', '6:Z=2'], envText) +
+        grepBlock('/opt/x/cut.env', ['9:FAKEPASTCUT=1'], 'A=1\n'),
+    );
+    const lines = (envelope.data as { lines: string[] }).lines;
+    // Line 4 (the END marker) is left to the envelope scrubber, which rewrites it on its own.
+    expect([...lines.slice(0, 3), ...lines.slice(4)]).toEqual([
+      '/opt/x/sub/backup.txt:1:tls key backup',
+      '/opt/x/sub/backup.txt:2:-----BEGIN RSA PRIVATE KEY-----',
+      '/opt/x/sub/backup.txt:3:***',
+      '/opt/x/app.env:4:***',
+      '/opt/x/app.env:6:Z=***MASKED***',
+      '/opt/x/cut.env:9:***',
+    ]);
+    expect(JSON.stringify(envelope)).not.toContain('FAKE');
+  });
+
+  test('the per-file script on a real tree: env-shaped files carry themselves whole, others do not', () => {
+    const root = join(dir, 'grep-real');
+    mkdirSync(join(root, 'rel-2026-11'), { recursive: true });
+    writeFileSync(join(root, 'rel-2026-11', '.env'), 'NOTE=fake-dated\n');
+    writeFileSync(join(root, 'notes.txt'), 'NOTE in notes\n');
+    allow(root);
+    const out = runRemote(remoteOf('files', 'grep', { path: root, pattern: 'NOTE' })).stdout;
+    const parts = out.split('\u0000');
+    const real = realpathSync(root);
+    const envIndex = parts.indexOf(join(real, 'rel-2026-11', '.env'));
+    const txtIndex = parts.indexOf(join(real, 'notes.txt'));
+    expect(parts[envIndex + 1]).toBe('1:NOTE=fake-dated\n');
+    expect(Buffer.from(parts[envIndex + 2] ?? '', 'base64').toString()).toBe('NOTE=fake-dated\n');
+    expect(parts[txtIndex + 2]).toBe('');
   });
 
   test('find caps at MAX_FIND_RESULTS and says truncated', async () => {
@@ -506,6 +673,70 @@ describe('files head', () => {
       lines: ['A=***MASKED***', 'PASSWORD=***MASKED***'],
       lines_returned: 2,
     });
+  });
+});
+
+describe('files head | tail | cat --lines A:B', () => {
+  test('A:B is validated, at most MAX_FILES_LINE_SPAN lines, and never beside --n', async () => {
+    allow('/opt/app/app.log');
+    for (const name of ['head', 'tail', 'cat']) {
+      for (const lines of ['0:5', '5:4', 'x:9', '1', `1:${MAX_FILES_LINE_SPAN + 1}`]) {
+        const { envelope, ssh } = await run('files', name, { path: '/opt/app/app.log', lines });
+        expect({ name, lines, code: envelope.error?.code, ssh }).toEqual({
+          name,
+          lines,
+          code: 'INVALID_ARGS',
+          ssh: 0,
+        });
+      }
+    }
+    const both = await run('files', 'head', { path: '/opt/app/app.log', lines: '1:2', n: '2' });
+    expect(both.envelope.error?.code).toBe('INVALID_ARGS');
+  });
+
+  test('a plain file reads only lines A to B on the host; an env-shaped one from line 1, cut after masking', async () => {
+    allow('/opt/app/app.log', '/opt/app/.env');
+    expect(remoteOf('files', 'head', { path: '/opt/app/app.log', lines: '3:4' })).toBe(
+      "'sed' '-n' '3,4p;4q' '--' '/opt/app/app.log'",
+    );
+    expect(remoteOf('files', 'tail', { path: '/opt/app/.env', lines: '3:4' })).toBe(
+      "'head' '-n' '4' '--' '/opt/app/.env'",
+    );
+    const plain = await run(
+      'files',
+      'head',
+      { path: '/opt/app/app.log', lines: '3:4' },
+      'three\nfour\n',
+    );
+    expect(plain.envelope.data).toEqual({ lines: ['three', 'four'], lines_returned: 2 });
+    const env = await run(
+      'files',
+      'tail',
+      { path: '/opt/app/.env', lines: '3:4' },
+      'A=1\nKEY="-----BEGIN\nFAKEBODYml==\nB=2\n',
+    );
+    expect(env.envelope.data).toEqual({ lines: ['***', '***'], lines_returned: 2 });
+    expect(JSON.stringify(env.envelope)).not.toContain('FAKEBODY');
+  });
+
+  test('cat --lines cuts the size-guarded file; an env file is masked line for line first', async () => {
+    allow('/opt/app/.env', '/opt/app/app.log');
+    const env = await run(
+      'files',
+      'cat',
+      { path: '/opt/app/.env', lines: '2:3' },
+      'A=1\nB=fake-two\nC=3\nD=4\n',
+    );
+    expect((env.envelope.data as { content: string }).content).toBe(
+      'B=***MASKED***\nC=***MASKED***',
+    );
+    const plain = await run(
+      'files',
+      'cat',
+      { path: '/opt/app/app.log', lines: '2:2' },
+      'one\ntwo\nthree\n',
+    );
+    expect((plain.envelope.data as { content: string }).content).toBe('two');
   });
 });
 

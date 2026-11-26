@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scaffold } from '../setup-db-target.ts';
-import { loadTargets, resolveTarget } from '../targets.ts';
+import { DEFAULT_DENY_COLUMNS, loadTargets, resolveTarget } from '../targets.ts';
 
 function tempTargetsPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'sshepherd-db-target-test-'));
@@ -51,6 +51,8 @@ describe('scaffold', () => {
       sudoUser: null,
       pgHost: null,
       pgPort: null,
+      denyColumns: DEFAULT_DENY_COLUMNS,
+      containers: [],
     };
     const targets = loadTargets(path);
     expect(targets.prod).toEqual(expectedTarget);
@@ -96,6 +98,8 @@ describe('scaffold', () => {
       sudoUser: null,
       pgHost: null,
       pgPort: null,
+      denyColumns: DEFAULT_DENY_COLUMNS,
+      containers: [],
     };
     const targets = loadTargets(path);
     expect(targets.staging).toEqual(expectedTarget);

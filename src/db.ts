@@ -1,6 +1,6 @@
 import { Parser } from 'node-sql-parser';
 import { DB_LOCK_TIMEOUT_SEC, DB_STATEMENT_GRACE_SEC } from './limits.ts';
-import { shellJoin } from './quote.ts';
+import { shellJoin, shq } from './quote.ts';
 import { OpError } from './types.ts';
 
 const parser = new Parser();
@@ -89,13 +89,136 @@ export function assertSelectOnly(sql: string): void {
  */
 export function wrapReadOnlyTxn(sql: string): string {
   const trimmed = sql.trim().replace(/;+\s*$/, '');
-  return `BEGIN TRANSACTION READ ONLY; ${trimmed}; ROLLBACK;`;
+  return `BEGIN TRANSACTION READ ONLY;\n${trimmed}\n;\nROLLBACK;`;
 }
 
-/** Wraps arbitrary SQL so psql's `-t -A` output is exactly one JSON value (array), never a raw table. */
+/** Wraps arbitrary SQL so psql's `-t -A` output is exactly one JSON value (array), never a raw table.
+ *  The SQL sits on its own lines, so a trailing `--` comment in it ends at the newline after it. */
 export function wrapAsJsonAgg(sql: string): string {
   const trimmed = sql.trim().replace(/;+\s*$/, '');
-  return `SELECT json_agg(t) FROM (${trimmed}) t`;
+  return `SELECT json_agg(t) FROM (\n${trimmed}\n) t`;
+}
+
+const IDENT_START = /[A-Za-z_\u0080-\uffff]/;
+const IDENT_CONT = /[A-Za-z0-9_$\u0080-\uffff]/;
+const DOLLAR_TAG = /^\$(?:[A-Za-z_\u0080-\uffff][A-Za-z0-9_\u0080-\uffff]*)?\$/;
+
+/** Index just past the quote that closes a string or quoted identifier opened before `from`;
+ *  -1 when it never closes. A doubled quote is one quote; `backslash` (E'' strings) also lets a
+ *  backslash escape the next character. */
+function closingQuote(sql: string, from: number, quote: string, backslash: boolean): number {
+  for (let i = from; i < sql.length; i += 1) {
+    const c = sql[i];
+    if (backslash && c === '\\') {
+      i += 1;
+    } else if (c === quote) {
+      if (sql[i + 1] !== quote) {
+        return i + 1;
+      }
+      i += 1;
+    }
+  }
+  return -1;
+}
+
+/** Index just past the `*\/` that closes the block comment opened at `from`; -1 when it never
+ *  closes. Postgres nests block comments. */
+function closingComment(sql: string, from: number): number {
+  let level = 1;
+  let i = from + 2;
+  while (i < sql.length) {
+    if (sql.startsWith('/*', i)) {
+      level += 1;
+      i += 2;
+    } else if (sql.startsWith('*/', i)) {
+      level -= 1;
+      i += 2;
+      if (level === 0) {
+        return i;
+      }
+    } else {
+      i += 1;
+    }
+  }
+  return -1;
+}
+
+function unwrappableSql(why: string): OpError {
+  return new OpError(
+    'VALIDATION_ERROR',
+    `db query: ${why}, so it cannot run inside the row limit`,
+    {
+      hint: 'Pass one complete SELECT: every ( closed inside it, and no string, quoted name or /* comment left open.',
+    },
+  );
+}
+
+/**
+ * Security guard for `db query`'s free-text `sql` arg: it runs inside sshepherd's wrapper
+ * (`FROM (\n<sql>\n) sshepherd_q LIMIT n`), so it must not be able to close that wrapper's
+ * parenthesis itself (`... FROM big) sshepherd_q) t, (SELECT (SELECT 1` aggregates every row past
+ * the limit) or leave a string or comment open for the wrapper's tail to fall into. Scanned with
+ * Postgres's lexical rules (standard strings, E'' escapes, dollar quotes, quoted identifiers,
+ * `--` comments ending at \n or \r, nested block comments), every parenthesis outside them must
+ * close inside the caller's text. `boundedSessionSql` pins `standard_conforming_strings` on, so a
+ * backslash in a plain '' string is a character to the server exactly as it is here.
+ */
+export function assertSelfContainedSql(sql: string): void {
+  let depth = 0;
+  let i = 0;
+  while (i < sql.length) {
+    const c = sql[i] as string;
+    if (c === '-' && sql[i + 1] === '-') {
+      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') {
+        i += 1;
+      }
+    } else if (c === '/' && sql[i + 1] === '*') {
+      i = closingComment(sql, i);
+      if (i === -1) {
+        throw unwrappableSql('the SQL ends inside a /* comment');
+      }
+    } else if (c === "'" || c === '"') {
+      i = closingQuote(sql, i + 1, c, false);
+      if (i === -1) {
+        throw unwrappableSql(`the SQL leaves a ${c === '"' ? 'quoted name' : 'string'} open`);
+      }
+    } else if (IDENT_START.test(c)) {
+      const start = i;
+      while (i < sql.length && IDENT_CONT.test(sql[i] as string)) {
+        i += 1;
+      }
+      if (i - start === 1 && (c === 'e' || c === 'E') && sql[i] === "'") {
+        i = closingQuote(sql, i + 1, "'", true);
+        if (i === -1) {
+          throw unwrappableSql('the SQL leaves a string open');
+        }
+      }
+    } else if (c === '$') {
+      const tag = DOLLAR_TAG.exec(sql.slice(i))?.[0];
+      if (tag === undefined) {
+        i += 1;
+      } else {
+        const end = sql.indexOf(tag, i + tag.length);
+        if (end === -1) {
+          throw unwrappableSql('the SQL leaves a dollar-quoted string open');
+        }
+        i = end + tag.length;
+      }
+    } else {
+      if (c === '(') {
+        depth += 1;
+      } else if (c === ')') {
+        depth -= 1;
+        if (depth < 0) {
+          throw unwrappableSql('the SQL closes a parenthesis it never opened');
+        }
+      }
+      i += 1;
+    }
+  }
+  if (depth !== 0) {
+    throw unwrappableSql('the SQL leaves a parenthesis open');
+  }
 }
 
 export interface DbConnection {
@@ -355,14 +478,14 @@ export function statementTimeoutFor(budgetSec: number): number {
  *  next buffer's statement runs under them. A statement cannot lift its own timer — Postgres arms
  *  it when the statement starts. */
 export function boundedSessionSql(statementTimeoutSec: number): string {
-  return `SET statement_timeout = '${statementTimeoutSec}s'; SET lock_timeout = '${DB_LOCK_TIMEOUT_SEC}s'`;
+  return `SET statement_timeout = '${statementTimeoutSec}s'; SET lock_timeout = '${DB_LOCK_TIMEOUT_SEC}s'; SET standard_conforming_strings = on`;
 }
 
 /** At most `limit + 1` rows of the caller's SELECT: the extra row is how `truncated` is known
  *  without a second count query. */
 export function limitRows(sql: string, limit: number): string {
   const trimmed = sql.trim().replace(/;+\s*$/, '');
-  return `SELECT * FROM (${trimmed}) sshepherd_q LIMIT ${limit + 1}`;
+  return `SELECT * FROM (\n${trimmed}\n) sshepherd_q LIMIT ${limit + 1}`;
 }
 
 const IDENT_PART = /^(?:[A-Za-z_][A-Za-z0-9_$]*|"[^"]+")$/;
@@ -430,8 +553,8 @@ export function countRowsSql(
 interface MigrationSource {
   framework: string;
   table: string;
-  /** SELECT over the table yielding `name` and `applied_at` (null when the table keeps no time). */
-  select: string;
+  /** Columns yielding `name` and `applied_at` (null when the table keeps no time). */
+  columns: string;
   order: string;
 }
 
@@ -440,80 +563,135 @@ const MIGRATION_SOURCES: MigrationSource[] = [
   {
     framework: 'prisma',
     table: '_prisma_migrations',
-    select: 'SELECT migration_name AS name, finished_at AS applied_at FROM _prisma_migrations',
+    columns: 'migration_name AS name, finished_at AS applied_at',
     order: 'started_at DESC',
   },
   {
     framework: 'knex',
     table: 'knex_migrations',
-    select: 'SELECT name, migration_time AS applied_at FROM knex_migrations',
+    columns: 'name, migration_time AS applied_at',
     order: 'id DESC',
   },
   {
     framework: 'typeorm',
     table: 'migrations_typeorm',
-    select: 'SELECT name, to_timestamp("timestamp" / 1000.0) AS applied_at FROM migrations_typeorm',
+    columns: 'name, to_timestamp("timestamp" / 1000.0) AS applied_at',
     order: 'id DESC',
   },
   {
     framework: 'rails',
     table: 'schema_migrations',
-    select: 'SELECT version::text AS name, NULL::timestamptz AS applied_at FROM schema_migrations',
+    columns: 'version::text AS name, NULL::timestamptz AS applied_at',
     order: 'version DESC',
   },
   {
     framework: 'laravel',
     table: 'migrations',
-    select: 'SELECT migration AS name, NULL::timestamptz AS applied_at FROM migrations',
+    columns: 'migration AS name, NULL::timestamptz AS applied_at',
     order: 'id DESC',
   },
 ];
 
 export const MIGRATION_FRAMEWORKS = MIGRATION_SOURCES.map((source) => source.framework);
+export const MIGRATION_TABLES = MIGRATION_SOURCES.map((source) => source.table);
 
-/** Which candidate tables exist, as space-separated framework names (`to_regclass` is NULL for a
- *  missing one, so nothing here references a table that may be absent). */
-export function migrationTablesPresentSql(): string {
-  const values = MIGRATION_SOURCES.map(
-    (source) => `(${quoteLiteral(source.framework)}, ${quoteLiteral(source.table)})`,
-  ).join(', ');
-  return `SELECT coalesce(string_agg(f, ' '), '') FROM (VALUES ${values}) v(f, t) WHERE to_regclass(t) IS NOT NULL`;
+/** Which framework's table to read, and as which quoted relation. */
+export interface MigrationTableRef {
+  framework: string;
+  relation: string;
 }
 
-/** One framework's applied migrations, newest first, as one JSON object. */
-export function migrationsSql(framework: string, limit: number): string {
+/** `--table <name>` (validated by `quoteIdentifier`): the framework whose table it is, matched by
+ *  its last part, so `app.schema_migrations` reads a rails table outside the search path. */
+export function migrationTableRef(quoted: string): MigrationTableRef | null {
+  const last = quoted.slice(quoted.lastIndexOf('"', quoted.length - 2) + 1, -1);
+  const source = MIGRATION_SOURCES.find((entry) => entry.table === last);
+  return source === undefined ? null : { framework: source.framework, relation: quoted };
+}
+
+function sourceFor(framework: string): MigrationSource {
   const source = MIGRATION_SOURCES.find((entry) => entry.framework === framework);
   if (source === undefined) {
     throw new OpError('INTERNAL_ERROR', `db migrations: no source for '${framework}'`);
   }
+  return source;
+}
+
+function defaultRefs(): MigrationTableRef[] {
+  return MIGRATION_SOURCES.map((source) => ({
+    framework: source.framework,
+    relation: `"${source.table}"`,
+  }));
+}
+
+/** Which candidate tables exist, as space-separated framework names (`to_regclass` is NULL for a
+ *  missing one, so nothing here references a table that may be absent). */
+export function migrationTablesPresentSql(refs: MigrationTableRef[] = defaultRefs()): string {
+  const values = refs
+    .map((ref) => `(${quoteLiteral(ref.framework)}, ${quoteLiteral(ref.relation)})`)
+    .join(', ');
+  return `SELECT coalesce(string_agg(f, ' '), '') FROM (VALUES ${values}) v(f, t) WHERE to_regclass(t) IS NOT NULL`;
+}
+
+/** One framework's applied migrations, newest first, as one JSON object; with `namesLimit`, also
+ *  every applied name up to that many plus one, for the `--dir` comparison. */
+export function migrationsSql(
+  framework: string,
+  limit: number,
+  relation = `"${sourceFor(framework).table}"`,
+  namesLimit: number | null = null,
+): string {
+  const source = sourceFor(framework);
+  const ordered = `SELECT ${source.columns} FROM ${relation} ORDER BY ${source.order}`;
+  const names =
+    namesLimit === null
+      ? ''
+      : `, 'names', (SELECT coalesce(json_agg(a.name), '[]'::json) FROM (SELECT name FROM (${ordered}) s LIMIT ${namesLimit + 1}) a)`;
   return (
-    `SELECT json_build_object('framework', ${quoteLiteral(source.framework)}, 'table', ${quoteLiteral(source.table)}, ` +
-    "'migrations', coalesce(json_agg(json_build_object('name', m.name, 'applied_at', m.applied_at)), '[]'::json)) " +
-    `FROM (SELECT name, applied_at FROM (${source.select} ORDER BY ${source.order}) s LIMIT ${limit}) m`
+    `SELECT json_build_object('framework', ${quoteLiteral(source.framework)}, 'table', ${quoteLiteral(relation.replaceAll('"', ''))}, ` +
+    "'migrations', coalesce(json_agg(json_build_object('name', m.name, 'applied_at', m.applied_at)), '[]'::json)" +
+    `${names}) FROM (SELECT name, applied_at FROM (${ordered}) s LIMIT ${limit}) m`
   );
+}
+
+export const MIGRATIONS_DIR_MARKER = '__DIR__';
+export const MIGRATIONS_NO_DIR_MARKER = '__NO_DIR__';
+
+export interface MigrationsCommandOptions {
+  /** `--table`: read only this one. */
+  table: MigrationTableRef | null;
+  /** `--dir`: list this remote directory after the tables, for the pending comparison. */
+  dir: string | null;
+  /** Names and entries read for the comparison (one more says it was cut). */
+  compareMax: number;
 }
 
 /**
  * `db migrations`: one remote shell — the first psql call lists which migrations tables exist,
- * then one bounded call per present table, joined into a JSON array. Each psql call is built by
- * `buildPsqlCommand`, so every target kind works the same way.
+ * then one bounded call per present table, joined into a JSON array; with `--dir`, a marker line
+ * and the directory's entry names follow. Each psql call is built by `buildPsqlCommand`, so every
+ * target kind works the same way.
  */
 export function buildDbMigrationsCommand(
   conn: DbConnection,
   sessionSql: string,
   wrap: (sql: string) => string,
   limit: number,
+  options: MigrationsCommandOptions = { table: null, dir: null, compareMax: 0 },
 ): string {
+  const refs = options.table === null ? defaultRefs() : [options.table];
+  const namesLimit = options.dir === null ? null : options.compareMax;
   const lines = [
-    `present=$(${buildPsqlCommand(conn, sessionSql, wrap(migrationTablesPresentSql()))}) || exit $?`,
+    `present=$(${buildPsqlCommand(conn, sessionSql, wrap(migrationTablesPresentSql(refs)))}) || exit $?`,
     "printf '['",
     "sep=''",
     'for framework in $present; do',
     '  case "$framework" in',
   ];
-  for (const framework of MIGRATION_FRAMEWORKS) {
+  for (const ref of refs) {
+    const sql = migrationsSql(ref.framework, limit, ref.relation, namesLimit);
     lines.push(
-      `    ${framework}) out=$(${buildPsqlCommand(conn, sessionSql, wrap(migrationsSql(framework, limit)))}) || exit $? ;;`,
+      `    ${ref.framework}) out=$(${buildPsqlCommand(conn, sessionSql, wrap(sql))}) || exit $? ;;`,
     );
   }
   lines.push(
@@ -524,6 +702,13 @@ export function buildDbMigrationsCommand(
     'done',
     "printf ']'",
   );
+  if (options.dir !== null) {
+    lines.push(
+      `d=${shq(options.dir)}`,
+      `printf '\\n%s\\n' ${MIGRATIONS_DIR_MARKER}`,
+      `if [ -d "$d" ]; then ls -1A -- "$d" | head -n ${options.compareMax + 1}; else echo ${MIGRATIONS_NO_DIR_MARKER}; fi`,
+    );
+  }
   return shellJoin(['sh', '-c', lines.join('\n')]);
 }
 

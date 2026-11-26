@@ -62,12 +62,14 @@ describe('assertSelectOnly — parser layer (UX guardrail, not the security boun
 
 describe('wrapReadOnlyTxn / wrapAsJsonAgg', () => {
   test('wraps in BEGIN TRANSACTION READ ONLY ... ROLLBACK, trimming a trailing semicolon', () => {
-    expect(wrapReadOnlyTxn('SELECT 1;')).toBe('BEGIN TRANSACTION READ ONLY; SELECT 1; ROLLBACK;');
+    expect(wrapReadOnlyTxn('SELECT 1;')).toBe(
+      'BEGIN TRANSACTION READ ONLY;\nSELECT 1\n;\nROLLBACK;',
+    );
   });
 
   test('wraps arbitrary SQL as a single json_agg subquery', () => {
     expect(wrapAsJsonAgg('SELECT * FROM foo;')).toBe(
-      'SELECT json_agg(t) FROM (SELECT * FROM foo) t',
+      'SELECT json_agg(t) FROM (\nSELECT * FROM foo\n) t',
     );
   });
 });
@@ -171,10 +173,10 @@ describe('multi-statement SQL escape attempt (SELECT 1; COMMIT; DROP TABLE x)', 
     // semicolons. A subquery cannot contain a bare `;`-separated statement list —
     // Postgres would reject this as a syntax error before anything executes.
     expect(wrapped).toBe(
-      `BEGIN TRANSACTION READ ONLY; SELECT json_agg(t) FROM (${MULTI_STATEMENT_ATTACK}) t; ROLLBACK;`,
+      `BEGIN TRANSACTION READ ONLY;\nSELECT json_agg(t) FROM (\n${MULTI_STATEMENT_ATTACK}\n) t\n;\nROLLBACK;`,
     );
-    const subqueryStart = wrapped.indexOf('FROM (') + 'FROM ('.length;
-    const subqueryEnd = wrapped.lastIndexOf(') t;');
+    const subqueryStart = wrapped.indexOf('FROM (\n') + 'FROM (\n'.length;
+    const subqueryEnd = wrapped.lastIndexOf('\n) t\n;');
     const subquery = wrapped.slice(subqueryStart, subqueryEnd);
     expect(subquery).toBe(MULTI_STATEMENT_ATTACK);
     // No unescaped COMMIT/ROLLBACK/DROP sits outside the subquery boundary.

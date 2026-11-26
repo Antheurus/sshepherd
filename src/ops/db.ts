@@ -1,6 +1,7 @@
 import {
   assertNoMultiStatementSql,
   assertSelectOnly,
+  assertSelfContainedSql,
   boundedSessionSql,
   buildDbMigrationsCommand,
   buildDbSlowCommand,
@@ -9,6 +10,10 @@ import {
   type DbConnection,
   describeTableSql,
   limitRows,
+  MIGRATION_TABLES,
+  MIGRATIONS_DIR_MARKER,
+  MIGRATIONS_NO_DIR_MARKER,
+  migrationTableRef,
   quoteIdentifier,
   statementTimeoutFor,
   wrapAsJsonAgg,
@@ -17,6 +22,7 @@ import {
 import { describeError } from '../errors.ts';
 import {
   DB_LOCK_TIMEOUT_SEC,
+  DB_MIGRATIONS_COMPARE_MAX,
   DB_MIGRATIONS_LIMIT,
   DB_QUERY_MAX_ROWS,
   DB_QUERY_ROW_LIMIT,
@@ -24,9 +30,16 @@ import {
   DB_TIMEOUT_SEC,
   MAX_TIMEOUT_SEC,
 } from '../limits.ts';
-import { arg, optStr, readRecord, reqStr } from '../op-args.ts';
-import { defaultTargetsPath, loadTargets, PG_TARGET_KINDS, type PgTargetKind } from '../targets.ts';
-import { type ErrorInfo, type OpContext, OpError, type OpSpec } from '../types.ts';
+import { arg, optStr, optStrOrNull, readRecord, reqStr } from '../op-args.ts';
+import { MASK } from '../scrub.ts';
+import {
+  DEFAULT_DENY_COLUMNS,
+  defaultTargetsPath,
+  loadTargets,
+  PG_TARGET_KINDS,
+  type PgTargetKind,
+} from '../targets.ts';
+import { type ErrorInfo, type OpContext, OpError, type OpSpec, Premasked } from '../types.ts';
 
 // ---------------------------------------------------------------------------
 // db
@@ -419,6 +432,55 @@ interface DbQueryResult {
   rows: unknown[];
   row_count: number;
   truncated: boolean;
+  /** Columns whose values were masked because their name matched the target's `deny_columns`. */
+  masked_columns: string[];
+}
+
+/** The target's `deny_columns` as `buildDbOpContext` passed them (a JSON list), else the default:
+ *  a context that carries none, or an unreadable one, masks as much as the default does. */
+function denyColumnPatterns(ctx: OpContext): RegExp[] {
+  const raw = ctx.args.deny_columns;
+  let list: unknown = DEFAULT_DENY_COLUMNS;
+  if (typeof raw === 'string' && raw.length > 0) {
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      list = DEFAULT_DENY_COLUMNS;
+    }
+  }
+  const patterns =
+    Array.isArray(list) && list.length > 0 && list.every((item) => typeof item === 'string')
+      ? (list as string[])
+      : DEFAULT_DENY_COLUMNS;
+  return patterns.map((pattern) => new RegExp(pattern, 'i'));
+}
+
+/** Masks, by column name, every non-null value of a denied column in the fetched rows. */
+function maskDeniedColumns(
+  rows: unknown[],
+  patterns: RegExp[],
+): { rows: unknown[]; maskedColumns: string[]; cells: number } {
+  const maskedColumns = new Set<string>();
+  let cells = 0;
+  const masked = rows.map((row) => {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) {
+      return row;
+    }
+    const out: Record<string, unknown> = {};
+    for (const [column, value] of Object.entries(row)) {
+      if (patterns.some((pattern) => pattern.test(column))) {
+        maskedColumns.add(column);
+        if (value !== null) {
+          cells += 1;
+          out[column] = MASK;
+          continue;
+        }
+      }
+      out[column] = value;
+    }
+    return out;
+  });
+  return { rows: masked, maskedColumns: [...maskedColumns].sort(), cells };
 }
 
 /** `--max-rows`, else `DB_QUERY_ROW_LIMIT`; anything outside 1..`DB_QUERY_MAX_ROWS` is refused. */
@@ -463,6 +525,7 @@ const dbQuery: OpSpec<DbQueryResult> = {
   buildRemote: (ctx) => {
     const sql = reqStr(ctx, 'sql');
     assertNoMultiStatementSql(sql);
+    assertSelfContainedSql(sql);
     assertSelectOnly(sql);
     const limit = rowLimit(ctx);
     return buildPsqlCommand(
@@ -474,8 +537,19 @@ const dbQuery: OpSpec<DbQueryResult> = {
   shape: (parsed, ctx) => {
     const all = parseJsonArray(parsed);
     const limit = rowLimit(ctx);
-    const rows = all.slice(0, limit);
-    return { rows, row_count: rows.length, truncated: all.length > limit };
+    const { rows, maskedColumns, cells } = maskDeniedColumns(
+      all.slice(0, limit),
+      denyColumnPatterns(ctx),
+    );
+    return new Premasked(
+      {
+        rows,
+        row_count: rows.length,
+        truncated: all.length > limit,
+        masked_columns: maskedColumns,
+      },
+      cells,
+    );
   },
   recount: (_before, after) => {
     const data = readRecord(after);
@@ -663,22 +737,117 @@ interface DbMigration {
   applied_at: string | null;
 }
 
+interface DbMigrationsTable {
+  framework: string;
+  table: string;
+  /** The newest applied migration's name; null when the table is empty. */
+  current: string | null;
+  migrations: DbMigration[];
+  /** With `--dir`: entries of that directory no applied migration accounts for; else null. */
+  pending: string[] | null;
+}
+
 interface DbMigrationsResult {
-  tables: { framework: string; table: string; migrations: DbMigration[] }[];
+  tables: DbMigrationsTable[];
+}
+
+/** `--table`: a known migrations table, by name or schema.name. */
+function migrationsTableOf(ctx: OpContext) {
+  const raw = optStrOrNull(ctx, 'table');
+  if (raw === null) {
+    return null;
+  }
+  const ref = migrationTableRef(quoteIdentifier(raw, '--table'));
+  if (ref === null) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `--table must name one of the migrations tables sshepherd reads (${MIGRATION_TABLES.join(', ')}), optionally schema-qualified; got ${JSON.stringify(raw)}`,
+    );
+  }
+  return ref;
+}
+
+function migrationsDirOf(ctx: OpContext): string | null {
+  const dir = optStrOrNull(ctx, 'dir');
+  if (dir !== null && /[\0\r\n]/.test(dir)) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `--dir contains a NUL or line-break character (got ${JSON.stringify(dir)})`,
+    );
+  }
+  return dir;
+}
+
+/** The trailing digits a framework keeps as the version: all of a rails `version`, the timestamp
+ *  a typeorm class name ends with (`Init1700000000000`). Eight digits is the shortest date. */
+const VERSION_NAME = /^(?:\d{8,}|[A-Za-z_][A-Za-z0-9_]*?(\d{8,}))$/;
+
+/** Entries of a migrations directory that no applied name accounts for. An entry counts when it
+ *  starts with a digit (every framework names migrations by date or sequence, so a lock file or
+ *  README is not one) and is applied when the name, the name less its extension, or its leading
+ *  version (`20260901000000_create_users.rb` for rails, `1700000000000-Init.ts` for typeorm)
+ *  matches an applied migration. */
+export function pendingMigrations(entries: string[], applied: string[]): string[] {
+  const names = new Set(applied);
+  const versions = new Set<string>();
+  for (const name of applied) {
+    const match = VERSION_NAME.exec(name);
+    if (match !== null) {
+      versions.add(match[1] ?? name);
+    }
+  }
+  return entries
+    .filter((entry) => /^\d/.test(entry))
+    .filter((entry) => {
+      const stem = entry.replace(/\.[A-Za-z0-9]+$/, '');
+      const version = /^\d{8,}/.exec(stem)?.[0];
+      return !(
+        names.has(entry) ||
+        names.has(stem) ||
+        (version !== undefined && versions.has(version))
+      );
+    })
+    .sort();
+}
+
+/** The JSON array of tables, then with `--dir` the marker line and the directory's entries. */
+function parseMigrationsOutput(stdout: string): { tables: unknown; entries: string[] | null } {
+  const marker = stdout.indexOf(`\n${MIGRATIONS_DIR_MARKER}\n`);
+  const json = (marker === -1 ? stdout : stdout.slice(0, marker)).trim();
+  const tables: unknown = json.length === 0 ? [] : JSON.parse(json);
+  if (marker === -1) {
+    return { tables, entries: null };
+  }
+  const listing = stdout.slice(marker + MIGRATIONS_DIR_MARKER.length + 2);
+  const lines = listing.split('\n').filter((line) => line.length > 0);
+  return { tables, entries: lines };
 }
 
 const dbMigrations: OpSpec<DbMigrationsResult> = {
   group: 'db',
   name: 'migrations',
-  summary: `Applied migrations (name, applied_at; newest ${DB_MIGRATIONS_LIMIT} per table) from whichever of the prisma, knex, typeorm, rails and laravel tables exist.`,
+  summary: `Applied migrations (current, then name and applied_at, newest ${DB_MIGRATIONS_LIMIT} per table) from whichever of the prisma, knex, typeorm, rails and laravel tables exist; --dir adds the pending ones.`,
   args: [
     arg('target', 'positional', true, 'pg-target name declared in targets.toml.'),
+    arg(
+      'table',
+      'flag',
+      false,
+      `Read only this migrations table (${MIGRATION_TABLES.join(', ')}), as name or schema.name.`,
+    ),
+    arg(
+      'dir',
+      'flag',
+      false,
+      `Remote migrations directory — must be on files-allowlist.toml; its entries no applied migration accounts for come back as pending (at most ${DB_MIGRATIONS_COMPARE_MAX} compared).`,
+    ),
     TIMEOUT_ARG,
   ],
   mutating: false,
   exposes: 'metadata',
   timeoutSec: DB_TIMEOUT_SEC,
-  output: 'native-json',
+  output: { parse: parseMigrationsOutput },
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'dir', optional: true }],
   errorData: psqlErrorData,
   refineError: refinePsqlTimeout(DB_TIMEOUT_SEC),
   hiddenArgs: DB_CONNECTION_ARGS,
@@ -688,23 +857,64 @@ const dbMigrations: OpSpec<DbMigrationsResult> = {
       boundedSql(ctx, DB_TIMEOUT_SEC),
       wrapReadOnlyTxn,
       DB_MIGRATIONS_LIMIT,
+      {
+        table: migrationsTableOf(ctx),
+        dir: migrationsDirOf(ctx),
+        compareMax: DB_MIGRATIONS_COMPARE_MAX,
+      },
     ),
-  shape: (parsed) => ({
-    tables: parseJsonArray(parsed).map((raw) => {
+  shape: (parsed, ctx) => {
+    const { tables, entries } = parsed as ReturnType<typeof parseMigrationsOutput>;
+    const dir = optStrOrNull(ctx, 'dir');
+    if (entries !== null && entries[0] === MIGRATIONS_NO_DIR_MARKER) {
+      throw new OpError(
+        'VALIDATION_ERROR',
+        `db migrations: '${dir ?? ''}' is not a directory on the host`,
+        {
+          hint: 'Pass the directory the migration files live in, e.g. prisma/migrations or db/migrate under the app root.',
+        },
+      );
+    }
+    const shaped = parseJsonArray(tables).map((raw): DbMigrationsTable => {
       const record = readRecord(raw);
+      const migrations = listOf(record.migrations).map((entry) => {
+        const m = readRecord(entry);
+        return {
+          name: typeof m.name === 'string' ? m.name : String(m.name ?? ''),
+          applied_at: typeof m.applied_at === 'string' ? m.applied_at : null,
+        };
+      });
+      const names = strList(record.names);
+      if (
+        entries !== null &&
+        (names.length > DB_MIGRATIONS_COMPARE_MAX || entries.length > DB_MIGRATIONS_COMPARE_MAX)
+      ) {
+        throw new OpError(
+          'OUTPUT_TOO_LARGE',
+          `db migrations --dir: more than ${DB_MIGRATIONS_COMPARE_MAX} applied migrations or directory entries, so pending cannot be told completely`,
+          {
+            hint: 'Run db migrations without --dir for the current version and the newest applied ones.',
+          },
+        );
+      }
       return {
         framework: strOr(record.framework, ''),
         table: strOr(record.table, ''),
-        migrations: listOf(record.migrations).map((entry) => {
-          const m = readRecord(entry);
-          return {
-            name: typeof m.name === 'string' ? m.name : String(m.name ?? ''),
-            applied_at: typeof m.applied_at === 'string' ? m.applied_at : null,
-          };
-        }),
+        current: migrations[0]?.name ?? null,
+        migrations,
+        pending: entries === null ? null : pendingMigrations(entries, names),
       };
-    }),
-  }),
+    });
+    if (shaped.length === 0 && optStrOrNull(ctx, 'table') !== null) {
+      const target = String(ctx.args.target ?? '');
+      throw new OpError(
+        'VALIDATION_ERROR',
+        `table '${String(ctx.args.table)}' does not exist on pg-target '${target}', or its role cannot see it`,
+        { next: `sshepherd db migrations ${target}` },
+      );
+    }
+    return { tables: shaped };
+  },
 };
 
 export const dbOps = [

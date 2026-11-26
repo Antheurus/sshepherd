@@ -43,7 +43,20 @@ export interface PgTarget {
   pgPort: string | null;
   /** Highest `SSHEPHERD_PROFILE` a db op on this target runs with; null = no cap. */
   maxProfile: Profile | null;
+  /** Column-name regexes whose values `db query` masks (case-insensitive); the default list unless
+   *  the target declares its own `deny_columns`, which replaces it. */
+  denyColumns: string[];
+  /** Containers on this target's alias whose env key names `env keys --container` may read. */
+  containers: string[];
 }
+
+/** `db query` masks a column whose name matches one of these, unless the target declares its own
+ *  `deny_columns`: secrets by name, plus Postgres's own `rolpassword` (pg_authid, readable through
+ *  pg_read_all_data) and `passwd` (pg_shadow). */
+export const DEFAULT_DENY_COLUMNS = [
+  'pass(word)?|secret|token|api_?key|private_?key|credential|salt|hash',
+  'rolpassword|passwd',
+];
 
 /** Overridable via `SSHEPHERD_TARGETS_PATH` for tests — mirrors transport.ts's XDG_RUNTIME_DIR override. */
 export function defaultTargetsPath(): string {
@@ -74,6 +87,52 @@ function readMaxProfile(name: string, raw: unknown): Profile | null {
 }
 
 const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CONTAINER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+function readStringList(name: string, field: string, raw: unknown): string[] | null {
+  if (raw === undefined) {
+    return null;
+  }
+  if (!Array.isArray(raw) || raw.some((item) => typeof item !== 'string' || item.length === 0)) {
+    throw targetsError(
+      `targets.toml: target '${name}' has ${field} ${JSON.stringify(raw)}; expected a list of non-empty strings`,
+    );
+  }
+  return raw as string[];
+}
+
+function readDenyColumns(name: string, raw: unknown): string[] {
+  const list = readStringList(name, 'deny_columns', raw);
+  if (list === null) {
+    return DEFAULT_DENY_COLUMNS;
+  }
+  if (list.length === 0) {
+    throw targetsError(
+      `targets.toml: target '${name}' has an empty deny_columns; leave it out for the default list`,
+    );
+  }
+  for (const pattern of list) {
+    try {
+      new RegExp(pattern, 'i');
+    } catch {
+      throw targetsError(
+        `targets.toml: target '${name}' has deny_columns entry ${JSON.stringify(pattern)}, which is not a valid regex`,
+      );
+    }
+  }
+  return list;
+}
+
+function readContainers(name: string, raw: unknown): string[] {
+  const list = readStringList(name, 'containers', raw) ?? [];
+  const bad = list.find((container) => !CONTAINER_NAME_PATTERN.test(container));
+  if (bad !== undefined) {
+    throw targetsError(
+      `targets.toml: target '${name}' has containers entry ${JSON.stringify(bad)}; expected a container name`,
+    );
+  }
+  return list;
+}
 const PORT_PATTERN = /^[0-9]{1,5}$/;
 
 function readKind(name: string, raw: unknown): PgTargetKind {
@@ -104,6 +163,8 @@ function readTarget(name: string, raw: unknown): PgTarget {
   const user = str(record, 'user') ?? '';
   const database = str(record, 'database') ?? '';
   const maxProfile = readMaxProfile(name, record.max_profile);
+  const denyColumns = readDenyColumns(name, record.deny_columns);
+  const containers = readContainers(name, record.containers);
   const base: PgTarget = {
     alias,
     kind,
@@ -118,6 +179,8 @@ function readTarget(name: string, raw: unknown): PgTarget {
     pgHost: null,
     pgPort: null,
     maxProfile,
+    denyColumns,
+    containers,
   };
 
   if (alias.length === 0) {
@@ -189,6 +252,20 @@ export function loadTargets(path: string = defaultTargetsPath()): Record<string,
   return targets;
 }
 
+/** Containers `env keys --container` may read on `alias`: every `containers` entry of every target
+ *  riding on that alias. */
+export function declaredContainers(alias: string, path?: string): string[] {
+  const declared = new Set<string>();
+  for (const target of Object.values(loadTargets(path))) {
+    if (target.alias === alias) {
+      for (const container of target.containers) {
+        declared.add(container);
+      }
+    }
+  }
+  return [...declared].sort();
+}
+
 export function resolveTarget(name: string, path?: string): PgTarget {
   const targets = loadTargets(path);
   const target = targets[name];
@@ -232,6 +309,7 @@ export function buildDbOpContext(
       pg_host: target.pgHost ?? '',
       pg_port: target.pgPort ?? '',
       max_profile: target.maxProfile ?? '',
+      deny_columns: JSON.stringify(target.denyColumns),
     },
   };
 }
