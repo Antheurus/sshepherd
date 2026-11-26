@@ -10,6 +10,7 @@ import { parseDockerLogLines } from '../parsers/docker-log.ts';
 import { shapeJournalEntry } from '../parsers/journal.ts';
 import { buildLogsResult } from '../parsers/logs-shape.ts';
 import { shellJoin } from '../quote.ts';
+import { maskPemLines } from '../scrub.ts';
 import { didYouMeanOrAll } from '../suggest.ts';
 import { type OpContext, OpError, type OpSpec } from '../types.ts';
 
@@ -44,7 +45,9 @@ const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
   output: 'raw',
   buildRemote: buildLogsDocker,
   shape: (parsed, ctx) => {
-    const lines = parseDockerLogLines(parsed as string);
+    const parsedLines = parseDockerLogLines(parsed as string);
+    const texts = maskPemLines(parsedLines.map((line) => line.text));
+    const lines = parsedLines.map((line, index) => ({ ...line, text: texts[index] ?? line.text }));
     const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
     return buildLogsResult(
       `docker:${reqStr(ctx, 'container')}`,

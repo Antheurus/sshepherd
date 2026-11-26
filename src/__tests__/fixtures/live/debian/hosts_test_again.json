@@ -1,9 +1,9 @@
 {
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T07:18:22.760Z",
+  "ran_at": "2026-11-26T15:48:16.915Z",
   "command": "hosts test",
-  "duration_ms": 19,
+  "duration_ms": 26,
   "scrubbed": 0,
   "data": {
     "reachable": true

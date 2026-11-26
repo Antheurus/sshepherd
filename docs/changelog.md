@@ -6,6 +6,9 @@
 - Secret-looking files (`.env`, `prod.env`, `*.vars`, `*.secrets`, `credentials`, `*.pem`, `id_*`) are masked in `files cat`, `files tail`, `config get` and in the file `files download` writes to disk. `files download` accepts `--reveal` with the same rules as `files cat`.
 - When a remote command fails, the error now includes the last lines of what it printed to stderr (masked), and a failed database query reports the database's own error message in `error.data.sql_error`.
 - You can add your own patterns to mask for one server in `reveal-allowlist.toml` under `[<alias>.scrub] extra_patterns`.
+- More secrets are now caught: private keys shown by `files tail` or a container log, `.env` files that `files download` writes even when they hold a non-UTF-8 byte, the content of a `.env` read that timed out, numbers and lists under a password column in `db query`, `--password <value>`, `mysql -p<value>`, `MYSQL_PWD`, `redis://:password@`, GitHub/GitLab/Google/Stripe/webhook tokens, Slack webhook URLs, PGP private keys, cookies and `<password>` XML values. `--reveal DATABASE_URL` still shows the URL but keeps its password masked.
+- Fewer false alarms: plain URLs such as `APP_URL=https://...`, fields named `url` or `key`, and prose such as "a Bearer token" are no longer masked.
+- Very long single-line output (hundreds of KB) no longer stalls the masking step for minutes.
 
 ## v0.4.0-rc.4 — sshepherd doctor and a safe install/rollback
 

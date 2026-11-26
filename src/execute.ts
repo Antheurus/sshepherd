@@ -4,7 +4,7 @@ import { MAX_PARTIAL_STDOUT_CHARS, MAX_TIMEOUT_SEC } from './limits.ts';
 import { assertOpPositionals, optBool } from './op-args.ts';
 import { enforceAllowlist, loadScrubExtraPatterns, revealKeysOf } from './ops/config.ts';
 import { buildEnvelope, splitNdjson } from './output.ts';
-import { type ScrubOptions, scrub } from './scrub.ts';
+import { isEnvFile, maskEnvContent, type ScrubOptions, scrub } from './scrub.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { run, type TransportDeps } from './transport.ts';
 import {
@@ -23,12 +23,23 @@ function effectiveTimeoutSec(op: OpSpec, deps: ExecuteDeps): number {
 }
 
 /** A timed-out command's stdout so far is still the legitimate payload — return it
- *  (capped) so a "almost done" step is visible instead of lost. */
-function partialStdout(error: ErrorInfo, stdout: string): Record<string, unknown> | undefined {
+ *  (capped) so a "almost done" step is visible instead of lost. An op reading an env-shaped
+ *  allowlisted path gets the same whole-file masking its `shape` would have applied, before the cap
+ *  so a cut can never leave a quoted value unclosed. */
+function partialStdout(
+  op: OpSpec,
+  ctx: OpContext,
+  error: ErrorInfo,
+  stdout: string,
+): Record<string, unknown> | undefined {
   if (error.code !== 'COMMAND_TIMEOUT' || stdout.length === 0) {
     return undefined;
   }
-  return { partial_stdout: stdout.slice(0, MAX_PARTIAL_STDOUT_CHARS) };
+  const pathPolicy = op.allowlist?.find((policy) => policy.kind === 'path');
+  const path = pathPolicy ? ctx.args[pathPolicy.argName] : undefined;
+  const text =
+    typeof path === 'string' && isEnvFile(path) ? maskEnvContent(stdout, new Set()) : stdout;
+  return { partial_stdout: text.slice(0, MAX_PARTIAL_STDOUT_CHARS) };
 }
 
 /** `error.stderr_tail` is the last 20 lines of a failed command's stderr, then at most its last
@@ -275,7 +286,9 @@ async function runOp(
   );
   if (result.error) {
     const data =
-      op.shapeError?.(result.raw, ctx) ?? partialStdout(result.error, result.raw.stdout) ?? null;
+      op.shapeError?.(result.raw, ctx) ??
+      partialStdout(op, ctx, result.error, result.raw.stdout) ??
+      null;
     const errorData = op.errorData?.(result.raw.commandStderr);
     const error = errorData ? { ...result.error, data: errorData } : result.error;
     return {

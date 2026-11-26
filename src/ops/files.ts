@@ -10,7 +10,7 @@ import {
 import { parseDu } from '../parsers/du.ts';
 import { parseLs } from '../parsers/ls.ts';
 import { shellJoin, shq } from '../quote.ts';
-import { isEnvFile, maskEnvContent, scrubText } from '../scrub.ts';
+import { isEnvFile, maskEnvContent, maskPemLines, scrubText } from '../scrub.ts';
 import { OpError, type OpSpec } from '../types.ts';
 import { loadScrubExtraPatterns, revealKeysOf } from './config.ts';
 
@@ -134,10 +134,12 @@ const filesTail: OpSpec<FilesTailResult> = {
     ]),
   shape: (parsed, ctx) => {
     const text = parsed as string;
-    const lines = (isEnvFile(reqStr(ctx, 'path')) ? maskEnvContent(text, new Set()) : text)
-      .split('\n')
-      .map((line) => line.trimEnd())
-      .filter((line) => line.length > 0);
+    const lines = maskPemLines(
+      (isEnvFile(reqStr(ctx, 'path')) ? maskEnvContent(text, new Set()) : text)
+        .split('\n')
+        .map((line) => line.trimEnd())
+        .filter((line) => line.length > 0),
+    );
     return { lines, lines_returned: lines.length };
   },
 };
@@ -164,7 +166,9 @@ function decodeText(bytes: Buffer): string | null {
 
 /** What `files download` writes: a text file gets the same masking `files cat` shows (whole-file
  *  for env-shaped paths, then the scrubber), with `--reveal` keys left as they are; a binary file
- *  (invalid UTF-8 or a NUL byte) is written byte for byte, since rewriting it would corrupt it. */
+ *  (invalid UTF-8 or a NUL byte) is written byte for byte, since rewriting it would corrupt it —
+ *  except on an env-shaped path, where its `KEY=` lines are masked on the bytes (read as latin1,
+ *  one char per byte, so every other byte is written back unchanged). */
 function downloadBytes(
   contentBase64: string,
   path: string,
@@ -174,7 +178,12 @@ function downloadBytes(
   const raw = Buffer.from(contentBase64, 'base64');
   const text = decodeText(raw);
   if (text === null) {
-    return { bytes: raw, masked: false };
+    if (!isEnvFile(path)) {
+      return { bytes: raw, masked: false };
+    }
+    const latin1 = raw.toString('latin1');
+    const envMasked = maskEnvContent(latin1, revealKeys);
+    return { bytes: Buffer.from(envMasked, 'latin1'), masked: envMasked !== latin1 };
   }
   const envMasked = isEnvFile(path) ? maskEnvContent(text, revealKeys) : text;
   const scrubbed = scrubText(envMasked, {

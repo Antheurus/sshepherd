@@ -1,9 +1,9 @@
 {
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T07:18:29.944Z",
+  "ran_at": "2026-11-26T15:48:26.105Z",
   "command": "files ls",
-  "duration_ms": 19,
+  "duration_ms": 28,
   "scrubbed": 0,
   "data": [
     {
@@ -25,7 +25,7 @@
       "owner": "root",
       "group": "root",
       "size_bytes": 26,
-      "modified_at": "2026-11-26T07:18",
+      "modified_at": "2026-11-26T15:48",
       "is_dir": true,
       "is_symlink": false,
       "link_target": null
@@ -37,7 +37,7 @@
       "owner": "root",
       "group": "root",
       "size_bytes": 30,
-      "modified_at": "2026-11-26T07:18",
+      "modified_at": "2026-11-26T15:48",
       "is_dir": true,
       "is_symlink": false,
       "link_target": null

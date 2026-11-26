@@ -1,9 +1,9 @@
 {
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T07:18:29.731Z",
+  "ran_at": "2026-11-26T15:48:25.775Z",
   "command": "logs docker",
-  "duration_ms": 27,
+  "duration_ms": 55,
   "scrubbed": 0,
   "data": {
     "source": "docker:sshepherd-fixture-app",
@@ -11,12 +11,12 @@
     "truncated": false,
     "lines": [
       {
-        "ts": "2026-11-26T07:18:28.484458766Z",
+        "ts": "2026-11-26T15:48:23.885869793Z",
         "stream": "stdout",
-        "text": "192.168.155.5 - - [26/Nov/2026:07:18:28 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"curl/8.7.1\" \"-\""
+        "text": "192.168.156.4 - - [26/Nov/2026:15:48:23 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"curl/8.7.1\" \"-\""
       }
     ],
-    "next_since": "2026-11-26T07:18:28.484458766Z"
+    "next_since": "2026-11-26T15:48:23.885869793Z"
   },
   "error": null
 }

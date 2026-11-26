@@ -1,7 +1,7 @@
 {
   "ok": true,
   "command": "setup files-allowlist scaffold",
-  "ran_at": "2026-11-26T07:18:29.831Z",
+  "ran_at": "2026-11-26T15:48:25.929Z",
   "data": {
     "alias": "smoke-alpine",
     "paths": [

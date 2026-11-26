@@ -38,8 +38,8 @@ describe('scrubText — key-named values', () => {
   });
 
   test('a backslash-continued value is masked whole', () => {
-    const out = masked(`DATABASE_URL=${FAKE} \\\ncontinued-${FAKE}\nNODE_ENV=production`);
-    expect(out).toBe(`DATABASE_URL=${MASK}\nNODE_ENV=production`);
+    const out = masked(`DB_PASSWORD=${FAKE} \\\ncontinued-${FAKE}\nNODE_ENV=production`);
+    expect(out).toBe(`DB_PASSWORD=${MASK}\nNODE_ENV=production`);
   });
 
   test('inline pairs in a log line, a query string and a flag', () => {
@@ -60,10 +60,24 @@ describe('scrubText — key-named values', () => {
     expect(masked(text)).toBe(text);
   });
 
-  test('a revealed key is left as-is, every other secret still masked', () => {
+  test('a revealed key skips the key-name rules only: its URL password is still masked', () => {
     const text = `DATABASE_URL=postgres://app:${FAKE}@db/app\nAPI_TOKEN=${FAKE}`;
     const out = scrubText(text, { revealKeys: new Set(['DATABASE_URL']) }).value;
-    expect(out).toBe(`DATABASE_URL=postgres://app:${FAKE}@db/app\nAPI_TOKEN=${MASK}`);
+    expect(out).toBe(`DATABASE_URL=postgres://app:${MASK}@db/app\nAPI_TOKEN=${MASK}`);
+  });
+
+  test('URL and KEY names no longer secret by name: credentials still masked by shape or name', () => {
+    const cases: [string, string][] = [
+      ['REDIS_URL=redis://:p@h', `REDIS_URL=redis://:${MASK}@h`],
+      ['DATABASE_URL=postgres://u:p@h/db', `DATABASE_URL=postgres://u:${MASK}@h/db`],
+      ['API_KEY=x', `API_KEY=${MASK}`],
+      ['SECRET_KEY=x', `SECRET_KEY=${MASK}`],
+      ['AWS_SECRET_ACCESS_KEY=x', `AWS_SECRET_ACCESS_KEY=${MASK}`],
+      ['PRIVATE_KEY=x', `PRIVATE_KEY=${MASK}`],
+    ];
+    for (const [text, expected] of cases) {
+      expect({ text, out: masked(text) }).toEqual({ text, out: expected });
+    }
   });
 });
 
@@ -168,15 +182,26 @@ describe('isSecretKey / isEnvFile', () => {
       'DB_PASSWORD',
       'apiKey',
       'SECRET_KEY_BASE',
-      'DATABASE_URL',
       'SENTRY_DSN',
       'DB_PASS',
       'aws_access_key_id',
-      'MONGO_URI',
+      'MYSQL_PWD',
+      'ADMIN_PW',
     ]) {
       expect({ key, secret: isSecretKey(key) }).toEqual({ key, secret: true });
     }
-    for (const key of ['PORT', 'NODE_ENV', 'DB_HOST', 'LOG_LEVEL', 'KEYCLOAK_REALM', 'region']) {
+    for (const key of [
+      'PORT',
+      'NODE_ENV',
+      'DB_HOST',
+      'LOG_LEVEL',
+      'KEYCLOAK_REALM',
+      'region',
+      'APP_URL',
+      'key',
+      'monkey',
+      'PWD',
+    ]) {
       expect({ key, secret: isSecretKey(key) }).toEqual({ key, secret: false });
     }
   });
