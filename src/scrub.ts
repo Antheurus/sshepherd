@@ -29,11 +29,16 @@ export const REVEAL_DENYLIST_PATTERNS: RegExp[] = [
 const SECRET_NAME_FRAGMENTS = ['SECRET', 'TOKEN', 'PASSWORD', 'PASSWD', 'PASSPHRASE', 'CREDENTIAL'];
 const SECRET_NAME_ENDINGS = ['PASS', 'DSN'];
 const SECRET_NAME_SEGMENTS = new Set(SECRET_NAME_ENDINGS);
+/** A last name segment joined without a separator (`privkey`, `ssl_privkey`, `LICENSEKEY`): only
+ *  these prefixes before `KEY` make it secret, so `monkey`, `turkey`, `hockey` and `key` stay visible. */
+const JOINED_SECRET_KEY =
+  /(?:PRIV|PRIVATE|MASTER|SIGNING|STRIPE|APP|LICENSE|API|SECRET|ENCRYPTION|ACCESS)KEY$/;
 
 /** A key name whose value is a secret: the reveal denylist, a name containing a secret word,
  *  a name ending in (or having a `_`/`.`/`-` segment equal to) PASS/DSN, a `_PWD`/`_PW` name, a
- *  camelCase `...Key`, or a KEY segment in a name of two or more segments. A bare `key`, `url`,
- *  `APP_URL` or `monkey` is not: a URL's credentials are masked by its shape, not its name.
+ *  camelCase `...Key`, a last segment ending in a joined `<prefix>key`, or a KEY segment in a name
+ *  of two or more segments. A bare `key`, `url`, `APP_URL` or `monkey` is not: a URL's credentials
+ *  are masked by its shape, not its name.
  *  `PORT`, `NODE_ENV` and `DB_HOST` are not — a host is not a secret by default. */
 export function isSecretKey(name: string): boolean {
   if (REVEAL_DENYLIST_PATTERNS.some((pattern) => pattern.test(name))) {
@@ -51,6 +56,7 @@ export function isSecretKey(name: string): boolean {
   }
   const segments = upper.split(/[_.-]/);
   return (
+    JOINED_SECRET_KEY.test(segments[segments.length - 1] ?? '') ||
     segments.some((segment) => SECRET_NAME_SEGMENTS.has(segment)) ||
     (segments.length > 1 && segments.includes('KEY'))
   );
@@ -93,10 +99,26 @@ const ENV_ASSIGNMENT = new RegExp(
   'gm',
 );
 
-/** `KEY=value`, `export KEY=value`, `key: value`, `"key": "value"`, `- key: value` at line start. */
+/** `KEY=value`, `export KEY=value`, `key: value`, `"key": "value"`, `- key: value`, PHP
+ *  `$key = 'value';` at line start. */
 const KEYED_LINE = new RegExp(
-  String.raw`^([ \t]*(?:-[ \t]+)?(?:export[ \t]+)?)(["']?)(${KEY_NAME})\2([ \t]*[=:][ \t]*)(${LINE_VALUE})`,
+  String.raw`^([ \t]*(?:-[ \t]+)?(?:export[ \t]+)?\$?)(["']?)(${KEY_NAME})\2([ \t]*[=:][ \t]*)(${LINE_VALUE})`,
   'gm',
+);
+
+const INLINE_QUOTED_VALUE = String.raw`"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'`;
+
+/** A quoted secret name as a subscript being assigned: `$cfg[$i]['password'] = 'v'`, `conf["token"] = v`. */
+const KEYED_SUBSCRIPT = new RegExp(
+  String.raw`(\[[ \t]*)(["'])(${KEY_NAME})\2([ \t]*\][ \t]*=[ \t]*)(${INLINE_QUOTED_VALUE}|[^\s;,)\]]+)`,
+  'g',
+);
+
+/** A call whose first argument is a quoted secret name and whose second is a quoted literal:
+ *  `define('DB_PASSWORD', 'v')` (wp-config.php), `env('API_TOKEN', 'v')`. */
+const KEYED_CALL_ARG = new RegExp(
+  String.raw`(\b\w+[ \t]*\([ \t]*)(["'])(${KEY_NAME})\2([ \t]*,[ \t]*)(${INLINE_QUOTED_VALUE})`,
+  'g',
 );
 
 /** The same pair anywhere in a line (`... password=x&user=y`, `{"token":"x"}`, `--secret=x`). */
@@ -124,23 +146,68 @@ interface ShapeRule {
 
 const PEM_LABEL = '[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?';
 const HAS_CONTENT = /[^\s*]/;
+const PEM_MARKER = new RegExp(`-----(BEGIN|END) (${PEM_LABEL})-----`, 'g');
+const PEM_BEGIN_MARKER = new RegExp(`-----BEGIN ${PEM_LABEL}-----`, 'g');
+
+/** How far a URL's password may run looking for the last `@` before the host: a bound keeps the
+ *  rule linear on a long run with many `scheme://user:` starts and no `@`. 512 chars is far past
+ *  any real password in a connection string. */
+const MAX_URL_PASSWORD_CHARS = 512;
+
+/** Private-key PEM blocks, in one pass over the markers instead of a regex rescanning to the end
+ *  of the text from every BEGIN (quadratic: 375 KB of BEGIN lines took 4 s). A BEGIN with a later
+ *  END of the same label keeps both lines around a mask; then a BEGIN with no `-----END` after it
+ *  keeps its line and masks the rest of the text. */
+function maskPemBlocks(text: string): ScrubResult<string> {
+  let count = 0;
+  const markers = [...text.matchAll(PEM_MARKER)];
+  const nextEnd: (number | undefined)[] = new Array(markers.length);
+  const nearestEndByLabel = new Map<string, number>();
+  for (let i = markers.length - 1; i >= 0; i -= 1) {
+    const [, kind, label = ''] = markers[i] as RegExpMatchArray;
+    if (kind === 'BEGIN') {
+      nextEnd[i] = nearestEndByLabel.get(label);
+    } else {
+      nearestEndByLabel.set(label, i);
+    }
+  }
+  let paired = '';
+  let pos = 0;
+  for (let i = 0; i < markers.length; i += 1) {
+    const begin = markers[i] as RegExpMatchArray;
+    const endIndex = nextEnd[i];
+    const start = begin.index ?? 0;
+    if (start < pos || endIndex === undefined) {
+      continue;
+    }
+    const end = markers[endIndex] as RegExpMatchArray;
+    const stop = (end.index ?? 0) + end[0].length;
+    const replaced = `${begin[0]}\n${MASK}\n${end[0]}`;
+    if (replaced !== text.slice(start, stop)) {
+      count += 1;
+    }
+    paired += `${text.slice(pos, start)}${replaced}`;
+    pos = stop;
+  }
+  let out = `${paired}${text.slice(pos)}`;
+
+  const lastEnd = out.lastIndexOf('-----END');
+  for (const begin of out.matchAll(PEM_BEGIN_MARKER)) {
+    const bodyStart = (begin.index ?? 0) + begin[0].length;
+    if (lastEnd >= bodyStart) {
+      continue;
+    }
+    if (HAS_CONTENT.test(out.slice(bodyStart))) {
+      out = `${out.slice(0, bodyStart)}\n${MASK}`;
+      count += 1;
+    }
+    break;
+  }
+  return { value: out, count };
+}
 
 /** Value shapes that are secrets wherever they appear, independent of any key name. */
 const SHAPE_RULES: ShapeRule[] = [
-  {
-    pattern: new RegExp(
-      String.raw`(-----BEGIN (${PEM_LABEL})-----)[\s\S]*?(-----END \2-----)`,
-      'g',
-    ),
-    replace: (_m, begin = '', _label, end = '') => `${begin}\n${MASK}\n${end}`,
-  },
-  {
-    pattern: new RegExp(
-      String.raw`(-----BEGIN ${PEM_LABEL}-----)(?![\s\S]*-----END)([\s\S]*)$`,
-      'g',
-    ),
-    replace: (m, begin = '', body = '') => (HAS_CONTENT.test(body) ? `${begin}\n${MASK}` : m),
-  },
   {
     pattern: new RegExp(String.raw`^((?:(?!-----BEGIN)[\s\S])*?)(-----END ${PEM_LABEL}-----)`, 'g'),
     replace: (m, body = '', end = '') => (HAS_CONTENT.test(body) ? `${MASK}\n${end}` : m),
@@ -163,8 +230,21 @@ const SHAPE_RULES: ShapeRule[] = [
     replace: () => MASK,
   },
   {
-    pattern: /\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]*:)([^\s@/?#]+)(@)/gi,
+    pattern:
+      /(https:\/\/(?:(?:canary|ptb)\.)?discord(?:app)?\.com\/api\/webhooks\/\d+\/)[A-Za-z0-9_-]+/g,
+    replace: (_m, head = '') => `${head}${MASK}`,
+  },
+  {
+    pattern: new RegExp(
+      String.raw`\b([a-z][a-z0-9+.-]{0,31}:\/\/[^\s:/@]*:)([^\s"'<>]{1,${MAX_URL_PASSWORD_CHARS}})(@)`,
+      'gi',
+    ),
     replace: (_m, head = '', _password, at = '') => `${head}${MASK}${at}`,
+  },
+  {
+    pattern: /([?&])([\w.-]+)(=)([^&#\s"'<>]+)/g,
+    replace: (m, lead = '', key = '', eq = '', value = '') =>
+      isSecretKey(key) && !isMasked(value) ? `${lead}${key}${eq}${MASK}` : m,
   },
   {
     pattern:
@@ -264,6 +344,9 @@ export function scrubText(text: string, options: ScrubOptions = {}): ScrubResult
       return MASK;
     });
   }
+  const pem = maskPemBlocks(out);
+  out = pem.value;
+  count += pem.count;
   for (const rule of SHAPE_RULES) {
     out = out.replace(rule.pattern, (...args: unknown[]) => {
       const groups = args.slice(0, -2).map((arg) => (typeof arg === 'string' ? arg : ''));
@@ -294,6 +377,18 @@ export function scrubText(text: string, options: ScrubOptions = {}): ScrubResult
     count += 1;
     return `${q}${key}${q}${sep}${maskedValue(value, MASK)}`;
   });
+  for (const pattern of [KEYED_SUBSCRIPT, KEYED_CALL_ARG]) {
+    out = out.replace(
+      pattern,
+      (match, lead: string, q: string, key: string, sep: string, value: string) => {
+        if (!isSecretKey(key) || revealKeys.has(key) || isMasked(value)) {
+          return match;
+        }
+        count += 1;
+        return `${lead}${q}${key}${q}${sep}${maskedValue(value, MASK)}`;
+      },
+    );
+  }
   out = out.replace(KEYED_ADJACENT, (match, dashes: string, key: string, gap: string) => {
     if (!isSecretKey(key) || revealKeys.has(key)) {
       return match;
@@ -364,21 +459,39 @@ export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
 const PEM_BEGIN_LINE = new RegExp(`-----BEGIN ${PEM_LABEL}-----`);
 const PEM_END_LINE = new RegExp(`-----END ${PEM_LABEL}-----`);
 
-/** For output already split into lines (`files tail`, `logs docker`), where no single string
- *  holds both ends of a PEM block: every line between a private-key BEGIN and its END is masked. */
+/** For output already split into lines (`files tail`, `logs *`), where no single string holds
+ *  both ends of a PEM block: every line between a private-key BEGIN and its END is masked, and a
+ *  lone END (its BEGIN cut off by `-n`) masks every line before it since the output start or the
+ *  previous END. */
 export function maskPemLines(lines: readonly string[]): string[] {
+  const out = [...lines];
   let inside = false;
-  return lines.map((line) => {
+  let bodyStart = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    const isEnd = PEM_END_LINE.test(line);
     if (inside) {
-      if (PEM_END_LINE.test(line)) {
+      if (isEnd) {
         inside = false;
-        return line;
+        bodyStart = i + 1;
+      } else {
+        out[i] = MASK;
       }
-      return MASK;
+      continue;
     }
-    inside = PEM_BEGIN_LINE.test(line) && !PEM_END_LINE.test(line);
-    return line;
-  });
+    if (PEM_BEGIN_LINE.test(line)) {
+      inside = !isEnd;
+      bodyStart = i + 1;
+      continue;
+    }
+    if (isEnd) {
+      for (let j = bodyStart; j < i; j += 1) {
+        out[j] = MASK;
+      }
+      bodyStart = i + 1;
+    }
+  }
+  return out;
 }
 
 /** Whole-file masking for an env-shaped file: every `[export ]KEY=value` (quoted or continued

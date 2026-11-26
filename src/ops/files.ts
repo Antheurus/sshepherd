@@ -245,6 +245,10 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
     ].join('; ');
     return shellJoin(['sh', '-c', script]);
   },
+  shapeError: (raw) =>
+    raw.stdout.length === 0
+      ? undefined
+      : { written: false, bytes_received: Buffer.byteLength(raw.stdout, 'utf8') },
   shape: (parsed, ctx) => {
     const text = parsed as string;
     const localPath = reqStr(ctx, 'local_path');

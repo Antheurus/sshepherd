@@ -7,7 +7,7 @@ import {
   reqStr,
 } from '../op-args.ts';
 import { parseDockerLogLines } from '../parsers/docker-log.ts';
-import { shapeJournalEntry } from '../parsers/journal.ts';
+import { type LogLine, shapeJournalEntry } from '../parsers/journal.ts';
 import { buildLogsResult } from '../parsers/logs-shape.ts';
 import { shellJoin } from '../quote.ts';
 import { maskPemLines } from '../scrub.ts';
@@ -17,6 +17,13 @@ import { type OpContext, OpError, type OpSpec } from '../types.ts';
 // ---------------------------------------------------------------------------
 // logs
 // ---------------------------------------------------------------------------
+
+/** Every log op splits output per line or journald entry, so no single string holds a whole PEM
+ *  block for `scrubText` to see: the line-array pass masks its body first. */
+function maskPemLogLines<T extends LogLine>(lines: T[]): T[] {
+  const texts = maskPemLines(lines.map((line) => line.text));
+  return lines.map((line, index) => ({ ...line, text: texts[index] ?? line.text }));
+}
 
 function buildLogsDocker(ctx: OpContext): string {
   const container = reqStr(ctx, 'container');
@@ -45,9 +52,7 @@ const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
   output: 'raw',
   buildRemote: buildLogsDocker,
   shape: (parsed, ctx) => {
-    const parsedLines = parseDockerLogLines(parsed as string);
-    const texts = maskPemLines(parsedLines.map((line) => line.text));
-    const lines = parsedLines.map((line, index) => ({ ...line, text: texts[index] ?? line.text }));
+    const lines = maskPemLogLines(parseDockerLogLines(parsed as string));
     const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
     return buildLogsResult(
       `docker:${reqStr(ctx, 'container')}`,
@@ -81,8 +86,8 @@ const logsService: OpSpec<ReturnType<typeof buildLogsResult>> = {
   buildRemote: (ctx) =>
     buildJournalCommand(reqStr(ctx, 'unit'), optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL))),
   shape: (parsed, ctx) => {
-    const lines = shapeJournalLines(parsed).filter(
-      (line): line is NonNullable<typeof line> => line !== null,
+    const lines = maskPemLogLines(
+      shapeJournalLines(parsed).filter((line): line is NonNullable<typeof line> => line !== null),
     );
     const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
     return buildLogsResult(
@@ -105,8 +110,8 @@ const logsDockerDaemon: OpSpec<ReturnType<typeof buildLogsResult>> = {
   buildRemote: (ctx) =>
     buildJournalCommand('docker', optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL))),
   shape: (parsed, ctx) => {
-    const lines = shapeJournalLines(parsed).filter(
-      (line): line is NonNullable<typeof line> => line !== null,
+    const lines = maskPemLogLines(
+      shapeJournalLines(parsed).filter((line): line is NonNullable<typeof line> => line !== null),
     );
     const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
     return buildLogsResult('docker-daemon', lines, Number.isNaN(limit) ? DEFAULT_LOG_TAIL : limit);
@@ -144,11 +149,13 @@ const logsNginx: OpSpec<ReturnType<typeof buildLogsResult>> = {
   },
   shape: (parsed, ctx) => {
     const stream = reqStr(ctx, 'stream');
-    const lines = (parsed as string)
-      .split('\n')
-      .map((line) => line.trimEnd())
-      .filter((line) => line.length > 0)
-      .map((text) => ({ ts: null, stream: 'stdout' as const, text }));
+    const lines = maskPemLogLines(
+      (parsed as string)
+        .split('\n')
+        .map((line) => line.trimEnd())
+        .filter((line) => line.length > 0)
+        .map((text): LogLine => ({ ts: null, stream: 'stdout', text })),
+    );
     const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
     return buildLogsResult(
       `nginx:${stream}`,
