@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "sshepherd/services-inspect",
   "title": "sshepherd services inspect",
-  "description": "Full inspect detail for one container — cap audit + exit-137 evidence in one call.",
+  "description": "Full inspect detail for one container — cap audit, mounts, ports, health, exit-137 evidence and env key names (never values) in one call.",
   "x-sshepherd": {
     "group": "services",
     "action": "inspect",

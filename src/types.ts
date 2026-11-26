@@ -165,13 +165,22 @@ export interface ArgSpec {
  * Declarative allowlist gate, enforced once in `executeOp` before `buildRemote` runs —
  * no op's `buildRemote` calls an assert function itself (see `coding-standard.md` rule 17,
  * "Centralized by Default"). `path` covers `config`/`files` ops whose named arg is a
- * remote path that must be pre-declared per-alias in that scope's `<scope>-allowlist.toml`.
+ * remote path that must be pre-declared per-alias in that scope's `<scope>-allowlist.toml`
+ * (exactly, or with `within` under a declared entry).
  * `reveal-keys` covers `files cat --reveal`: the named arg is a comma-separated key list,
  * each checked against a hardcoded secret-pattern denylist first (never overridable), then
  * against the per-alias `reveal-allowlist.toml`.
  */
 export type AllowlistPolicy =
-  | { kind: 'path'; scope: 'config' | 'files'; argName: string }
+  | {
+      kind: 'path';
+      scope: 'config' | 'files';
+      argName: string;
+      /** The arg may be absent (`env keys --container X` carries no path); present, it is checked. */
+      optional?: boolean;
+      /** The path may also sit under an allowlisted entry (`files grep`/`find` roots), never via `..`. */
+      within?: boolean;
+    }
   | { kind: 'reveal-keys'; argName: string };
 
 /**

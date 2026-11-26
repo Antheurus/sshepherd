@@ -105,7 +105,7 @@ sshepherd <group> <action> [positionals...] [--flag value]
 ```
 
 ```bash
-sshepherd --help                # lists 11 registry groups + the setup group
+sshepherd --help                # lists 12 registry groups + the setup group
 sshepherd <group> --help        # lists that group's actions + args/flags
 sshepherd <group> <action> --help   # shows one action's args
 ```
@@ -153,7 +153,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 11 registry-driven groups (59 ops) + 1 `setup` group (6 sub-groups, 12 actions)
+## Quick reference — 12 registry-driven groups (64 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
@@ -199,9 +199,17 @@ sshepherd services systemctl-reload web-01 nginx --yes
 sshepherd files ls web-01 /opt/myapp
 sshepherd files cat web-01 /opt/myapp/.env --reveal DB_HOST
 sshepherd files tail web-01 /var/log/syslog --n 100
+sshepherd files head web-01 /opt/myapp/.env --n 20
+sshepherd files grep web-01 /opt/myapp 'ERROR' --context 2
+sshepherd files find web-01 /opt/myapp --name '*.log'
 sshepherd files download web-01 /opt/myapp/backup.sql ./backup.sql
 sshepherd files disk-usage web-01 /var/lib/docker
 sshepherd files upload web-01 ./local.conf /opt/myapp/local.conf --yes
+
+# env (key names only — values never leave the host)
+sshepherd env keys web-01 --container myapp
+sshepherd env keys web-01 --path /opt/myapp/.env
+sshepherd env diff web-01 --path /opt/myapp/.env --against ./.env.example
 
 # config
 sshepherd config get web-01 /etc/nginx/nginx.conf

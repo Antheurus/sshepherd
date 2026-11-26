@@ -354,7 +354,7 @@ run_matrix() {
 
   step "[$variant] setup files-allowlist scaffold, then files ls"
   run_cli setup_files_allowlist setup files-allowlist scaffold "$alias" \
-    --paths /root,/opt/myapp/prod.env,/opt/myapp/start.sh --yes
+    --paths /root,/opt/myapp,/opt/myapp/.env,/opt/myapp/prod.env,/opt/myapp/start.sh --yes
   assert_json "[$variant] files-allowlist scaffolded for /root" setup_files_allowlist \
     "d['ok'] is True and '/root' in d['data']['paths']"
   run_cli files_ls files ls "$alias" /root
@@ -380,6 +380,43 @@ run_matrix() {
   run_cli files_download_export files download "$alias" /opt/myapp/start.sh "$OUT/start.sh.download"
   assert_json "[$variant] files download start.sh: export KEY=v scrubbed on disk" files_download_export \
     "d['ok'] is True and 'export SESSION_SECRET=***' in open('$OUT/start.sh.download').read() and 'export PORT=3000' in open('$OUT/start.sh.download').read() and 'fake-secret-value' not in open('$OUT/start.sh.download').read()"
+
+  step "[$variant] env keys / env diff / services inspect: key names only, values never read"
+  run_cli env_keys_file env keys "$alias" --path /opt/myapp/.env
+  assert_json "[$variant] env keys --path: key, state, length_bucket per variable, no value" env_keys_file \
+    "d['ok'] is True and {(e['key'], e['state'], e['length_bucket']) for e in d['data']} == {('APP_NAME','set','1-8'),('DB_PASSWORD','set','9-32'),('EMPTY_KEY','empty','0'),('LOG_LEVEL','set','1-8')} and 'fake-secret-value' not in json.dumps(d)"
+  run_cli env_keys_container env keys "$alias" --container "$PREFIX-app"
+  assert_json "[$variant] env keys --container: names only, PATH listed, no '=' in a key" env_keys_container \
+    "d['ok'] is True and any(e['key'] == 'PATH' for e in d['data']) and all(set(e) == {'key','state','length_bucket'} and '=' not in e['key'] for e in d['data'])"
+  run_cli env_diff env diff "$alias" --path /opt/myapp/.env --against ./fixtures/.env.example
+  assert_json "[$variant] env diff: API_URL missing, LOG_LEVEL extra, EMPTY_KEY empty" env_diff \
+    "d['ok'] is True and d['data'] == {'missing': ['API_URL'], 'extra': ['LOG_LEVEL'], 'empty': ['EMPTY_KEY']}"
+  run_cli services_inspect services inspect "$alias" "$PREFIX-app" --fields mounts,ports,health,env
+  assert_json "[$variant] services inspect --fields mounts,ports,health,env: env is key names only" services_inspect \
+    "d['ok'] is True and all(set(e) == {'key','state','length_bucket'} for e in d['data'][0]['env']) and any(e['key'] == 'PATH' for e in d['data'][0]['env']) and 'mounts' in d['data'][0]"
+
+  step "[$variant] files grep / find / head: allowlisted roots only, scrubbed, capped"
+  run_cli files_grep files grep "$alias" /opt/myapp 'ERROR' --max-bytes 8192
+  assert_json "[$variant] files grep ERROR: the log line comes back" files_grep \
+    "d['ok'] is True and any('upstream refused' in l for l in d['data']['lines']) and len(open('$OUT/files_grep.json','rb').read()) <= 8192"
+  run_cli files_grep_env files grep "$alias" /opt/myapp 'DB_PASSWORD'
+  assert_json "[$variant] files grep over env files: values masked, no fake value" files_grep_env \
+    "d['ok'] is True and len(d['data']['lines']) >= 2 and 'fake-secret-value' not in json.dumps(d)"
+  run_cli files_find files find "$alias" /opt/myapp --name '*.log'
+  assert_json "[$variant] files find --name '*.log': exactly the log" files_find \
+    "d['ok'] is True and d['data']['paths'] == ['/opt/myapp/app.log'] and d['data']['truncated'] is False"
+  run_cli files_head files head "$alias" /opt/myapp/.env --n 2
+  assert_json "[$variant] files head --n 2: two lines, values masked" files_head \
+    "d['ok'] is True and d['data']['lines_returned'] == 2 and 'fake-secret-value' not in json.dumps(d)"
+  run_cli_any files_find_root files find "$alias" / --name passwd
+  assert_json "[$variant] files find on /: refused by the allowlist before any ssh call" files_find_root \
+    "d['ok'] is False and d['error']['code'] == 'VALIDATION_ERROR'"
+  run_cli_any files_find_dotdot files find "$alias" /opt/myapp/../../etc --name passwd
+  assert_json "[$variant] files find with .. out of the root: refused" files_find_dotdot \
+    "d['ok'] is False and d['error']['code'] == 'VALIDATION_ERROR'"
+  run_cli_any files_find_escape files find "$alias" /opt/myapp/escape --name passwd
+  assert_json "[$variant] files find through a symlink out of the root: refused, nothing read" files_find_escape \
+    "d['ok'] is False and d['error']['code'] == 'VALIDATION_ERROR' and 'passwd' not in json.dumps(d['data'])"
 
   step "[$variant] security listeners"
   run_cli security_listeners security listeners "$alias"

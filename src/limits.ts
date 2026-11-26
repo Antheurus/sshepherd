@@ -104,3 +104,23 @@ export const DIAGNOSE_STAGE_TIMEOUT_SEC = 5;
 /** The ssh login of `hosts test --diagnose` (auth + echo): `CONNECT_TIMEOUT_SEC` for the
  *  connection plus the same again for key exchange and the echo. */
 export const DIAGNOSE_SSH_TIMEOUT_SEC = 20;
+/** Upper edges of the coarse `length_bucket` an env key reports (`0`, `1-8`, `9-32`, `33+`): three
+ *  cuts are enough to tell a flag from a token from a connection string, too few for a length to
+ *  single out one value. */
+export const ENV_LENGTH_BUCKET_BOUNDS = [8, 32] as const;
+/** `files grep` pattern: a regex longer than this is a pasted blob, not a search; 256 holds any
+ *  real alternation of log markers. */
+export const MAX_FILES_GREP_PATTERN_CHARS = 256;
+/** `files find --name` glob: file names are at most 255 bytes, a glob over half that is already odd. */
+export const MAX_FIND_NAME_CHARS = 128;
+/** Matching lines `files grep` returns (the remote stops one past it to say `truncated`): 500 lines
+ *  of typical log text fit under `DEFAULT_MAX_BYTES`. */
+export const MAX_GREP_MATCH_LINES = 500;
+/** Paths `files find` returns, same ceiling and reason as `MAX_GREP_MATCH_LINES`. */
+export const MAX_FIND_RESULTS = 500;
+/** `files grep --context`: five lines either side shows the surrounding stack frame; more is `files head`. */
+export const MAX_GREP_CONTEXT_LINES = 5;
+/** `files head` lines when `--n` is absent: the top of a file (imports, a config header) is a screen long. */
+export const DEFAULT_HEAD_LINES = 100;
+/** `files head --n` ceiling, the same as `MAX_TAIL_LINES`. */
+export const MAX_HEAD_LINES = 5_000;

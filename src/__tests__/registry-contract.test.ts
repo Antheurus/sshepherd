@@ -81,6 +81,7 @@ const ARG_VALUES: Record<string, () => string> = {
   path: () => REMOTE_PATH,
   remote_path: () => REMOTE_PATH,
   local_path: () => join(scratch, 'source.txt'),
+  against: () => join(scratch, 'source.txt'),
   'content-base64': () => Buffer.from('content\n').toString('base64'),
   recipe: () => 'demo',
   id: () => 'no-such-tunnel',
@@ -103,6 +104,9 @@ function argsFor(op: OpSpec): Record<string, string | boolean> {
   if (op.group === 'db') {
     args.db_user = 'app';
     args.db_name = 'app';
+  }
+  if (op.group === 'env' && op.name === 'keys') {
+    args.container = 'app';
   }
   return args;
 }
