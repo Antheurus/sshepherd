@@ -45,12 +45,13 @@ function shapeLogs(source: string, raw: LogLine[], ctx: OpContext): Premasked<Lo
   );
 }
 
-/** A capped log keeps its newest lines, and its counters follow what was kept. */
+/** A capped or `--limit`ed log keeps its newest lines, and its counters follow what was kept. */
 const LOG_CAPS = {
   truncateKeeps: 'tail',
+  limitKeeps: 'tail',
   capLines,
   recount: recountLines,
-} as const satisfies Pick<OpSpec, 'truncateKeeps' | 'capLines' | 'recount'>;
+} as const satisfies Pick<OpSpec, 'truncateKeeps' | 'limitKeeps' | 'capLines' | 'recount'>;
 
 function buildLogsDocker(ctx: OpContext): string {
   const container = reqStr(ctx, 'container');

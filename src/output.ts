@@ -201,10 +201,17 @@ export function selectFields(
   return { data: data === null ? null : Array.isArray(data) ? [] : {}, unmatched };
 }
 
-/** `--limit N`: the first N items of `data` when it is a list, or of each list directly under it. */
-export function limitItems(data: unknown, limit: number): { data: unknown; cut: boolean } {
+/** `--limit N`: the first N items of `data` when it is a list, or of each list directly under it —
+ *  the last N when `keep` is `tail`. */
+export function limitItems(
+  data: unknown,
+  limit: number,
+  keep: 'head' | 'tail' = 'head',
+): { data: unknown; cut: boolean } {
+  const take = (list: unknown[]): unknown[] =>
+    keep === 'head' ? list.slice(0, limit) : list.slice(Math.max(0, list.length - limit));
   if (Array.isArray(data)) {
-    return { data: data.slice(0, limit), cut: data.length > limit };
+    return { data: take(data), cut: data.length > limit };
   }
   if (!isPlainObject(data)) {
     return { data, cut: false };
@@ -213,7 +220,7 @@ export function limitItems(data: unknown, limit: number): { data: unknown; cut: 
   const limited: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     if (Array.isArray(value) && value.length > limit) {
-      limited[key] = value.slice(0, limit);
+      limited[key] = take(value);
       cut = true;
     } else {
       limited[key] = value;

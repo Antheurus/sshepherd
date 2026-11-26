@@ -77,3 +77,9 @@ export const MAX_IDENTITY_GAP_CHARS = 8;
  *  an identifier at 63 bytes, and a multi-word type (`timestamp with time zone`) is far shorter, so
  *  64 holds every real one while a long line with no `: "` is never rescanned past it. */
 export const MAX_PSQL_TYPE_NAME_CHARS = 64;
+/** How far past `user@` the scrubber reads to decide it is a login (`app@web-01`) and not a
+ *  version or digest (`app@2.0.0`): 253 is the longest DNS name, and the bound keeps it linear. */
+export const MAX_HOSTNAME_CHARS = 253;
+/** Hex digits allowed between the last non-hex letter of a `word:` and an IPv6 literal after it
+ *  (`src:` has 2, `ipv6:` 1): 16 covers every real label, and the bound keeps the lookbehind linear. */
+export const MAX_LABEL_HEX_TAIL_CHARS = 16;

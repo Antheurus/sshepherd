@@ -236,7 +236,7 @@ function shapeOutput(
   }
   const selected = shaped.data;
   if (deps.limit !== undefined) {
-    const limited = limitItems(shaped.data, deps.limit);
+    const limited = limitItems(shaped.data, deps.limit, op.limitKeeps);
     shaped = { ...shaped, data: limited.data };
     cut = cut || limited.cut;
   }

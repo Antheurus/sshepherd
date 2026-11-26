@@ -194,6 +194,8 @@ export interface OpSpec<T = unknown> {
   /** Which end of an over-long payload survives a byte cap: `tail` for output whose last lines
    *  decide the outcome (deploy steps); default `head`. */
   truncateKeeps?: 'head' | 'tail';
+  /** Which items `--limit N` keeps: `tail` for output whose newest entries matter (logs); default `head`. */
+  limitKeeps?: 'head' | 'tail';
   /** Stdout read ceiling for this op in place of `MAX_STDOUT_BYTES` (`files download` writes its
    *  payload to disk, so it reads up to its own file limit). */
   maxStdoutBytes?: number;

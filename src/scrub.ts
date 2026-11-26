@@ -9,7 +9,9 @@
  */
 
 import {
+  MAX_HOSTNAME_CHARS,
   MAX_IDENTITY_GAP_CHARS,
+  MAX_LABEL_HEX_TAIL_CHARS,
   MAX_PSQL_TYPE_NAME_CHARS,
   MIN_BARE_HOSTNAME_CHARS,
   MIN_MASKED_USER_CHARS,
@@ -34,20 +36,58 @@ export const REVEAL_DENYLIST_PATTERNS: RegExp[] = [
 ];
 
 const SECRET_NAME_FRAGMENTS = ['SECRET', 'TOKEN', 'PASSWORD', 'PASSWD', 'PASSPHRASE', 'CREDENTIAL'];
-const SECRET_NAME_ENDINGS = ['PASS', 'DSN'];
-const SECRET_NAME_SEGMENTS = new Set(SECRET_NAME_ENDINGS);
+const SECRET_NAME_ENDINGS = ['DSN'];
+const SECRET_NAME_SEGMENTS = new Set(['PASS', 'DSN']);
 /** A last name segment joined without a separator (`privkey`, `TS_AUTHKEY`, `LICENSEKEY`): it is
  *  secret when the word right before `KEY` is a secret-ish one, so `monkey`, `turkey`, `hockey`,
- *  `whiskey` and `key` stay visible. `PASS` covers tracker `passkey`s, which are credentials. */
+ *  `whiskey` and `key` stay visible. A joined `passkey` is `isJoinedPassKey`'s. */
 const JOINED_SECRET_KEY =
-  /(?:PRIV|PRIVATE|MASTER|SIGNING|STRIPE|APP|LICENSE|API|SECRET|ENCRYPTION|ACCESS|AUTH|JWT|HMAC|SESSION|CRYPT|PRESHARED|CLIENT|DEPLOY|SSH|WEBHOOK|PASS)KEY$/;
+  /(?:PRIV|PRIVATE|MASTER|SIGNING|STRIPE|APP|LICENSE|API|SECRET|ENCRYPTION|ACCESS|AUTH|JWT|HMAC|SESSION|CRYPT|PRESHARED|CLIENT|DEPLOY|SSH|WEBHOOK)KEY$/;
 
-/** A key name whose value is a secret: the reveal denylist, a name containing a secret word,
- *  a name ending in (or having a `_`/`.`/`-` segment equal to) PASS/DSN, a `_PWD`/`_PW` name, a
- *  camelCase `...Key`/`...Salt`, a last segment ending in a joined `<prefix>key` or equal to SALT,
- *  or a KEY segment in a name of two or more segments. A bare `key`, `url`, `APP_URL` or `monkey`
- *  is not: a URL's credentials are masked by its shape, not its name.
- *  `PORT`, `NODE_ENV` and `DB_HOST` are not — a host is not a secret by default. */
+/** Values a flag holds: under a joined `pass` name they say the name is a switch, not a password. */
+const BOOLEAN_WORDS = new Set([
+  'true',
+  'false',
+  'yes',
+  'no',
+  'on',
+  'off',
+  'enabled',
+  'disabled',
+  '0',
+  '1',
+  'null',
+  'none',
+]);
+
+function isBooleanWord(value: string): boolean {
+  return BOOLEAN_WORDS.has(
+    value
+      .trim()
+      .replace(/^["']|["']$/g, '')
+      .toLowerCase(),
+  );
+}
+
+/** A name whose last segment ends in a joined `pass` or `passkey` (`bypass`, `compass`, `firstPass`,
+ *  `DBPASS`, a tracker `passkey`): a password only when its value is not a boolean word, so
+ *  `bypass=true` stays visible while `dbpass=hunter2` does not. */
+function isJoinedPassKey(name: string): boolean {
+  const last = name.toUpperCase().split(/[_.-]/).pop() ?? '';
+  return last.endsWith('PASS') || last.endsWith('PASSKEY');
+}
+
+/** `isSecretKey`, plus a joined-`pass` name whose value is not a boolean word. */
+function isSecretPair(name: string, value: string): boolean {
+  return isSecretKey(name) || (isJoinedPassKey(name) && !isBooleanWord(value));
+}
+
+/** A key name whose value is a secret whatever it holds: the reveal denylist, a name containing a
+ *  secret word, a name ending in DSN or having a `_`/`.`/`-` segment equal to PASS/DSN, a
+ *  `_PWD`/`_PW` name, a camelCase `...Key`/`...Salt`, a last segment ending in a joined
+ *  `<prefix>key` or equal to SALT, or a KEY segment in a name of two or more segments. A bare
+ *  `key`, `url`, `APP_URL` or `monkey` is not: a URL's credentials are masked by its shape, not its
+ *  name. `PORT`, `NODE_ENV` and `DB_HOST` are not — a host is not a secret by default. */
 export function isSecretKey(name: string): boolean {
   if (REVEAL_DENYLIST_PATTERNS.some((pattern) => pattern.test(name))) {
     return true;
@@ -312,7 +352,7 @@ const SHAPE_RULES: ShapeRule[] = [
   {
     pattern: /([?&])([\w.-]+)(=)([^&#\s"'<>]+)/g,
     replace: (m, lead = '', key = '', eq = '', value = '') =>
-      (isSecretKey(key) || SIGNATURE_PARAM.test(key)) && !isMasked(value)
+      (isSecretPair(key, value) || SIGNATURE_PARAM.test(key)) && !isMasked(value)
         ? `${lead}${key}${eq}${MASK}`
         : m,
   },
@@ -337,7 +377,7 @@ const SHAPE_RULES: ShapeRule[] = [
   {
     pattern: /<([A-Za-z_][\w.-]{0,63})>([^<]+)<\/\1>/g,
     replace: (m, tag = '', value = '') =>
-      isSecretKey(tag) && !isMasked(value) ? `<${tag}>${MASK}</${tag}>` : m,
+      isSecretPair(tag, value) && !isMasked(value) ? `<${tag}>${MASK}</${tag}>` : m,
   },
   {
     pattern:
@@ -382,12 +422,15 @@ const HEX_GROUP = /^[0-9A-Fa-f]{1,4}$/;
 
 /** One pass for both families, so `<ip-N>` numbers follow first appearance. IPv6: two to seven
  *  `:`s between hex groups of at most four digits (an optional dotted IPv4 tail), starting where no
- *  word character, `.` or `:` precedes — `ipv6Groups` decides; a MAC (six groups, no `::`) and a
- *  `12:34:56` time never qualify. IPv4: four octets with no leading zero, not preceded by a word
- *  character or `.` and not followed by one or by `.<digit>` — so `1.2.3.4.5`, `v10.0.0.1` and
- *  `nginx:1.25.3` stay, while `addr:192.0.2.1` is masked. A `/24` or `:443` after it stays visible. */
+ *  word character, `.` or `:` precedes, or right after a `word:` whose word holds a non-hex letter
+ *  (`addr:`, `client_ip:`, `src:`), which no address group can be — `ipv6Groups` decides; a MAC
+ *  (six groups, no `::`) and a `12:34:56` time never qualify. IPv4: four octets with no leading
+ *  zero, not preceded by a word character or `.` and not followed by one or by `.<digit>` — so
+ *  `1.2.3.4.5`, `v10.0.0.1` and `nginx:1.25.3` stay, while `addr:192.0.2.1` is masked. A `/24` or
+ *  `:443` after it stays visible. */
+const IPV6_CANDIDATE = String.raw`(?:(?<![\w.:])|(?<=[G-Zg-z_][0-9A-Fa-f]{0,${MAX_LABEL_HEX_TAIL_CHARS}}:))([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:\.\d{1,3}){0,3})`;
 const ADDRESS_CANDIDATE = new RegExp(
-  String.raw`(?<![\w.:])([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:\.\d{1,3}){0,3})|(?<![\w.])(${IPV4})(?![\w]|\.\d)`,
+  String.raw`${IPV6_CANDIDATE}|(?<![\w.])(${IPV4})(?![\w]|\.\d)`,
   'g',
 );
 
@@ -452,60 +495,228 @@ const GAP = `[ \\t]{0,${MAX_IDENTITY_GAP_CHARS}}`;
  *  either side optionally quoted (`user=x`, `"user": "x"`, `for user "x"`, `-l x`, `-p2222`). */
 const IDENTITY_SEP = `["']?(?:${GAP}[=:]${GAP}|${GAP})["']?`;
 
-function hostnamePattern(hostname: string): RegExp | null {
-  const escaped = escapeRegExp(hostname);
-  if (IPV4_EXACT.test(hostname)) {
-    return new RegExp(String.raw`(?<![\w.])${escaped}(?![\w]|\.\d)`, 'g');
-  }
-  if (hostname.includes(':')) {
-    return new RegExp(String.raw`(?<![\w.:])${escaped}(?![\w:])`, 'gi');
-  }
-  if (!hostname.includes('.') && hostname.length < MIN_BARE_HOSTNAME_CHARS) {
-    return null;
-  }
-  return new RegExp(String.raw`(?<![\w.-])${escaped}(?![\w-]|\.[\w-])`, 'gi');
+/** One identity rule: `mask` gets the match, its groups (absent ones as `''`), its offset and the
+ *  whole string, and returns the match itself to leave it alone. `inKeys` lets it rewrite an object
+ *  key — only for shapes a fixed field name never has (a dotted hostname, an IP, `2222/tcp`). */
+interface IdentityRule {
+  pattern: RegExp;
+  mask: (match: string, groups: string[], offset: number, whole: string) => string;
+  inKeys: boolean;
 }
 
-/** The user only where it names who connects: `user@`, a URL's `://user:`, `-l user`, `User user`,
- *  `for user`, `for [invalid] user "user"`, `user=user`, `login: user` — never as a bare word in prose. */
-function userPattern(user: string): RegExp | null {
+const leadThen =
+  (mask: string) =>
+  (_match: string, groups: string[]): string =>
+    `${groups.find((group) => group.length > 0) ?? ''}${mask}`;
+
+/** Between a host keyword and a short hostname: `=`/`:` or at least one blank, so `toweb1` is no context. */
+const HOST_SEP = `["']?(?:${GAP}[=:]${GAP}|[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}})["']?`;
+
+/** The alias hostname. An IPv6 one is compared by value, so its expanded and compressed forms are
+ *  both `<host>`. A dotless one under `MIN_BARE_HOSTNAME_CHARS` (`web1`, `db`) is masked only in a
+ *  host context — `host X`, `hostname X`, `to X`, `ssh X`, `@X`, `X:<port>` — and everywhere else
+ *  stays, being too common a word; any longer or dotted one is masked wherever it stands. */
+function hostnameRule(hostname: string): IdentityRule | null {
+  const escaped = escapeRegExp(hostname);
+  if (IPV4_EXACT.test(hostname)) {
+    return {
+      pattern: new RegExp(String.raw`(?<![\w.])${escaped}(?![\w]|\.\d)`, 'g'),
+      mask: () => HOST_MASK,
+      inKeys: true,
+    };
+  }
+  if (hostname.includes(':')) {
+    const own = ipv6Groups(hostname);
+    if (own !== null) {
+      return {
+        pattern: new RegExp(IPV6_CANDIDATE, 'g'),
+        mask: (match, [candidate = ''], offset, whole) => {
+          const groups = /[\w:]/.test(whole[offset + match.length] ?? '')
+            ? null
+            : ipv6Groups(candidate);
+          return groups?.every((value, i) => value === own[i]) ? HOST_MASK : match;
+        },
+        inKeys: true,
+      };
+    }
+    return {
+      pattern: new RegExp(String.raw`(?<![\w.:])${escaped}(?![\w:])`, 'gi'),
+      mask: () => HOST_MASK,
+      inKeys: true,
+    };
+  }
+  if (!hostname.includes('.') && hostname.length < MIN_BARE_HOSTNAME_CHARS) {
+    return {
+      pattern: new RegExp(
+        String.raw`((?:^|[^\w-])(?:host(?:name)?|to|ssh)${HOST_SEP}|@)${escaped}(?![\w-]|\.[\w-])|(?<![\w.-])${escaped}(?=:\d{1,5}(?![\d.]))`,
+        'gim',
+      ),
+      mask: leadThen(HOST_MASK),
+      inKeys: false,
+    };
+  }
+  return {
+    pattern: new RegExp(String.raw`(?<![\w.-])${escaped}(?![\w-]|\.[\w-])`, 'gi'),
+    mask: () => HOST_MASK,
+    inKeys: hostname.includes('.'),
+  };
+}
+
+/** Login names that are also ordinary words in logs, package trees, unit names and shell loops
+ *  (`app@2.0.0`, `app@1000.service`, `for app in ...`): the cloud-image defaults, role accounts and
+ *  service accounts. Such a user is masked only where it names who connects; any other user is
+ *  distinctive and masked wherever it stands as a whole word. */
+const COMMON_USER_NAMES = new Set([
+  'root',
+  'admin',
+  'administrator',
+  'user',
+  'ubuntu',
+  'debian',
+  'centos',
+  'fedora',
+  'rocky',
+  'almalinux',
+  'ec2-user',
+  'azureuser',
+  'opc',
+  'core',
+  'vagrant',
+  'bitnami',
+  'app',
+  'www',
+  'www-data',
+  'web',
+  'api',
+  'deploy',
+  'deployer',
+  'git',
+  'dev',
+  'test',
+  'guest',
+  'ops',
+  'devops',
+  'server',
+  'service',
+  'node',
+  'docker',
+  'postgres',
+  'mysql',
+  'nginx',
+  'backup',
+  'data',
+  'worker',
+  'ansible',
+]);
+
+const SYSTEMD_UNIT_SUFFIX =
+  /\.(?:service|socket|timer|target|mount|automount|path|slice|scope|device|swap)$/;
+
+/** What follows `user@` when it is a login: `<host>`, a `[v6]` literal, an IPv4 address or a
+ *  letter-led hostname — never a version (`app@2.0.0`), a digest (`app@sha256:`) or a unit
+ *  instance (`getty@tty1.service`). */
+function isHostAfterAt(token: string): boolean {
+  if (token.startsWith(HOST_MASK) || token.startsWith('[')) {
+    return true;
+  }
+  const head = (/^[\w.-]+/.exec(token)?.[0] ?? '').replace(/\.+$/, '');
+  if (IPV4_EXACT.test(head)) {
+    return true;
+  }
+  if (!/^[A-Za-z]/.test(head)) {
+    return false;
+  }
+  if (/^sha\d+$/i.test(head) && token[head.length] === ':') {
+    return false;
+  }
+  return !SYSTEMD_UNIT_SUFFIX.test(head);
+}
+
+/** The alias user. A distinctive one is masked as a whole word everywhere (`ls -l`, `ps`, `/home/x`,
+ *  `id`, sudo logs). A `COMMON_USER_NAMES` one only where it names who connects: `user@<host-like>`,
+ *  a URL's `://user:`, `-l user`, `User user`, `user=user`, `"user":"user"`, `login: user`, sshd's
+ *  `for [invalid user ]user from`. */
+function userRule(user: string): IdentityRule | null {
   if (user.length < MIN_MASKED_USER_CHARS) {
     return null;
   }
   const escaped = escapeRegExp(user);
-  return new RegExp(
-    String.raw`((?:^|[^\w-])(?:-l|for(?:[ \t]+invalid)?(?:[ \t]+user)?|user(?:name)?|login|logname)${IDENTITY_SEP})${escaped}(?![\w.-])|(?<![\w.-])${escaped}(?=@)|(?<=:\/\/)${escaped}(?=:)`,
-    'gim',
-  );
+  if (!COMMON_USER_NAMES.has(user.toLowerCase())) {
+    return {
+      pattern: new RegExp(String.raw`(?<![\w.-])${escaped}(?![\w-]|\.[\w-])`, 'gi'),
+      mask: () => USER_MASK,
+      inKeys: false,
+    };
+  }
+  const blanks = `[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}}`;
+  return {
+    pattern: new RegExp(
+      String.raw`((?:^|[^\w-])(?:-l|user(?:name)?|login|logname)${IDENTITY_SEP})${escaped}(?![\w.-])|((?:^|[^\w-])for${blanks}(?:invalid${blanks}user${blanks})?)${escaped}(?=${blanks}from\b)|(?<![\w.-])${escaped}(?=@([^\s"']{0,${MAX_HOSTNAME_CHARS}}))|(?<=:\/\/)${escaped}(?=:)`,
+      'gim',
+    ),
+    mask: (match, [keyword = '', sshd = '', afterAt = ''], offset, whole) => {
+      if (keyword.length > 0 || sshd.length > 0) {
+        return `${keyword}${sshd}${USER_MASK}`;
+      }
+      if (whole[offset + match.length] === '@' && !isHostAfterAt(afterAt)) {
+        return match;
+      }
+      return USER_MASK;
+    },
+    inKeys: false,
+  };
 }
 
-/** The port only where it is one: `host:port`, `-p port`/`-P port`, `port port`, `Port=port`. */
-function portPattern(port: string): RegExp | null {
+/** A name that holds a port: `SSH_PORT`, `PGPORT`, `ssh_port`, `db.port`, `HostPort`, `sshPort`. */
+const GLUED_PORT_KEY = String.raw`(?<![\w.-])[\w.-]*(?:PORT|[_.-]port|[a-z0-9]Port)`;
+
+function isPortKey(key: string): boolean {
+  return new RegExp(`^${GLUED_PORT_KEY}$`).test(key) || /^port$/i.test(key);
+}
+
+/** The alias port where it is one: `host:port`, `-p port`/`-P port`, `port port`, `Port=port`, a
+ *  key holding a port (`SSH_PORT=port`, `"HostPort":"port"`), and `port/tcp`/`port/udp`; the last
+ *  also in object keys (`docker inspect`'s `"2222/tcp"`). */
+function portRules(port: string): IdentityRule[] {
   if (!/^\d+$/.test(port)) {
-    return null;
+    return [];
   }
-  return new RegExp(
-    String.raw`((?:[\w\]>]:|(?:^|[^\w-])(?:-p|-P|port)${IDENTITY_SEP}))${port}(?!\d)`,
-    'gim',
-  );
+  return [
+    {
+      pattern: new RegExp(
+        String.raw`((?:[\w\]>]:|(?:^|[^\w-])(?:-p|-P|[Pp][Oo][Rr][Tt])${IDENTITY_SEP}|${GLUED_PORT_KEY}["']?${GAP}[=:]${GAP}["']?))${port}(?!\d)`,
+        'gm',
+      ),
+      mask: leadThen(PORT_MASK),
+      inKeys: false,
+    },
+    {
+      pattern: new RegExp(String.raw`(?<![\w.])${port}(?=\/(?:tcp|udp))`, 'g'),
+      mask: () => PORT_MASK,
+      inKeys: true,
+    },
+  ];
 }
 
 interface AddressMasker {
-  /** Masks one string; `keyOnly` (an object key) skips the context rules and a dotless hostname,
-   *  so a fixed field name can never be rewritten. */
+  /** Masks one string; `keyOnly` (an object key) runs only the rules marked `inKeys`, so a fixed
+   *  field name can never be rewritten. */
   apply: (text: string, keyOnly: boolean) => ScrubResult<string>;
+  /** A JSON string value that is exactly the alias port under a port-holding key
+   *  (`{"HostPort": "2222"}`) becomes `<port>`; a numeric one stays a number. */
+  maskPortValue: (key: string, value: string) => string;
 }
 
 /** Rule 1 (the alias's identity) then rule 2 (every other address), sharing one `<ip-N>` table. */
 function createAddressMasker(options: ScrubOptions): AddressMasker | null {
   const identity = options.identity ?? {};
-  const hostname = identity.hostname ? hostnamePattern(identity.hostname) : null;
-  const hostnameInKeys =
-    hostname !== null && identity.hostname !== undefined && /[.:]/.test(identity.hostname);
-  const user = identity.user ? userPattern(identity.user) : null;
-  const port = identity.port ? portPattern(identity.port) : null;
+  const rules: IdentityRule[] = [
+    identity.hostname ? hostnameRule(identity.hostname) : null,
+    identity.user ? userRule(identity.user) : null,
+    ...(identity.port ? portRules(identity.port) : []),
+  ].filter((rule): rule is IdentityRule => rule !== null);
   const maskAddresses = options.maskAddresses === true;
-  if (hostname === null && user === null && port === null && !maskAddresses) {
+  if (rules.length === 0 && !maskAddresses) {
     return null;
   }
   const tokens = new Map<string, string>();
@@ -544,25 +755,22 @@ function createAddressMasker(options: ScrubOptions): AddressMasker | null {
     apply: (text, keyOnly) => {
       let out = text;
       let count = 0;
-      const replaceCounted = (
-        pattern: RegExp | null,
-        mask: (...args: string[]) => string,
-      ): void => {
-        if (pattern === null) {
-          return;
+      for (const rule of rules) {
+        if (keyOnly && !rule.inKeys) {
+          continue;
         }
-        out = out.replace(pattern, (...args: unknown[]) => {
-          const groups = args.slice(0, -2).map((arg) => (typeof arg === 'string' ? arg : ''));
-          count += 1;
-          return mask(...groups);
+        out = out.replace(rule.pattern, (...args: unknown[]) => {
+          const whole = args.at(-1) as string;
+          const offset = args.at(-2) as number;
+          const [match = '', ...groups] = args
+            .slice(0, -2)
+            .map((arg) => (typeof arg === 'string' ? arg : ''));
+          const masked = rule.mask(match, groups, offset, whole);
+          if (masked !== match) {
+            count += 1;
+          }
+          return masked;
         });
-      };
-      if (!keyOnly || hostnameInKeys) {
-        replaceCounted(hostname, () => HOST_MASK);
-      }
-      if (!keyOnly) {
-        replaceCounted(user, (_m, lead) => `${lead}${USER_MASK}`);
-        replaceCounted(port, (_m, lead) => `${lead}${PORT_MASK}`);
       }
       if (maskAddresses) {
         out = out.replace(
@@ -584,6 +792,8 @@ function createAddressMasker(options: ScrubOptions): AddressMasker | null {
       }
       return { value: out, count };
     },
+    maskPortValue: (key, value) =>
+      identity.port !== undefined && value === identity.port && isPortKey(key) ? PORT_MASK : value,
   };
 }
 
@@ -672,7 +882,12 @@ function scrubTextWith(
   out = out.replace(
     KEYED_LINE,
     (match, lead: string, q: string, key: string, sep: string, value: string) => {
-      if (!isSecretKey(key) || revealKeys.has(key) || value.length === 0 || isMasked(value)) {
+      if (
+        !isSecretPair(key, value) ||
+        revealKeys.has(key) ||
+        value.length === 0 ||
+        isMasked(value)
+      ) {
         return match;
       }
       count += 1;
@@ -680,7 +895,7 @@ function scrubTextWith(
     },
   );
   out = out.replace(KEYED_INLINE, (match, q: string, key: string, sep: string, value: string) => {
-    if (!isSecretKey(key) || revealKeys.has(key) || isMasked(value)) {
+    if (!isSecretPair(key, value) || revealKeys.has(key) || isMasked(value)) {
       return match;
     }
     count += 1;
@@ -690,7 +905,7 @@ function scrubTextWith(
     out = out.replace(
       pattern,
       (match, lead: string, q: string, key: string, sep: string, value: string) => {
-        if (!isSecretKey(key) || revealKeys.has(key) || isMasked(value)) {
+        if (!isSecretPair(key, value) || revealKeys.has(key) || isMasked(value)) {
           return match;
         }
         count += 1;
@@ -698,17 +913,20 @@ function scrubTextWith(
       },
     );
   }
-  out = out.replace(KEYED_ADJACENT, (match, dashes: string, key: string, gap: string) => {
-    if (!isSecretKey(key) || revealKeys.has(key)) {
-      return match;
-    }
-    count += 1;
-    return `${dashes}${key}${gap}${MASK}`;
-  });
+  out = out.replace(
+    KEYED_ADJACENT,
+    (match, dashes: string, key: string, gap: string, value: string) => {
+      if (!isSecretPair(key, value) || revealKeys.has(key)) {
+        return match;
+      }
+      count += 1;
+      return `${dashes}${key}${gap}${MASK}`;
+    },
+  );
   out = out.replace(
     FLAG_SPACED,
     (match, dashes: string, key: string, gap: string, value: string) => {
-      if (!isSecretKey(key) || revealKeys.has(key) || isMasked(value)) {
+      if (!isSecretPair(key, value) || revealKeys.has(key) || isMasked(value)) {
         return match;
       }
       count += 1;
@@ -734,14 +952,27 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Walks any shaped payload: every string goes through `scrubText`, and every string or number
  * under a secret key name (`{"password": 123}`, `{"tokens": ["x"]}`, `{"password_hash": {...}}`
- * from a `db query` row) is masked whole, at any depth. Object keys get the address rules only
- * (a `docker inspect` map keyed by IP). One `<ip-N>` table spans the whole value, so the same
+ * from a `db query` row) is masked whole, at any depth; under a joined-`pass` name (`bypass`) only
+ * a non-boolean value is. A string that is exactly the alias port under a port-holding key becomes
+ * `<port>`. Object keys get only the rules no fixed field name can match (a `docker inspect` map
+ * keyed by IP or by `2222/tcp`). One `<ip-N>` table spans the whole value, so the same
  * address carries the same token in `data` and `error`. Returns a copy; the input is never mutated.
  */
 export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
   let count = 0;
   const revealKeys = options.revealKeys ?? new Set<string>();
-  const underSecret = (key: string): boolean => isSecretKey(key) && !revealKeys.has(key);
+  const underSecret = (key: string, child: unknown): boolean => {
+    if (revealKeys.has(key)) {
+      return false;
+    }
+    if (isSecretKey(key)) {
+      return true;
+    }
+    const flag =
+      typeof child === 'boolean' ||
+      ((typeof child === 'string' || typeof child === 'number') && isBooleanWord(String(child)));
+    return isJoinedPassKey(key) && !flag;
+  };
   const addresses = createAddressMasker(options);
   const maskKey = (key: string): string => {
     if (addresses === null) {
@@ -751,11 +982,18 @@ export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
     count += masked.count;
     return masked.value;
   };
-  const walk = (node: unknown, secret: boolean): unknown => {
+  const walk = (node: unknown, secret: boolean, key?: string): unknown => {
     if (typeof node === 'string') {
       if (secret && node.length > 0 && node !== MASK) {
         count += 1;
         return MASK;
+      }
+      if (addresses !== null && key !== undefined) {
+        const port = addresses.maskPortValue(key, node);
+        if (port !== node) {
+          count += 1;
+          return port;
+        }
       }
       const result = scrubTextWith(node, options, addresses);
       count += result.count;
@@ -771,7 +1009,7 @@ export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
     if (isPlainObject(node)) {
       const copy: Record<string, unknown> = {};
       for (const [childKey, child] of Object.entries(node)) {
-        copy[maskKey(childKey)] = walk(child, secret || underSecret(childKey));
+        copy[maskKey(childKey)] = walk(child, secret || underSecret(childKey, child), childKey);
       }
       return copy;
     }
@@ -808,19 +1046,43 @@ function opensPemBlock(line: string): boolean {
   return PEM_MARKER_EDGE.test(after) || PEM_BODY_CHUNK.test(after.slice(0, 16));
 }
 
-/** An END closes a body whose BEGIN was cut off only when the marker is the whole line, or ends a
- *  base64 body on it: `must end with -----END RSA PRIVATE KEY-----` is prose about a key. */
-function isLonePemEnd(line: string): boolean {
+const PEM_BODY_REST = /^[A-Za-z0-9+/]+={0,2}$/;
+const prefixShape = (prefix: string): string => prefix.replace(/\d/g, '0');
+
+/** How many base64 characters `line` holds past a log prefix shaped like `prefix` (digits may
+ *  differ: a timestamp ticks between lines), or -1 when it is not a key body line under it. */
+function prefixedBodyLength(line: string | undefined, prefix: string): number {
+  if (line === undefined || prefixShape(line.slice(0, prefix.length)) !== prefixShape(prefix)) {
+    return -1;
+  }
+  const rest = line.slice(prefix.length).trim();
+  return PEM_BODY_REST.test(rest) ? rest.length : -1;
+}
+
+/** An END closes a body whose BEGIN was cut off when the marker is the whole line, ends a base64
+ *  body on it, or carries a log prefix (`web-1  | `, `<ts> INFO `, `+ echo `) that the line above
+ *  repeats over a base64 body — the last body line may be short, so then the one above it must hold
+ *  a full chunk. `must end with -----END RSA PRIVATE KEY-----` is prose about a key. */
+function isLonePemEnd(
+  line: string,
+  above: string | undefined,
+  twoAbove: string | undefined,
+): boolean {
   const end = PEM_END_LINE.exec(line);
   if (!end) {
     return false;
   }
-  const before = bareSide(line.slice(0, end.index));
+  const prefix = line.slice(0, end.index);
+  const before = bareSide(prefix);
   const after = bareSide(line.slice(end.index + end[0].length));
-  return (
-    PEM_MARKER_EDGE.test(after) &&
-    (PEM_MARKER_EDGE.test(before) || PEM_BODY_CHUNK.test(before.slice(-16)))
-  );
+  if (!PEM_MARKER_EDGE.test(after)) {
+    return false;
+  }
+  if (PEM_MARKER_EDGE.test(before) || PEM_BODY_CHUNK.test(before.slice(-16))) {
+    return true;
+  }
+  const last = prefixedBodyLength(above, prefix);
+  return last >= 16 || (last > 0 && prefixedBodyLength(twoAbove, prefix) >= 16);
 }
 
 /** For output already split into lines (`files tail`, `logs *`), where no single string holds
@@ -848,7 +1110,7 @@ export function maskPemLines(lines: readonly string[]): string[] {
       bodyStart = i + 1;
       continue;
     }
-    if (isLonePemEnd(line)) {
+    if (isLonePemEnd(line, lines[i - 1], lines[i - 2])) {
       for (let j = bodyStart; j < i; j += 1) {
         out[j] = MASK;
       }

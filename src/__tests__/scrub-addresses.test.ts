@@ -121,9 +121,9 @@ describe('rule 1 — the alias identity is masked in every part of the envelope'
     );
   });
 
-  test('the user and port are never masked as bare words in prose', () => {
+  test('the port is never masked as a bare word in prose; a distinctive user is', () => {
     const prose = 'opsuser wrote 2222 lines; the opsuser group owns build 2222';
-    expect(text(prose)).toBe(prose);
+    expect(text(prose)).toBe('<user> wrote 2222 lines; the <user> group owns build 2222');
   });
 
   test('hostname: case-insensitive, whole token, a trailing sentence dot allowed', () => {
@@ -135,10 +135,12 @@ describe('rule 1 — the alias identity is masked in every part of the envelope'
     expect(text(other)).toBe(other);
   });
 
-  test('a short dotless hostname (db) is not masked as a bare word', () => {
+  test('a short dotless hostname (db) is not masked as a bare word, only in a host context', () => {
     const options: ScrubOptions = { identity: { hostname: 'db' }, maskAddresses: true };
     const line = 'the db is up; connect to db failed; dbx and db.example.net';
-    expect(text(line, options)).toBe(line);
+    expect(text(line, options)).toBe(
+      'the db is up; connect to <host> failed; dbx and db.example.net',
+    );
   });
 
   test('a dotless hostname of 6+ chars is masked as a bare word', () => {
