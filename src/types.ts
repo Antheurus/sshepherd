@@ -213,6 +213,9 @@ export interface OpSpec<T = unknown> {
   /** Optional: recovers structured detail from a failed command's stderr into `error.data`
    *  (scrubbed with the rest of the envelope) — e.g. psql's `ERROR:`/`DETAIL:`/`HINT:` lines. */
   errorData?: (commandStderr: string) => Record<string, unknown> | undefined;
+  /** Optional: a more precise error read off a failed command's stderr (psql's own statement or
+   *  lock timeout becomes `COMMAND_TIMEOUT`); `undefined` keeps the transport's error. */
+  refineError?: (commandStderr: string, error: ErrorInfo, ctx: OpContext) => ErrorInfo | undefined;
   /** Args resolved from local config that an envelope never carries (a db target's user,
    *  database, container, compose file, service): masked as whole words in every error. */
   hiddenArgs?: string[];

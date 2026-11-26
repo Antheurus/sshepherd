@@ -153,7 +153,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 11 registry-driven groups (58 ops) + 1 `setup` group (6 sub-groups, 12 actions)
+## Quick reference — 11 registry-driven groups (61 ops) + 1 `setup` group (6 sub-groups, 14 actions)
 
 ```bash
 # hosts
@@ -214,6 +214,9 @@ sshepherd db connections prod
 sshepherd db slow prod
 sshepherd db size prod
 sshepherd db query prod "SELECT count(*) FROM users"
+sshepherd db describe prod users
+sshepherd db count prod users --where-eq org_id=1
+sshepherd db migrations prod
 
 # deploy
 sshepherd deploy run demo --dry-run
@@ -247,6 +250,8 @@ sshepherd setup ssh-alias status myserver
 sshepherd setup ssh-alias update myserver --host 5.6.7.8 --port 2222 --yes
 sshepherd setup ssh-alias remove myserver --yes
 sshepherd setup db-target scaffold prod --alias myserver --user app --database appdb --container app_db --yes
+sshepherd setup db-target ro-role prod --print-sql
+sshepherd setup db-target discover myserver
 sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf,/opt/app/.env --yes
 sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app --yes
 sshepherd setup files-allowlist scaffold myserver --paths /opt/app/backup.sql,/opt/app/.env --yes
@@ -286,7 +291,9 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
    `;` is rejected before the SQL is even parsed (multi-statement guard), on top of a
    parser check and a `BEGIN TRANSACTION READ ONLY` wrapper. The real boundary is the
    read-only DB role declared on the target (`references/db.md`) — treat the client-side
-   checks as UX guardrails, not the security boundary.
+   checks as UX guardrails, not the security boundary. `db query` returns
+   `data: {rows, row_count, truncated}` (a bare row array before 0.4.0): at most `--max-rows`
+   (500) rows, `statement_timeout` 60 s, `lock_timeout` 2 s.
 7. **A deploy failure names the step that failed.** `deploy run`/`deploy migrate` surface
    `data.failed_step` (`{index, kind, name}`) on a `COMMAND_FAILED` error, recovered from a
    marker each step echoes on non-zero exit — never guess which step broke from the raw

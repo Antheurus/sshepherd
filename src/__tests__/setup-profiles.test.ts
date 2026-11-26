@@ -94,7 +94,12 @@ describe('setup profiles', () => {
 
   test('only the actions that read local config are read; every other one is admin', () => {
     const read = SETUP_ACTIONS.filter((action) => SETUP_PROFILES[action] === 'read');
-    expect(read.sort()).toEqual(['ssh-alias list', 'ssh-alias status']);
+    expect(read.sort()).toEqual([
+      'db-target discover',
+      'db-target ro-role',
+      'ssh-alias list',
+      'ssh-alias status',
+    ]);
     expect(Object.keys(WRITING_ARGS).sort()).toEqual(
       SETUP_ACTIONS.filter((action) => SETUP_PROFILES[action] === 'admin').sort(),
     );

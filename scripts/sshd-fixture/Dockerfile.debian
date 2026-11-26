@@ -1,7 +1,7 @@
 # Disposable local Linux target for `just smoke` (see scripts/smoke.sh).
 #
 # Provides sshd plus the same toolset sshepherd's read-only ops assume on a real remote
-# (coreutils, procps, iproute2, util-linux) and the docker CLI. The docker CLI here is
+# (coreutils, procps, iproute2, util-linux), psql for `kind = "host"` pg-targets, and the docker CLI. The docker CLI here is
 # client-only — no daemon runs inside this container. scripts/sshd-fixture/docker-compose.yml
 # mounts the HOST's docker socket into this container (Docker-outside-of-Docker), so
 # `services`/`logs docker`/`db` ops exec into the sibling `postgres`/`app` fixture
@@ -22,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     util-linux \
     ca-certificates \
+    postgresql-client \
   && rm -rf /var/lib/apt/lists/*
 
 # docker CLI only (no daemon) — talks to the host daemon via the mounted socket.

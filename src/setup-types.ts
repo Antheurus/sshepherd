@@ -81,7 +81,8 @@ export type SetupErrorCode =
   | 'TAILSCALE_SSH_DETECTED'
   | 'INVALID_PRIVATE_KEY'
   | 'PASSPHRASE_PROTECTED_KEY_UNSUPPORTED'
-  | 'PROFILE_DENIED';
+  | 'PROFILE_DENIED'
+  | 'REMOTE_FAILED';
 
 export interface BuildSetupResultInput<T> {
   command: string;
@@ -173,6 +174,10 @@ const SETUP_GUIDANCE: Record<SetupErrorCode, SetupGuidance> = {
   PROFILE_DENIED: {
     hint: 'This action needs a higher SSHEPHERD_PROFILE; a human re-runs it, the agent never raises its own.',
     retryable: false,
+  },
+  REMOTE_FAILED: {
+    hint: 'The remote command did not run; the message names the transport code, fix that (sshepherd hosts test <alias>) and retry.',
+    retryable: true,
   },
 };
 

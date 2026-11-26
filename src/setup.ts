@@ -1,7 +1,7 @@
 import { getFlag, hasFlag, parseArgv } from './cli.ts';
 import { setupProfileDenial } from './profiles.ts';
 import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts';
-import { scaffold } from './setup-db-target.ts';
+import { discover, roRole, scaffold } from './setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
 import { scaffold as scaffoldFilesAllowlist } from './setup-files-allowlist.ts';
 import { scaffold as scaffoldRevealAllowlist } from './setup-reveal-allowlist.ts';
@@ -36,8 +36,9 @@ export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
   },
   {
     name: 'db-target',
-    summary: 'Scaffold a [<name>] table into targets.toml.',
-    actions: ['scaffold'],
+    summary:
+      'Scaffold a [<name>] table into targets.toml, print the read-only role SQL for one, or discover postgres containers on a host.',
+    actions: ['scaffold', 'ro-role', 'discover'],
   },
   {
     name: 'config-allowlist',
@@ -69,6 +70,8 @@ const SETUP_ACTION_FLAGS: Record<string, string[]> = {
   'ssh-alias register': ['host', 'user', 'port', 'overwrite'],
   'ssh-alias update': ['host', 'user', 'port'],
   'db-target scaffold': ['alias', 'user', 'database', 'compose-file', 'service', 'container'],
+  'db-target ro-role': ['print-sql', 'role'],
+  'db-target discover': [],
   'config-allowlist scaffold': ['paths'],
   'files-allowlist scaffold': ['paths'],
   'reveal-allowlist scaffold': ['keys'],
@@ -244,12 +247,72 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
   process.exitCode = setupExitCode(result);
 }
 
+/** `setup db-target ro-role <target> --print-sql [--role <name>]`: the SQL is the whole output
+ *  (plain text a human pipes into psql); only a refusal prints a setup result. */
+function runDbTargetRoRole(argTail: string[]): void {
+  const { positionals, flags } = parseArgv(argTail);
+  const printSql = getFlag(flags, 'print-sql');
+  // `--print-sql <target>`: the flag takes no value, so a word after it is the target.
+  if (printSql !== undefined && printSql !== 'true') {
+    positionals.unshift(printSql);
+  }
+  const target = positionals[0];
+  if (target === undefined) {
+    const result = buildSetupResult({
+      command: 'setup db-target ro-role',
+      error: {
+        code: 'INVALID_ARGS',
+        message: "setup db-target ro-role: missing required positional argument 'target'",
+        next: 'sshepherd db list',
+      },
+    });
+    printSetupResult(result, hasFlag(flags, 'pretty'));
+    process.exitCode = setupExitCode(result);
+    return;
+  }
+  const outcome = roRole(target, {
+    printSql: printSql !== undefined,
+    role: getFlag(flags, 'role'),
+  });
+  if ('sql' in outcome) {
+    process.stdout.write(outcome.sql);
+    return;
+  }
+  printSetupResult(outcome, hasFlag(flags, 'pretty'));
+  process.exitCode = setupExitCode(outcome);
+}
+
+async function runDbTargetDiscover(argTail: string[]): Promise<void> {
+  const { positionals, flags } = parseArgv(argTail);
+  const alias = positionals[0];
+  const result =
+    alias === undefined
+      ? buildSetupResult({
+          command: 'setup db-target discover',
+          error: {
+            code: 'INVALID_ARGS',
+            message: "setup db-target discover: missing required positional argument 'alias'",
+            next: 'sshepherd hosts list',
+          },
+        })
+      : await discover(alias);
+  printSetupResult(result, hasFlag(flags, 'pretty'));
+  process.exitCode = setupExitCode(result);
+}
+
 /**
  * `db-target` is the second setup sub-group to leave stub status (Phase 3) — real scaffold
- * logic lives in `setup-db-target.ts`. `db-target` only ever has one action (`scaffold`), so
- * unlike `runSshAliasAction` there is no action-name branching here.
+ * logic lives in `setup-db-target.ts`; `ro-role` and `discover` branch off before it.
  */
-function runDbTargetAction(argTail: string[]): void {
+async function runDbTargetAction(action: string, argTail: string[]): Promise<void> {
+  if (action === 'ro-role') {
+    runDbTargetRoRole(argTail);
+    return;
+  }
+  if (action === 'discover') {
+    await runDbTargetDiscover(argTail);
+    return;
+  }
   const command = 'setup db-target scaffold';
   const { positionals, flags } = parseArgv(argTail);
   const pretty = hasFlag(flags, 'pretty');
@@ -539,7 +602,7 @@ export async function runSetup(tail: string[]): Promise<void> {
   }
 
   if (subGroup.name === 'db-target') {
-    runDbTargetAction(argTail);
+    await runDbTargetAction(actionOrHelp, argTail);
     return;
   }
 

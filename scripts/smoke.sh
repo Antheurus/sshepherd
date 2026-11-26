@@ -376,7 +376,7 @@ run_matrix() {
   assert_json "[$variant] security listeners: sshd port 22 listed" security_listeners \
     "d['ok'] is True and any(e['port'] == 22 for e in d['data']['listening'])"
 
-  step "[$variant] db list / tables / query"
+  step "[$variant] db list / tables / query / describe / count / migrations"
   run_cli db_list db list
   assert_json "[$variant] db list: fixture target declared" db_list \
     "d['ok'] is True and '$alias' in d['data']['targets']"
@@ -385,7 +385,25 @@ run_matrix() {
     "d['ok'] is True and any(t['table'] == 'smoke_fixture' for t in d['data'])"
   run_cli db_query db query "$alias" "SELECT note FROM smoke_fixture"
   assert_json "[$variant] db query: seeded row comes back" db_query \
-    "d['ok'] is True and d['data'][0]['note'] == 'hello from sshepherd smoke fixture'"
+    "d['ok'] is True and d['data']['rows'][0]['note'] == 'hello from sshepherd smoke fixture'"
+  run_cli db_query_big db query "$alias" "SELECT * FROM big"
+  assert_json "[$variant] db query over 1200 rows: 500 rows, truncated" db_query_big \
+    "d['ok'] is True and d['data']['row_count'] == 500 and d['data']['truncated'] is True and len(d['data']['rows']) == 500"
+  run_cli db_describe db describe "$alias" users
+  assert_json "[$variant] db describe users: columns, indexes, foreign key" db_describe \
+    "d['ok'] is True and [c['name'] for c in d['data']['columns']][:2] == ['id', 'email'] and any(i['primary'] for i in d['data']['indexes']) and d['data']['foreign_keys'][0]['references_table'] == 'orgs'"
+  run_cli db_count db count "$alias" users --where-eq id=1
+  assert_json "[$variant] db count users --where-eq id=1: 1" db_count \
+    "d['ok'] is True and d['data'] == {'count': 1}"
+  run_cli db_migrations db migrations "$alias"
+  assert_json "[$variant] db migrations: the seeded prisma and rails histories" db_migrations \
+    "d['ok'] is True and [t['framework'] for t in d['data']['tables']] == ['prisma', 'rails'] and d['data']['tables'][0]['migrations'][0]['name'] == '20261102103000_add_users_nickname'"
+  "$BIN" setup db-target ro-role "$alias" --print-sql >"$OUT/ro_role.sql"
+  if grep -qx 'GRANT pg_read_all_data TO sshepherd_ro;' "$OUT/ro_role.sql"; then
+    pass "[$variant] setup db-target ro-role --print-sql prints the read-only role SQL"
+  else
+    fail "[$variant] setup db-target ro-role --print-sql did not print the GRANT line"
+  fi
 
   run_cli_any db_query_error db query "$alias" "SELECT nonexistent"
   assert_json "[$variant] db query error: sql_error names the column, no password text" db_query_error \
@@ -411,15 +429,15 @@ run_matrix() {
   fi
 
   step "[$variant] --fields, --limit and --max-bytes"
-  run_cli fields_db_query db query "$alias" "SELECT 1 AS a, 2 AS b" --fields data.a
-  assert_json "[$variant] --fields data.a: only that key per row" fields_db_query \
-    "d['ok'] is True and d['data'] == [{'a': 1}] and 'fields_unmatched' not in d"
+  run_cli fields_db_query db query "$alias" "SELECT 1 AS a, 2 AS b" --fields data.rows.a
+  assert_json "[$variant] --fields data.rows.a: only that key per row" fields_db_query \
+    "d['ok'] is True and d['data'] == {'rows': [{'a': 1}]} and 'fields_unmatched' not in d"
   run_cli fields_db_query_rows db query "$alias" "SELECT 1 AS a" --fields data.rows
-  assert_json "[$variant] --fields on a path that does not exist: empty data, the path named" fields_db_query_rows \
-    "d['data'] == [] or d['data'] == [{}]"
+  assert_json "[$variant] --fields data.rows: only data.rows" fields_db_query_rows \
+    "d['ok'] is True and d['data'] == {'rows': [{'a': 1}]} and 'fields_unmatched' not in d"
   run_cli limit_db_query db query "$alias" "SELECT generate_series(1,5) AS n" --limit 2
-  assert_json "[$variant] --limit 2: two rows, output_truncated" limit_db_query \
-    "d['ok'] is True and len(d['data']) == 2 and d['output_truncated'] is True"
+  assert_json "[$variant] --limit 2: two rows, row_count recounted, output_truncated" limit_db_query \
+    "d['ok'] is True and len(d['data']['rows']) == 2 and d['data']['row_count'] == 2 and d['output_truncated'] is True"
   run_cli_any bad_max_bytes hosts test "$alias" --max-bytes 10
   assert_json "[$variant] --max-bytes below the floor: INVALID_ARGS" bad_max_bytes \
     "d['ok'] is False and d['error']['code'] == 'INVALID_ARGS'"
@@ -432,7 +450,7 @@ run_matrix() {
   assert_json "[$variant] audit tail: deploy run row names the recipe, duration, exit, sha256 of args" audit_tail \
     "d['ok'] is True and d['data']['rows'][-1]['recipe'] == '$alias' and d['data']['rows'][-1]['remote_exit'] == 0 and isinstance(d['data']['rows'][-1]['duration_ms'], int) and len(d['data']['rows'][-1]['args_sha256']) == 64"
 
-  step "[$variant] --timeout 2 against a 10 s query: remote timeout -k fires"
+  step "[$variant] --timeout 2 against a 10 s query: statement_timeout (1 s) cancels it"
   run_cli_any timeout_query db query "$alias" "SELECT pg_sleep(10)" --timeout 2
   assert_json "[$variant] timed-out query: COMMAND_TIMEOUT well before 10 s" timeout_query \
     "d['ok'] is False and d['error']['code'] == 'COMMAND_TIMEOUT' and d['duration_ms'] < 9000"

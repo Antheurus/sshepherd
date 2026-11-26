@@ -1,8 +1,17 @@
 import { auditMutating, confirmGate } from './audit.ts';
+import {
+  DB_LOCK_TIMEOUT_SEC,
+  DB_RO_ROLE_TEMP_FILE_LIMIT_MB,
+  DB_STATEMENT_TIMEOUT_SEC,
+  DEFAULT_TIMEOUT_SEC,
+} from './limits.ts';
+import { shellJoin } from './quote.ts';
 import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
+import { didYouMean } from './suggest.ts';
 import { defaultTargetsPath, loadTargets } from './targets.ts';
 import { tomlQuote } from './toml-quote.ts';
+import { run, type TransportDeps } from './transport.ts';
 
 export interface ScaffoldOptions {
   alias: string;
@@ -147,4 +156,162 @@ export function scaffold(
       container: ref.kind === 'container' ? ref.container : null,
     },
   });
+}
+
+export interface RoRoleOptions {
+  printSql: boolean;
+  role?: string;
+}
+
+const RO_ROLE_DEFAULT = 'sshepherd_ro';
+const ROLE_NAME_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
+
+/**
+ * The SQL a human applies to give a pg-target a read-only LOGIN role, plus the checks that prove
+ * it. sshepherd never runs it (it would need a privileged login on the user's database): the
+ * login role is the only boundary untrusted SQL cannot leave, because `RESET ROLE` and
+ * `set_config('role', ...)` inside a query return to it.
+ */
+export function roRoleSql(target: string, role: string): string {
+  return [
+    `-- Read-only login role for sshepherd pg-target '${target}'.`,
+    '-- sshepherd never runs this. Apply it yourself as a superuser (or a CREATEROLE role allowed to',
+    '-- grant pg_read_all_data) on the target database; pg_read_all_data needs Postgres 14 or later.',
+    '-- Why a LOGIN role: SET ROLE does not sandbox SQL, because RESET ROLE or',
+    "-- set_config('role', ...) inside a query returns to the login role. The login role itself must",
+    '-- be the restricted one, and a member of no role it could switch to.',
+    'BEGIN;',
+    `CREATE ROLE ${role} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;`,
+    `GRANT pg_read_all_data TO ${role};`,
+    `ALTER ROLE ${role} SET default_transaction_read_only = on;`,
+    `ALTER ROLE ${role} SET statement_timeout = '${DB_STATEMENT_TIMEOUT_SEC}s';`,
+    `ALTER ROLE ${role} SET lock_timeout = '${DB_LOCK_TIMEOUT_SEC}s';`,
+    `ALTER ROLE ${role} SET temp_file_limit = '${DB_RO_ROLE_TEMP_FILE_LIMIT_MB}MB'; -- superuser-only: the role cannot lift it`,
+    'COMMIT;',
+    `-- A password is only needed over TCP (a container-env URL, or a host target with pg_host):`,
+    `-- set it in psql with \\password ${role}, never in a file.`,
+    `-- Then point the target at it: user = "${role}" in targets.toml (container-env: the URL's user).`,
+    '',
+    '-- Checks. Run each and compare with the expected result in its comment.',
+    `SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = '${role}'; -- expect: f | f | f | f | f`,
+    `SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE m.member = '${role}'::regrole AND r.rolname <> 'pg_read_all_data'; -- expect: 0`,
+    `SELECT pg_has_role('${role}', 'pg_write_all_data', 'USAGE'); -- expect: f`,
+    `-- Connected as ${role}: SELECT set_config('role', 'postgres', false); -- expect: ERROR: permission denied to set role "postgres"`,
+    `-- Connected as ${role}: CREATE TEMP TABLE sshepherd_check (x int); -- expect: ERROR: cannot execute CREATE TABLE in a read-only transaction`,
+    '',
+  ].join('\n');
+}
+
+/** `setup db-target ro-role <target> --print-sql`: the SQL text, or a setup error when the call
+ *  is incomplete. Reads targets.toml only to refuse a target that is not declared. */
+export function roRole(
+  target: string,
+  options: RoRoleOptions,
+  path: string = defaultTargetsPath(),
+): { sql: string } | SetupResult<null> {
+  const command = 'setup db-target ro-role';
+  if (!options.printSql) {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: pass --print-sql; sshepherd only prints this SQL, a human applies it`,
+        next: `sshepherd setup db-target ro-role ${target} --print-sql`,
+      },
+    });
+  }
+  const role = options.role ?? RO_ROLE_DEFAULT;
+  if (!ROLE_NAME_PATTERN.test(role)) {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: --role must be a lower-case Postgres name (letters, digits, _), got ${JSON.stringify(role)}`,
+      },
+    });
+  }
+  const targets = loadTargets(path);
+  if (!(target in targets)) {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: `pg-target '${target}' is not declared in targets.toml`,
+        next: 'sshepherd db list',
+        did_you_mean: didYouMean(target, Object.keys(targets)),
+      },
+    });
+  }
+  return { sql: roRoleSql(target, role) };
+}
+
+export interface DiscoveredPostgres {
+  container: string;
+  image: string;
+  compose_project: string | null;
+  compose_service: string | null;
+}
+
+export interface DiscoverData {
+  alias: string;
+  postgres_containers: DiscoveredPostgres[];
+  compose_projects: string[];
+}
+
+const DISCOVER_FORMAT =
+  '{{.Names}}\t{{.Image}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.service"}}';
+const POSTGRES_IMAGE = /postgres|postgis|timescale/i;
+
+/** `docker ps` lines -> the running postgres containers and every compose project, names only. */
+export function parseDiscover(alias: string, stdout: string): DiscoverData {
+  const postgres: DiscoveredPostgres[] = [];
+  const projects = new Set<string>();
+  for (const line of stdout.split('\n')) {
+    const [container = '', image = '', project = '', service = ''] = line.split('\t');
+    if (container.length === 0) {
+      continue;
+    }
+    if (project.length > 0) {
+      projects.add(project);
+    }
+    if (POSTGRES_IMAGE.test(image)) {
+      postgres.push({
+        container,
+        image,
+        compose_project: project.length > 0 ? project : null,
+        compose_service: service.length > 0 ? service : null,
+      });
+    }
+  }
+  return {
+    alias,
+    postgres_containers: postgres.sort((a, b) => a.container.localeCompare(b.container)),
+    compose_projects: [...projects].sort(),
+  };
+}
+
+/** `setup db-target discover <alias>`: what `setup db-target scaffold` could point at on that
+ *  host, read with one `docker ps`; it writes nothing. */
+export async function discover(
+  alias: string,
+  deps?: TransportDeps,
+): Promise<SetupResult<DiscoverData>> {
+  const command = 'setup db-target discover';
+  const result = await run(
+    alias,
+    shellJoin(['docker', 'ps', '--format', DISCOVER_FORMAT]),
+    DEFAULT_TIMEOUT_SEC,
+    deps,
+  );
+  if (result.error !== null) {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'REMOTE_FAILED',
+        message: `${command}: ${result.error.code}: ${result.error.message}`,
+        hint: result.error.hint,
+      },
+    });
+  }
+  return buildSetupResult({ command, data: parseDiscover(alias, result.raw.stdout) });
 }

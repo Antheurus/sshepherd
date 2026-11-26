@@ -77,3 +77,26 @@ export const MAX_IDENTITY_GAP_CHARS = 8;
  *  an identifier at 63 bytes, and a multi-word type (`timestamp with time zone`) is far shorter, so
  *  64 holds every real one while a long line with no `: "` is never rescanned past it. */
 export const MAX_PSQL_TYPE_NAME_CHARS = 64;
+/** `db query`/`describe`/`count`/`migrations`: server-side `statement_timeout`. Postgres cancels a
+ *  runaway statement itself (an unindexed scan, a cross join), so the backend stops working instead
+ *  of running on after the ssh session is gone. */
+export const DB_STATEMENT_TIMEOUT_SEC = 60;
+/** Room between `statement_timeout` and the ssh budget for the connect, `docker exec`, psql startup
+ *  and the result transfer, so the database's own cancel fires first and names its cause. */
+export const DB_STATEMENT_GRACE_SEC = 15;
+/** `db query`'s ssh budget: the statement limit plus its grace (75 s). */
+export const DB_QUERY_TIMEOUT_SEC = DB_STATEMENT_TIMEOUT_SEC + DB_STATEMENT_GRACE_SEC;
+/** `lock_timeout` on every bounded db read: a read queued behind a migration's lock gives up in 2 s
+ *  instead of waiting with it and blocking every query that queues behind the read. */
+export const DB_LOCK_TIMEOUT_SEC = 2;
+/** Rows `db query` returns when `--max-rows` is absent: 500 rows of a typical table already fill
+ *  `DEFAULT_MAX_BYTES`; past it the envelope says `truncated: true`. */
+export const DB_QUERY_ROW_LIMIT = 500;
+/** `db query --max-rows` ceiling: 10,000 narrow rows are about 1 MiB, inside `MAX_STDOUT_BYTES`. */
+export const DB_QUERY_MAX_ROWS = 10_000;
+/** Rows `db migrations` returns per migrations table, newest first: the recent history is what
+ *  says whether a deploy applied, and 50 rows stay far under `DEFAULT_MAX_BYTES`. */
+export const DB_MIGRATIONS_LIMIT = 50;
+/** `temp_file_limit` the read-only role SQL sets (superuser-only, so the role cannot lift it): one
+ *  unbounded sort spilled 2 GB in 5 s on a shared database; 256 MiB fits any sensible ad hoc read. */
+export const DB_RO_ROLE_TEMP_FILE_LIMIT_MB = 256;

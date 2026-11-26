@@ -5,6 +5,9 @@
 # smoke fixture: `just smoke-down` removes it too. Each value ends in a two-letter placement tag; the
 # test reports which ops reached which tag. `canary-pg` is the psql-connect-error placement: its
 # PGHOST names the documentation-range peer and the canary identity host, neither reachable.
+# `canary-dburl` is the `kind = "container-env"` pg-target: a psql-capable container whose
+# DATABASE_URL reaches the fixture postgres as the read-only role and carries the canary as its
+# password (trust auth ignores it), so a URL that leaked anywhere would show the canary.
 name: __N__
 
 services:
@@ -37,4 +40,11 @@ services:
     environment:
       PGHOST: 203.0.113.77,__H__
       PGCONNECT_TIMEOUT: '2'
+    entrypoint: ['sleep', '3600']
+
+  canary-dburl:
+    image: postgres:16-alpine
+    container_name: __X__-canary-dburl
+    environment:
+      DATABASE_URL: postgresql://sshepherd_ro:__C__du@postgres:5432/fixture?sslmode=disable&application_name=sshepherd-canary
     entrypoint: ['sleep', '3600']

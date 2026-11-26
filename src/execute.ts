@@ -435,8 +435,9 @@ async function runOp(
       op.shapeError?.(result.raw, ctx) ??
       partialStdout(op, ctx, result.error, result.raw.stdout) ??
       null;
+    const refined = op.refineError?.(result.raw.commandStderr, result.error, ctx) ?? result.error;
     const errorData = op.errorData?.(result.raw.commandStderr);
-    const error = errorData ? { ...result.error, data: errorData } : result.error;
+    const error = errorData ? { ...refined, data: errorData } : refined;
     return {
       ...finish(data, error, 'error'),
       commandStderr: op.exposeStderr === false ? '' : result.raw.commandStderr,

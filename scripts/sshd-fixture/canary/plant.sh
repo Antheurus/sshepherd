@@ -88,7 +88,7 @@ plant() {
     docker exec "$container" /usr/sbin/sshd -o "ListenAddress=$PEER_LISTEN" -o "PidFile=$LISTENER_PIDFILE"
   done
   render seed.sql.tmpl | docker exec -i "$POSTGRES" psql -q -v ON_ERROR_STOP=1 -U postgres -d fixture >/dev/null
-  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" up -d --force-recreate canary canary-pg >/dev/null
+  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" up -d --force-recreate canary canary-pg canary-dburl >/dev/null
   for _ in $(seq 1 "$READY_WAIT_SEC"); do
     if docker logs "$CANARY_CONTAINER" 2>&1 | grep -q "$READY_LINE"; then
       return 0
@@ -100,7 +100,7 @@ plant() {
 }
 
 clean() {
-  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" rm -sf canary canary-pg >/dev/null
+  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" rm -sf canary canary-pg canary-dburl >/dev/null
   for container in "${SSHD[@]}"; do
     docker exec "$container" sh -c '
       if [ -f '"$LISTENER_PIDFILE"' ]; then kill "$(cat '"$LISTENER_PIDFILE"')" 2>/dev/null || true; fi

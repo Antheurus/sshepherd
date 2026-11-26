@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "sshepherd/db-query",
   "title": "sshepherd db query",
-  "description": "Ad hoc read-only SQL against a pg-target — SELECT only, enforced by parser rejection + a read-only transaction wrapper.",
+  "description": "Ad hoc read-only SQL against a pg-target — SELECT only, a read-only transaction with statement and lock timeouts, at most --max-rows rows.",
   "x-sshepherd": {
     "group": "db",
     "action": "query",
     "mutating": false,
     "exposes": "content",
-    "timeout_sec": 60,
+    "timeout_sec": 75,
     "data_shape": "recorded",
     "args": [
       {
@@ -20,6 +20,16 @@
         "name": "sql",
         "kind": "positional",
         "required": true
+      },
+      {
+        "name": "max-rows",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "timeout",
+        "kind": "flag",
+        "required": false
       }
     ]
   },
