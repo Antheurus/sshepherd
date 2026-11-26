@@ -130,7 +130,6 @@ describe('executeOp refuses an option-shaped positional before any runner call',
 
 describe('remote tools that support it get `--` before the positional', () => {
   const CASES: Array<[string, string, Record<string, string>, string]> = [
-    ['services', 'inspect', { container: 'web' }, "'--' 'web'"],
     ['services', 'restart', { container: 'web' }, "'--' 'web'"],
     ['services', 'systemctl-restart', { unit: 'nginx.service' }, "'--' 'nginx.service'"],
     ['files', 'ls', { path: '/srv/app' }, "'--' '/srv/app'"],

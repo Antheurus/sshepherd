@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sshepherd/files-grep",
+  "title": "sshepherd files grep",
+  "description": "Search text files under an allowlisted root for an extended regex (at most 500 lines; binary and private-key files skipped); env-file lines are masked.",
+  "x-sshepherd": {
+    "group": "files",
+    "action": "grep",
+    "mutating": false,
+    "exposes": "content",
+    "timeout_sec": 25,
+    "data_shape": "unrecorded",
+    "args": [
+      {
+        "name": "path",
+        "kind": "positional",
+        "required": true
+      },
+      {
+        "name": "pattern",
+        "kind": "positional",
+        "required": true
+      },
+      {
+        "name": "context",
+        "kind": "flag",
+        "required": false
+      }
+    ]
+  },
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "alias",
+    "ran_at",
+    "command",
+    "duration_ms",
+    "scrubbed",
+    "data",
+    "error"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "description": "Fields are only ever added within a version."
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "alias": {
+      "type": "string"
+    },
+    "ran_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "command": {
+      "const": "files grep"
+    },
+    "duration_ms": {
+      "type": "integer"
+    },
+    "scrubbed": {
+      "type": "integer",
+      "description": "How many values the scrubber masked."
+    },
+    "data": {},
+    "error": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "Stable error code; see SshErrorCode in src/types.ts."
+            },
+            "message": {
+              "type": "string"
+            },
+            "hint": {
+              "type": "string",
+              "description": "One sentence on what to do about this code."
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "next": {
+              "type": "string",
+              "description": "An exact, runnable command that moves the caller forward."
+            },
+            "did_you_mean": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "remote_exit": {
+              "type": "integer"
+            },
+            "phase": {
+              "enum": [
+                "connect",
+                "command"
+              ]
+            },
+            "timeout_sec": {
+              "type": "integer"
+            },
+            "budget_sec": {
+              "type": "integer"
+            },
+            "elapsed_ms": {
+              "type": "integer"
+            },
+            "op_outcome": {
+              "enum": [
+                "ok",
+                "error",
+                "refused"
+              ]
+            },
+            "op_error": {
+              "type": "object",
+              "description": "AUDIT_WRITE_FAILED only: the op error, same shape."
+            },
+            "stderr_tail": {
+              "type": "string",
+              "description": "Last lines of the remote command stderr, scrubbed."
+            },
+            "data": {
+              "type": "object",
+              "description": "Structured detail an op recovered from the failure."
+            }
+          }
+        }
+      ]
+    },
+    "output_truncated": {
+      "const": true,
+      "description": "Present only when output was cut by a byte or item cap."
+    },
+    "fields_unmatched": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "--fields paths that matched nothing."
+    }
+  },
+  "additionalProperties": true
+}

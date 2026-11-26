@@ -40,11 +40,14 @@ RUN mkdir -p /run/sshd /root/.ssh \
        echo 'ChallengeResponseAuthentication no'; \
      } >> /etc/ssh/sshd_config
 
-# Secret-shaped files for the masking checks in scripts/smoke.sh: an env file and a plain script
-# that exports a secret. Every value is an obviously fake fixture string.
+# Secret-shaped files for the masking checks in scripts/smoke.sh: env files and a plain script
+# that exports a secret, a log to search, and a symlink out of the allowlisted /opt/myapp. Every value is an obviously fake fixture string.
 RUN mkdir -p /opt/myapp \
   && printf 'DB_PASSWORD=fake-secret-value-1\nNODE_ENV=production\nexport API_KEY="fake-secret-value-1"\n' > /opt/myapp/prod.env \
-  && printf '#!/bin/sh\nexport PORT=3000\nexport SESSION_SECRET=fake-secret-value-2\nexec /usr/local/bin/app\n' > /opt/myapp/start.sh
+  && printf '#!/bin/sh\nexport PORT=3000\nexport SESSION_SECRET=fake-secret-value-2\nexec /usr/local/bin/app\n' > /opt/myapp/start.sh \
+  && printf 'APP_NAME=smoke\nDB_PASSWORD=fake-secret-value-3\nEMPTY_KEY=\nLOG_LEVEL=info\n' > /opt/myapp/.env \
+  && printf '2026-11-27 INFO boot\n2026-11-27 ERROR upstream refused\n' > /opt/myapp/app.log \
+  && ln -s /etc /opt/myapp/escape
 
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D", "-e"]

@@ -1,11 +1,22 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { DOWNLOAD_MAX_BYTES, DOWNLOAD_MAX_STDOUT_BYTES } from '../limits.ts';
+import {
+  DEFAULT_HEAD_LINES,
+  DOWNLOAD_MAX_BYTES,
+  DOWNLOAD_MAX_STDOUT_BYTES,
+  MAX_FIND_NAME_CHARS,
+  MAX_FIND_RESULTS,
+  MAX_GREP_CONTEXT_LINES,
+  MAX_GREP_MATCH_LINES,
+  MAX_GREP_PATTERN_CHARS,
+  MAX_HEAD_LINES,
+} from '../limits.ts';
 import {
   arg,
   DEFAULT_LOG_TAIL,
   FILE_CAT_MAX_BYTES,
   FILE_TIMEOUT_SEC,
   optStr,
+  optStrOrNull,
   reqStr,
 } from '../op-args.ts';
 import { parseDu } from '../parsers/du.ts';
@@ -13,10 +24,13 @@ import { capLines, recountLines } from '../parsers/logs-shape.ts';
 import { parseLs } from '../parsers/ls.ts';
 import { shellJoin, shq } from '../quote.ts';
 import { isEnvFile, maskEnvContent, maskPemLines, scrubText } from '../scrub.ts';
-import { OpError, type OpSpec, Premasked } from '../types.ts';
-import { loadScrubExtraPatterns, revealKeysOf } from './config.ts';
+import { type OpContext, OpError, type OpSpec, Premasked } from '../types.ts';
+import { loadFilesAllowlist, loadScrubExtraPatterns, revealKeysOf } from './config.ts';
 
 const DOWNLOAD_TIMEOUT_SEC = 30;
+/** The size header's number is canonical: no sign, padding or leading zero. */
+const DOWNLOAD_HEADER_OK = /^__OK__:(0|[1-9]\d*)$/;
+const DOWNLOAD_HEADER_TOO_LARGE = /^__TOO_LARGE__:(0|[1-9]\d*)$/;
 
 // ---------------------------------------------------------------------------
 // files
@@ -123,6 +137,17 @@ interface FilesTailResult {
   lines_returned: number;
 }
 
+/** The lines of a file read by `tail`/`head`: env-shaped files masked whole, then PEM lines. */
+function shapeTextLines(text: string, path: string): Premasked<FilesTailResult> {
+  const unmasked = (isEnvFile(path) ? maskEnvContent(text, new Set()) : text)
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+  const lines = maskPemLines(unmasked);
+  const masked = lines.filter((line, index) => line !== unmasked[index]).length;
+  return new Premasked({ lines, lines_returned: lines.length }, masked);
+}
+
 const filesTail: OpSpec<FilesTailResult> = {
   group: 'files',
   name: 'tail',
@@ -147,15 +172,269 @@ const filesTail: OpSpec<FilesTailResult> = {
       '--',
       reqStr(ctx, 'path'),
     ]),
+  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path')),
+};
+
+function boundedLineCount(ctx: OpContext, name: string, fallback: number, max: number): number {
+  const raw = optStrOrNull(ctx, name);
+  if (raw === null) {
+    return fallback;
+  }
+  const value = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : 0;
+  if (value < 1 || value > max) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `--${name} must be a whole number from 1 to ${max} (got '${raw}')`,
+    );
+  }
+  return value;
+}
+
+const filesHead: OpSpec<FilesTailResult> = {
+  group: 'files',
+  name: 'head',
+  summary: `First N lines of a file (default ${DEFAULT_HEAD_LINES}, at most ${MAX_HEAD_LINES}); .env-shaped files are masked like files tail.`,
+  args: [
+    arg('path', 'positional', true, 'Remote file path — must be on files-allowlist.toml.'),
+    arg('n', 'flag', false, `Number of lines (default ${DEFAULT_HEAD_LINES}).`),
+  ],
+  mutating: false,
+  exposes: 'content',
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
+  capLines,
+  recount: recountLines,
+  buildRemote: (ctx) =>
+    shellJoin([
+      'head',
+      '-n',
+      String(boundedLineCount(ctx, 'n', DEFAULT_HEAD_LINES, MAX_HEAD_LINES)),
+      '--',
+      reqStr(ctx, 'path'),
+    ]),
+  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path')),
+};
+
+/** Private-key-shaped file names `files grep` never reads, however the pattern matches. */
+const GREP_SKIPPED_NAMES = [
+  '*.pem',
+  '*.key',
+  '*.p12',
+  '*.pfx',
+  'id_rsa*',
+  'id_ed25519*',
+  'id_ecdsa*',
+];
+
+const NOT_FOUND_MARKER = '__NOT_FOUND__';
+const ESCAPE_MARKER = '__ESCAPE__';
+
+/** A pattern or glob rides one quoted argv slot, so only what no quoting can carry is refused:
+ *  NUL, and a line break (grep reads each line of a pattern as another pattern). */
+function assertSearchText(op: string, flag: string, value: string, maxChars: number): void {
+  if (/[\0\r\n]/.test(value)) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `${op}: ${flag} contains a NUL or line-break character (got ${JSON.stringify(value)})`,
+      { hint: `Pass ${flag} on one line.` },
+    );
+  }
+  if (value.length > maxChars) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `${op}: ${flag} is ${value.length} characters; the limit is ${maxChars}`,
+      {
+        hint: `Shorten ${flag} to at most ${maxChars} characters.`,
+      },
+    );
+  }
+}
+
+/** Resolves the root on the host and refuses it unless it still lies under an allowlisted entry
+ *  there: a symlink (the root itself or a parent) cannot lead a search out of the allowlist. The
+ *  search then runs on the resolved path, and `find` never follows a link below it. */
+function searchRootScript(path: string, alias: string): string {
+  const entries = (loadFilesAllowlist()[alias] ?? []).filter((entry) => entry !== '/');
+  return [
+    `p=${shq(path)}`,
+    `if [ ! -e "$p" ]; then echo ${NOT_FOUND_MARKER}; exit 0; fi`,
+    `r=$(realpath -- "$p") || { echo ${NOT_FOUND_MARKER}; exit 0; }`,
+    'ok=0',
+    `for a in ${entries.map(shq).join(' ') || "''"}; do ra=$(realpath -- "$a" 2>/dev/null) || continue; case "$r" in "$ra"|"$ra"/*) ok=1;; esac; done`,
+    `if [ "$ok" != 1 ]; then echo ${ESCAPE_MARKER}; exit 0; fi`,
+  ].join('; ');
+}
+
+interface FilesGrepResult {
+  found: boolean;
+  lines: string[];
+  lines_returned: number;
+  truncated: boolean;
+}
+
+/** `path:12:text` (a match) or `path-12-text` (context): the path part, for the env-file check. */
+const GREP_LINE_PREFIX = /^(.*?)([:-])(\d+)\2/;
+
+function maskGrepLine(line: string): string {
+  const match = GREP_LINE_PREFIX.exec(line);
+  const path = match?.[1];
+  if (match === null || path === undefined || !isEnvFile(path)) {
+    return line;
+  }
+  return match[0] + maskEnvContent(line.slice(match[0].length), new Set());
+}
+
+function refusedSearchRoot(op: string, ctx: OpContext): OpError {
+  return new OpError(
+    'VALIDATION_ERROR',
+    `${op}: '${reqStr(ctx, 'path')}' resolves outside every files-allowlist.toml root for alias '${ctx.alias}' (a symlink leads out of it), so nothing was read`,
+    {
+      hint: 'Search the real directory, and have a human declare it with setup files-allowlist scaffold if it is meant to be searchable.',
+    },
+  );
+}
+
+const filesGrep: OpSpec<FilesGrepResult> = {
+  group: 'files',
+  name: 'grep',
+  summary: `Search text files under an allowlisted root for an extended regex (at most ${MAX_GREP_MATCH_LINES} lines; binary and private-key files skipped); env-file lines are masked.`,
+  args: [
+    arg(
+      'path',
+      'positional',
+      true,
+      'Remote directory or file — must be on, or under, a files-allowlist.toml entry.',
+    ),
+    arg(
+      'pattern',
+      'positional',
+      true,
+      `Extended regex, at most ${MAX_GREP_PATTERN_CHARS} characters, one line.`,
+    ),
+    arg(
+      'context',
+      'flag',
+      false,
+      `Lines of context either side of a match (0 to ${MAX_GREP_CONTEXT_LINES}).`,
+    ),
+  ],
+  mutating: false,
+  exposes: 'content',
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'path', within: true }],
+  capLines,
+  recount: recountLines,
+  buildRemote: (ctx) => {
+    const pattern = reqStr(ctx, 'pattern');
+    assertSearchText('files grep', 'pattern', pattern, MAX_GREP_PATTERN_CHARS);
+    const rawContext = optStrOrNull(ctx, 'context');
+    const context = rawContext === null ? 0 : Number(rawContext);
+    if (!Number.isInteger(context) || context < 0 || context > MAX_GREP_CONTEXT_LINES) {
+      throw new OpError(
+        'INVALID_ARGS',
+        `--context must be a whole number from 0 to ${MAX_GREP_CONTEXT_LINES} (got '${rawContext}')`,
+      );
+    }
+    const skipped = GREP_SKIPPED_NAMES.flatMap((name) => ['!', '-name', name]);
+    const grepFlags = context > 0 ? ['-InHE', '-C', String(context)] : ['-InHE'];
+    const search = `find "$r" -type f ${shellJoin(skipped)} -exec grep ${shellJoin(grepFlags)} -e ${shq(pattern)} -- {} +`;
+    return shellJoin([
+      'sh',
+      '-c',
+      [
+        searchRootScript(reqStr(ctx, 'path'), ctx.alias),
+        `${search} | head -n ${MAX_GREP_MATCH_LINES + 1}`,
+      ].join('; '),
+    ]);
+  },
   shape: (parsed, ctx) => {
     const text = parsed as string;
-    const unmasked = (isEnvFile(reqStr(ctx, 'path')) ? maskEnvContent(text, new Set()) : text)
-      .split('\n')
-      .map((line) => line.trimEnd())
-      .filter((line) => line.length > 0);
-    const lines = maskPemLines(unmasked);
-    const masked = lines.filter((line, index) => line !== unmasked[index]).length;
-    return new Premasked({ lines, lines_returned: lines.length }, masked);
+    const marker = text.trim();
+    if (marker === NOT_FOUND_MARKER) {
+      return { found: false, lines: [], lines_returned: 0, truncated: false };
+    }
+    if (marker === ESCAPE_MARKER) {
+      throw refusedSearchRoot('files grep', ctx);
+    }
+    const all = text.split('\n').filter((line) => line.length > 0);
+    const kept = all.slice(0, MAX_GREP_MATCH_LINES);
+    const lines = kept.map(maskGrepLine);
+    return new Premasked(
+      {
+        found: true,
+        lines,
+        lines_returned: lines.length,
+        truncated: all.length > MAX_GREP_MATCH_LINES,
+      },
+      lines.filter((line, index) => line !== kept[index]).length,
+    );
+  },
+};
+
+interface FilesFindResult {
+  found: boolean;
+  paths: string[];
+  paths_returned: number;
+  truncated: boolean;
+}
+
+const filesFind: OpSpec<FilesFindResult> = {
+  group: 'files',
+  name: 'find',
+  summary: `List paths under an allowlisted root, optionally only those whose name matches a glob (at most ${MAX_FIND_RESULTS} paths; symlinks are not followed).`,
+  args: [
+    arg(
+      'path',
+      'positional',
+      true,
+      'Remote directory — must be on, or under, a files-allowlist.toml entry.',
+    ),
+    arg(
+      'name',
+      'flag',
+      false,
+      `Glob for the file name, at most ${MAX_FIND_NAME_CHARS} characters, one line.`,
+    ),
+  ],
+  mutating: false,
+  exposes: 'metadata',
+  timeoutSec: FILE_TIMEOUT_SEC,
+  output: 'raw',
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'path', within: true }],
+  buildRemote: (ctx) => {
+    const name = optStrOrNull(ctx, 'name');
+    if (name !== null) {
+      assertSearchText('files find', '--name', name, MAX_FIND_NAME_CHARS);
+    }
+    const nameTest = name === null ? '' : ` -name ${shq(name)}`;
+    return shellJoin([
+      'sh',
+      '-c',
+      [
+        searchRootScript(reqStr(ctx, 'path'), ctx.alias),
+        `find "$r"${nameTest} | head -n ${MAX_FIND_RESULTS + 1}`,
+      ].join('; '),
+    ]);
+  },
+  shape: (parsed, ctx) => {
+    const text = parsed as string;
+    const marker = text.trim();
+    if (marker === NOT_FOUND_MARKER) {
+      return { found: false, paths: [], paths_returned: 0, truncated: false };
+    }
+    if (marker === ESCAPE_MARKER) {
+      throw refusedSearchRoot('files find', ctx);
+    }
+    const all = text.split('\n').filter((line) => line.length > 0);
+    const paths = all.slice(0, MAX_FIND_RESULTS);
+    return {
+      found: true,
+      paths,
+      paths_returned: paths.length,
+      truncated: all.length > MAX_FIND_RESULTS,
+    };
   },
 };
 
@@ -268,7 +547,7 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
     const text = parsed as string;
     const localPath = reqStr(ctx, 'local_path');
     const newlineIndex = text.indexOf('\n');
-    const firstLine = (newlineIndex === -1 ? text : text.slice(0, newlineIndex)).trim();
+    const firstLine = newlineIndex === -1 ? text : text.slice(0, newlineIndex);
 
     if (firstLine === '__NOT_FOUND__') {
       return {
@@ -280,26 +559,34 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
         local_path: null,
       };
     }
-    const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(firstLine);
+    const tooLarge = DOWNLOAD_HEADER_TOO_LARGE.exec(firstLine);
     if (tooLarge) {
-      const size = tooLarge[1];
       return {
         found: true,
         truncated: true,
-        size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
+        size_bytes: Number.parseInt(tooLarge[1] ?? '', 10),
         written: false,
         masked: false,
         local_path: null,
       };
     }
-    const ok = /^__OK__:(\d+)/.exec(firstLine);
-    const size = ok?.[1] !== undefined ? Number.parseInt(ok[1], 10) : null;
+    const ok = DOWNLOAD_HEADER_OK.exec(firstLine);
+    if (ok?.[1] === undefined) {
+      throw new OpError(
+        'PARSE_ERROR',
+        `files download: the answer for '${reqStr(ctx, 'path')}' does not open with a canonical size header, so nothing was written to '${localPath}'`,
+        {
+          hint: 'The header must be exactly __OK__:<bytes> with no padding or leading zeros; run it again, and use files tail if the host keeps answering this way.',
+        },
+      );
+    }
+    const size = Number.parseInt(ok[1], 10);
     const contentBase64 = newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim();
     const raw = Buffer.from(contentBase64, 'base64');
-    if (size !== null && raw.length !== size) {
+    if (raw.length !== size) {
       throw new OpError(
         'OUTPUT_TOO_LARGE',
-        `files download: received ${raw.length} of the ${size} bytes of '${reqStr(ctx, 'path')}', so nothing was written to '${localPath}'`,
+        `files download: the host reported ${size} bytes for '${reqStr(ctx, 'path')}' but ${raw.length} arrived, so nothing was written to '${localPath}'`,
         {
           hint: `The read stopped before the whole file arrived (the ceiling is ${DOWNLOAD_MAX_STDOUT_BYTES} bytes of base64, enough for a ${DOWNLOAD_MAX_BYTES}-byte file), or the file changed while it was read; run it again, and use files tail for a file that is still being written.`,
         },
@@ -402,6 +689,9 @@ export const filesOps = [
   filesLs,
   filesCat,
   filesTail,
+  filesHead,
+  filesGrep,
+  filesFind,
   filesDownload,
   filesDiskUsage,
   filesUpload,

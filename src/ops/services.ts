@@ -3,8 +3,9 @@ import { arg, type ComposePsEntry, readRecord, reqStr, shapeComposePsEntry } fro
 import { parseHumanBytesPair, parsePercent } from '../parsers/bytes.ts';
 import { type PortMapping, parseInspectPorts } from '../parsers/docker-ports.ts';
 import { parseSystemctlShow } from '../parsers/systemctl-show.ts';
-import { shellJoin } from '../quote.ts';
+import { shellJoin, shq } from '../quote.ts';
 import type { OpSpec } from '../types.ts';
+import { containerEnvSummaryScript, type EnvKeyEntry, parseEnvKeyLines } from './env.ts';
 
 // ---------------------------------------------------------------------------
 // services
@@ -162,15 +163,35 @@ const servicesStats: OpSpec<ServiceStatsEntry[]> = {
       .filter((entry): entry is ServiceStatsEntry => entry !== null),
 };
 
+interface MountEntry {
+  type: string;
+  source: string;
+  destination: string;
+  read_only: boolean;
+}
+
 interface ServiceInspectDetail extends ServiceEntry {
   started_at: string | null;
   finished_at: string | null;
   cap_add: string[];
   cap_drop: string[];
   privileged: boolean;
+  mounts: MountEntry[];
+  /** `Config.Env` reduced on the host to key names: values never reach this process. */
+  env: EnvKeyEntry[];
 }
 
-function shapeInspectDetail(raw: unknown): ServiceInspectDetail | null {
+function shapeMount(raw: unknown): MountEntry {
+  const mount = readRecord(raw);
+  return {
+    type: typeof mount.Type === 'string' ? mount.Type : '',
+    source: typeof mount.Source === 'string' ? mount.Source : '',
+    destination: typeof mount.Destination === 'string' ? mount.Destination : '',
+    read_only: mount.RW === false,
+  };
+}
+
+function shapeInspectDetail(raw: unknown, env: EnvKeyEntry[]): ServiceInspectDetail | null {
   const base = shapeServiceEntry(raw);
   if (!base || typeof raw !== 'object' || raw === null) {
     return null;
@@ -185,26 +206,58 @@ function shapeInspectDetail(raw: unknown): ServiceInspectDetail | null {
     cap_add: Array.isArray(hostConfig.CapAdd) ? (hostConfig.CapAdd as string[]) : [],
     cap_drop: Array.isArray(hostConfig.CapDrop) ? (hostConfig.CapDrop as string[]) : [],
     privileged: hostConfig.Privileged === true,
+    mounts: Array.isArray(record.Mounts) ? record.Mounts.map(shapeMount) : [],
+    env,
   };
+}
+
+/** The inspect document with `Config.Env` left out: a Go template names every field this op reads,
+ *  so the container's variables (values included) are never part of what crosses the wire. */
+const INSPECT_TEMPLATE = [
+  '{"Id":{{json .Id}},"Name":{{json .Name}},"RestartCount":{{json .RestartCount}}',
+  '"State":{{json .State}},"HostConfig":{{json .HostConfig}}',
+  '"NetworkSettings":{"Ports":{{json .NetworkSettings.Ports}}}',
+  '"Config":{"Image":{{json .Config.Image}},"Labels":{{json .Config.Labels}}}',
+  '"Mounts":{{json .Mounts}}}',
+].join(',');
+
+const ENV_SECTION_MARKER = '__ENV__';
+
+function inspectScript(container: string): string {
+  return [
+    `c=${shq(container)}`,
+    'command -v docker >/dev/null 2>&1 || exit 127',
+    `docker inspect --type container --format ${shq(`${INSPECT_TEMPLATE}{{"\\n"}}`)} -- "$c" || exit $?`,
+    `echo ${ENV_SECTION_MARKER}`,
+    containerEnvSummaryScript('"$c"'),
+  ].join('; ');
+}
+
+function parseInspectOutput(stdout: string): { inspect: unknown; env: EnvKeyEntry[] } {
+  if (stdout.trim().length === 0) {
+    return { inspect: null, env: [] };
+  }
+  const marker = stdout.indexOf(`\n${ENV_SECTION_MARKER}\n`);
+  const document = marker === -1 ? stdout : stdout.slice(0, marker);
+  const envText = marker === -1 ? '' : stdout.slice(marker + ENV_SECTION_MARKER.length + 2);
+  return { inspect: JSON.parse(document), env: parseEnvKeyLines(envText) };
 }
 
 const servicesInspect: OpSpec<ServiceInspectDetail[]> = {
   group: 'services',
   name: 'inspect',
-  summary: 'Full inspect detail for one container — cap audit + exit-137 evidence in one call.',
+  summary:
+    'Full inspect detail for one container — cap audit, mounts, ports, health, exit-137 evidence and env key names (never values) in one call.',
   args: [arg('container', 'positional', true, 'Container name or ID.')],
   mutating: false,
   exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
-  output: 'native-json',
-  buildRemote: (ctx) => shellJoin(['docker', 'inspect', '--', reqStr(ctx, 'container')]),
+  output: { parse: parseInspectOutput },
+  buildRemote: (ctx) => shellJoin(['sh', '-c', inspectScript(reqStr(ctx, 'container'))]),
   shape: (parsed) => {
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed
-      .map(shapeInspectDetail)
-      .filter((entry): entry is ServiceInspectDetail => entry !== null);
+    const { inspect, env } = parsed as ReturnType<typeof parseInspectOutput>;
+    const detail = shapeInspectDetail(inspect, env);
+    return detail === null ? [] : [detail];
   },
 };
 

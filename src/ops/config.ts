@@ -7,6 +7,7 @@ import {
   FILE_CAT_MAX_BYTES,
   FILE_TIMEOUT_SEC,
   optStr,
+  optStrOrNull,
   reqStr,
 } from '../op-args.ts';
 import { shellJoin, shq } from '../quote.ts';
@@ -78,13 +79,32 @@ export function loadFilesAllowlist(path: string = defaultFilesAllowlistPath()): 
   return loadPathAllowlist('files', path);
 }
 
+/** The allowlisted entry `path` sits under (never `/`), once `..` segments are refused outright:
+ *  a `..` could walk out of the root after the prefix check passed. */
+function underAllowedEntry(allowed: string[], path: string): boolean {
+  if (path.split('/').includes('..')) {
+    return false;
+  }
+  const trimmed = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  return allowed.some((entry) => {
+    const root = entry.length > 1 ? entry.replace(/\/+$/, '') : entry;
+    return root !== '/' && (trimmed === root || trimmed.startsWith(`${root}/`));
+  });
+}
+
 /** Local refusal, before ssh — a path not declared for this alias never reaches the remote.
  *  Shared by both `config` and `files` ops; which scope's allowlist file to check comes from
- *  the op's declarative `allowlist` policy, not a per-op call site (see `executeOp`). */
-export function assertPathAllowed(scope: 'config' | 'files', ctx: OpContext, path: string): void {
+ *  the op's declarative `allowlist` policy, not a per-op call site (see `executeOp`). `within`
+ *  accepts a path under a declared entry as well as the entry itself. */
+export function assertPathAllowed(
+  scope: 'config' | 'files',
+  ctx: OpContext,
+  path: string,
+  within = false,
+): void {
   const allowlist = loadPathAllowlist(scope);
   const allowed = allowlist[ctx.alias] ?? [];
-  if (!allowed.includes(path)) {
+  if (!(within ? underAllowedEntry(allowed, path) : allowed.includes(path))) {
     throw new OpError(
       'VALIDATION_ERROR',
       `${scope} path '${path}' is not on the allowlist for alias '${ctx.alias}'`,
@@ -230,7 +250,10 @@ export function assertRevealKeysAllowed(ctx: OpContext, keys: Set<string>): void
 export function enforceAllowlist(policies: AllowlistPolicy[] | undefined, ctx: OpContext): void {
   for (const policy of policies ?? []) {
     if (policy.kind === 'path') {
-      assertPathAllowed(policy.scope, ctx, reqStr(ctx, policy.argName));
+      if (policy.optional && optStrOrNull(ctx, policy.argName) === null) {
+        continue;
+      }
+      assertPathAllowed(policy.scope, ctx, reqStr(ctx, policy.argName), policy.within === true);
       continue;
     }
     assertRevealKeysAllowed(ctx, revealKeysOf(ctx, policy.argName));

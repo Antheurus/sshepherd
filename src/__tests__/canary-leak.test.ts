@@ -171,6 +171,7 @@ function argValues(alias: string): Record<string, string[]> {
     target: [alias, pgConnectTarget(alias)],
     sql: ['SELECT * FROM canary_users', ...Object.values(DB_ECHO_PROBES).map((probe) => probe.sql)],
     recipe: ['canary-ok', 'canary-fail'],
+    pattern: ['.'],
   };
 }
 
@@ -178,7 +179,19 @@ function argOverrides(alias: string): Record<string, Record<string, string[]>> {
   return {
     'files ls': { path: ['/opt/canary'] },
     'files disk-usage': { path: ['/opt/canary'] },
+    'files find': { path: ['/opt/canary'] },
+    'files grep': { path: ['/opt/canary', '/var/log/auth.log'] },
     'db query': { target: [alias] },
+  };
+}
+
+/** Ops whose args are alternatives or paired (`env keys` takes a container or a path, `env diff` a
+ *  remote file and a local reference), so the one-value-per-arg product would build calls the op
+ *  refuses; each entry lists the exact argument sets to run. */
+function explicitDrives(): Record<string, Record<string, string>[]> {
+  return {
+    'env keys': [{ container: CANARY_CONTAINER }, ...CANARY_FILES.map((path) => ({ path }))],
+    'env diff': CANARY_FILES.map((path) => ({ path, against: referenceEnvPath })),
   };
 }
 
@@ -225,17 +238,22 @@ function runPlant(...args: string[]): void {
   }
 }
 
-function installIdentityScrubber(): void {
+function installIdentityScrubber(): { mockRestore: () => void }[] {
   if (process.env.NODE_ENV !== 'test') {
     throw new Error(`${IDENTITY_HOOK} is a bun test hook and is refused outside it`);
   }
-  spyOn(scrubModule, 'scrub').mockImplementation(((value: unknown) => ({
-    value,
-    count: 0,
-  })) as typeof scrubModule.scrub);
-  spyOn(scrubModule, 'scrubText').mockImplementation((text: string) => ({ value: text, count: 0 }));
-  spyOn(scrubModule, 'maskEnvContent').mockImplementation((content: string) => content);
-  spyOn(scrubModule, 'maskPemLines').mockImplementation((lines: readonly string[]) => [...lines]);
+  return [
+    spyOn(scrubModule, 'scrub').mockImplementation(((value: unknown) => ({
+      value,
+      count: 0,
+    })) as typeof scrubModule.scrub),
+    spyOn(scrubModule, 'scrubText').mockImplementation((text: string) => ({
+      value: text,
+      count: 0,
+    })),
+    spyOn(scrubModule, 'maskEnvContent').mockImplementation((content: string) => content),
+    spyOn(scrubModule, 'maskPemLines').mockImplementation((lines: readonly string[]) => [...lines]),
+  ];
 }
 
 const ENV_KEYS = [
@@ -257,6 +275,7 @@ let scratch = '';
 let sshConfig = '';
 let runtimeDir = '';
 let rawSeen = '';
+let referenceEnvPath = '';
 
 const recordingRunner: SshRunner = async (args, timeoutMs, options) => {
   const outcome = await defaultRunner(args, timeoutMs, options);
@@ -395,6 +414,15 @@ function writeFixtureConfig(): void {
  *  is never skipped); `files download` writes into the scratch dir so the file can be searched. */
 function drivesFor(op: OpSpec, alias: string): Drive[] {
   const name = `${op.group} ${op.name}`;
+  const explicit = explicitDrives()[name];
+  if (explicit !== undefined) {
+    return explicit.map((args) => ({
+      label: `${name} ${Object.entries(args)
+        .map(([key, value]) => `${key}=${value}`)
+        .join(' ')}`,
+      args,
+    }));
+  }
   const values = { ...argValues(alias), ...argOverrides(alias)[name] };
   let drives: Drive[] = [{ label: name, args: {} }];
   for (const spec of op.args) {
@@ -574,6 +602,8 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
     scratch = mkdtempSync(join(tmpdir(), 'sshepherd-canary-'));
     sshConfig = join(scratch, 'ssh_config');
     runtimeDir = mkdtempSync('/tmp/sshepherd-canary-run-');
+    referenceEnvPath = join(scratch, 'reference.env');
+    writeFileSync(referenceEnvPath, 'SECRET_KEY=\nAPI_TOKEN=\nNOT_THERE=\n');
     writeFixtureConfig();
     writeCanarySshConfig();
     process.env.SSHEPHERD_SSH_CONFIG_PATH = sshConfig;
@@ -703,6 +733,65 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
       expect(results.filter((result) => !result.peerShown).map((result) => result.label)).toEqual(
         [],
       );
+    }, 120_000);
+  }
+
+  for (const variant of VARIANTS) {
+    test(`${variant}: env keys, env diff and services inspect hold 0 canary hits with the scrubber off`, async () => {
+      const alias = `smoke-${variant}`;
+      const hookOn = process.env[IDENTITY_HOOK] === '1';
+      const spies = hookOn ? [] : installIdentityScrubber();
+      try {
+        const names = new Set(['env keys', 'env diff', 'services inspect']);
+        const results: DriveResult[] = [];
+        let index = 20_000;
+        for (const op of exposingOps().filter((candidate) =>
+          names.has(`${candidate.group} ${candidate.name}`),
+        )) {
+          for (const entry of drivesFor(op, alias)) {
+            results.push(await drive(op, alias, entry, index, false));
+            index += 1;
+          }
+        }
+        for (const result of results) {
+          console.log(
+            `[${variant}] scrubber off ${result.label}: ${result.status}; hits ${result.hits.join(',') || '0'}`,
+          );
+        }
+        expect(results.length).toBeGreaterThan(names.size);
+        expect(results.filter((result) => result.status !== 'ok').map((r) => r.label)).toEqual([]);
+        expect(
+          results.filter((result) => result.hits.length > 0).map((r) => `${r.label}: ${r.hits}`),
+        ).toEqual([]);
+
+        const envelope = await executeOp(
+          exposingOps().find((op) => op.group === 'env' && op.name === 'keys') as OpSpec,
+          { alias, args: { container: CANARY_CONTAINER } },
+          {
+            transport: { runner: defaultRunner, sshConfigPath: sshConfig },
+            sshConfigPath: sshConfig,
+          },
+        );
+        const keys = (envelope.data as { key: string; state: string; length_bucket: string }[]).map(
+          (entry) => entry.key,
+        );
+        expect(keys).toEqual(
+          expect.arrayContaining([
+            'API_TOKEN',
+            'DATABASE_URL',
+            'POSTGRES_PASSWORD',
+            'APP_PASSWORD',
+            'BEARER_TOKEN',
+            'CALLBACK_TOKEN',
+            'OAUTH_CLIENT_SECRET',
+          ]),
+        );
+        expect(JSON.stringify(envelope).includes(canary)).toBe(false);
+      } finally {
+        for (const spy of spies) {
+          spy.mockRestore();
+        }
+      }
     }, 120_000);
   }
 

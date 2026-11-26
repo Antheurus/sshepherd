@@ -3,6 +3,7 @@ import { checkOps } from './ops/check.ts';
 import { configOps } from './ops/config.ts';
 import { dbOps } from './ops/db.ts';
 import { deployOps } from './ops/deploy.ts';
+import { envOps } from './ops/env.ts';
 import { filesOps } from './ops/files.ts';
 import { hostsOps } from './ops/hosts.ts';
 import { logsOps } from './ops/logs.ts';
@@ -17,6 +18,7 @@ const REGISTRY: OpSpec[] = [
   ...logsOps,
   ...servicesOps,
   ...filesOps,
+  ...envOps,
   ...configOps,
   ...dbOps,
   ...deployOps,
