@@ -181,6 +181,11 @@ interface MountEntry {
   read_only: boolean;
 }
 
+interface NetworkEntry {
+  name: string;
+  ip_address: string | null;
+}
+
 interface ServiceInspectDetail extends ServiceEntry {
   started_at: string | null;
   finished_at: string | null;
@@ -188,8 +193,21 @@ interface ServiceInspectDetail extends ServiceEntry {
   cap_drop: string[];
   privileged: boolean;
   mounts: MountEntry[];
+  /** Networks the container is attached to, each with its address (the scrubber masks it). */
+  networks: NetworkEntry[];
+  /** `Config.Cmd`, argument by argument (the scrubber masks a secret-shaped one). */
+  cmd: string[];
   /** `Config.Env` reduced on the host to key names: values never reach this process. */
   env: EnvKeyEntry[];
+}
+
+function shapeNetworks(raw: unknown): NetworkEntry[] {
+  return Object.entries(readRecord(raw))
+    .map(([name, value]) => {
+      const ip = readRecord(value).IPAddress;
+      return { name, ip_address: typeof ip === 'string' && ip.length > 0 ? ip : null };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function shapeMount(raw: unknown): MountEntry {
@@ -210,6 +228,8 @@ function shapeInspectDetail(raw: unknown, env: EnvKeyEntry[]): ServiceInspectDet
   const record = raw as Record<string, unknown>;
   const state = readRecord(record.State);
   const hostConfig = readRecord(record.HostConfig);
+  const config = readRecord(record.Config);
+  const networkSettings = readRecord(record.NetworkSettings);
   return {
     ...base,
     started_at: typeof state.StartedAt === 'string' ? state.StartedAt : null,
@@ -218,6 +238,10 @@ function shapeInspectDetail(raw: unknown, env: EnvKeyEntry[]): ServiceInspectDet
     cap_drop: Array.isArray(hostConfig.CapDrop) ? (hostConfig.CapDrop as string[]) : [],
     privileged: hostConfig.Privileged === true,
     mounts: Array.isArray(record.Mounts) ? record.Mounts.map(shapeMount) : [],
+    networks: shapeNetworks(networkSettings.Networks),
+    cmd: Array.isArray(config.Cmd)
+      ? config.Cmd.filter((part): part is string => typeof part === 'string')
+      : [],
     env,
   };
 }
@@ -227,8 +251,8 @@ function shapeInspectDetail(raw: unknown, env: EnvKeyEntry[]): ServiceInspectDet
 const INSPECT_TEMPLATE = [
   '{"Id":{{json .Id}},"Name":{{json .Name}},"RestartCount":{{json .RestartCount}}',
   '"State":{{json .State}},"HostConfig":{{json .HostConfig}}',
-  '"NetworkSettings":{"Ports":{{json .NetworkSettings.Ports}}}',
-  '"Config":{"Image":{{json .Config.Image}},"Labels":{{json .Config.Labels}}}',
+  '"NetworkSettings":{"Ports":{{json .NetworkSettings.Ports}},"Networks":{{json .NetworkSettings.Networks}}}',
+  '"Config":{"Image":{{json .Config.Image}},"Labels":{{json .Config.Labels}},"Cmd":{{json .Config.Cmd}}}',
   '"Mounts":{{json .Mounts}}}',
 ].join(',');
 
@@ -258,7 +282,7 @@ const servicesInspect: OpSpec<ServiceInspectDetail[]> = {
   group: 'services',
   name: 'inspect',
   summary:
-    'Full inspect detail for one container — cap audit, mounts, ports, health, exit-137 evidence and env key names (never values) in one call.',
+    'Full inspect detail for one container — cap audit, mounts, ports, networks, cmd, health, exit-137 evidence and env key names (never values) in one call.',
   args: [arg('container', 'positional', true, 'Container name or ID.')],
   mutating: false,
   exposes: 'metadata',

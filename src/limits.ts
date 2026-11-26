@@ -158,3 +158,9 @@ export const TUNNEL_OPEN_WAIT_SEC = CONNECT_TIMEOUT_SEC + 5;
 /** After ssh reports it authenticated, how long `tunnel open` watches it before calling the forward
  *  up: a refused local bind exits at once, a refused remote forward within one round trip. */
 export const TUNNEL_FORWARD_SETTLE_MS = 1_000;
+/** `db migrations --dir`: applied names read and directory entries listed for the pending
+ *  comparison. 10,000 migrations is decades of a busy app; past it the comparison would be cut,
+ *  so the op refuses instead of reporting a partial `pending`. */
+export const DB_MIGRATIONS_COMPARE_MAX = 10_000;
+/** `files head|tail|cat --lines A:B`: the widest range one call returns, the same as `MAX_HEAD_LINES`. */
+export const MAX_FILES_LINE_SPAN = 5_000;

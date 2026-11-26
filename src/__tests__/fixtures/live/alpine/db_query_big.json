@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T18:23:23.064Z",
+  "ran_at": "2026-11-26T19:47:57.474Z",
   "command": "db query",
-  "duration_ms": 72,
+  "duration_ms": 58,
   "scrubbed": 0,
   "data": {
     "rows": [
@@ -2010,7 +2010,8 @@
       }
     ],
     "row_count": 500,
-    "truncated": true
+    "truncated": true,
+    "masked_columns": []
   },
   "error": null
 }

@@ -4,6 +4,7 @@ import {
   DOWNLOAD_MAX_BYTES,
   DOWNLOAD_MAX_STDOUT_BYTES,
   MAX_FILES_GREP_PATTERN_CHARS,
+  MAX_FILES_LINE_SPAN,
   MAX_FIND_NAME_CHARS,
   MAX_FIND_RESULTS,
   MAX_GREP_CONTEXT_LINES,
@@ -24,7 +25,7 @@ import { capLines, recountLines } from '../parsers/logs-shape.ts';
 import { parseLs } from '../parsers/ls.ts';
 import { shellJoin, shq } from '../quote.ts';
 import { niced } from '../remote-nice.ts';
-import { isEnvFile, maskEnvContent, maskPemLines, scrubText } from '../scrub.ts';
+import { isEnvFile, MASK, maskEnvContent, maskPemLines, scrubText } from '../scrub.ts';
 import { type OpContext, OpError, type OpSpec, Premasked } from '../types.ts';
 import { loadFilesAllowlist, loadScrubExtraPatterns, revealKeysOf } from './config.ts';
 
@@ -53,6 +54,108 @@ const filesLs: OpSpec<ReturnType<typeof parseLs>> = {
     shellJoin(['ls', '-la', '--time-style=long-iso', '--', reqStr(ctx, 'path')]),
   shape: (parsed) => parseLs(parsed as string),
 };
+
+/** `--lines A:B`: lines A to B of the file, 1-based and inclusive, at most `MAX_FILES_LINE_SPAN`. */
+interface LineRange {
+  start: number;
+  end: number;
+}
+
+const LINES_ARG = arg(
+  'lines',
+  'flag',
+  false,
+  `A:B — only lines A to B of the file (1-based, inclusive, at most ${MAX_FILES_LINE_SPAN} lines); not combined with --n.`,
+);
+
+function lineRangeOf(ctx: OpContext): LineRange | null {
+  const raw = optStrOrNull(ctx, 'lines');
+  if (raw === null) {
+    return null;
+  }
+  if (optStrOrNull(ctx, 'n') !== null) {
+    throw new OpError('INVALID_ARGS', '--lines and --n pick lines two ways; pass one of them');
+  }
+  const match = /^(\d{1,9}):(\d{1,9})$/.exec(raw);
+  const start = Number(match?.[1] ?? 0);
+  const end = Number(match?.[2] ?? 0);
+  if (start < 1 || end < start || end - start + 1 > MAX_FILES_LINE_SPAN) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `--lines must be A:B with 1 <= A <= B and at most ${MAX_FILES_LINE_SPAN} lines (got '${raw}')`,
+      { hint: 'For example --lines 120:180.' },
+    );
+  }
+  return { start, end };
+}
+
+const ENV_ENTRY = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)(\s*=\s*)(.*)$/;
+const ENV_SKIPPED = /^\s*(?:#.*)?$/;
+
+/** Index of the first `quote` in `text` no backslash escapes, or -1. */
+function unescapedQuote(text: string, quote: string): number {
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '\\') {
+      i += 1;
+    } else if (text[i] === quote) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** The lines of an env-shaped file read from line 1, masked line for line (so line numbers still
+ *  hold): each `KEY=value` as `files cat` masks it, and every line of a quoted value that runs on
+ *  past its own line masked whole, as is any other line that is neither an entry nor a comment. */
+function maskEnvLines(lines: readonly string[], revealKeys: ReadonlySet<string>): string[] {
+  let open = '';
+  return lines.map((line) => {
+    if (open !== '') {
+      if (unescapedQuote(line, open) !== -1) {
+        open = '';
+      }
+      return MASK;
+    }
+    if (ENV_SKIPPED.test(line)) {
+      return line;
+    }
+    const value = ENV_ENTRY.exec(line)?.[4];
+    if (value === undefined) {
+      return MASK;
+    }
+    const quote = value[0];
+    if ((quote === '"' || quote === "'") && unescapedQuote(value.slice(1), quote) === -1) {
+      open = quote;
+    }
+    return maskEnvContent(line, revealKeys);
+  });
+}
+
+/** The lines `--lines` asked for out of what the host sent: an env-shaped file came from line 1 (so
+ *  its masking saw every value from its start) and is masked, then cut; any other file came as the
+ *  range itself. */
+function rangeLines(
+  text: string,
+  path: string,
+  range: LineRange,
+  revealKeys: ReadonlySet<string> = new Set(),
+): string[] {
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') {
+    lines.pop();
+  }
+  return isEnvFile(path)
+    ? maskEnvLines(lines, revealKeys).slice(range.start - 1, range.end)
+    : lines;
+}
+
+/** The remote read for `--lines` on head/tail: an env-shaped file from line 1 to B (its masking
+ *  needs every value from its start), any other file only lines A to B. */
+function rangeCommand(path: string, range: LineRange): string {
+  return isEnvFile(path)
+    ? shellJoin(['head', '-n', String(range.end), '--', path])
+    : shellJoin(['sed', '-n', `${range.start},${range.end}p;${range.end}q`, '--', path]);
+}
 
 interface FilesCatResult {
   found: boolean;
@@ -84,6 +187,7 @@ const filesCat: OpSpec<FilesCatResult> = {
       false,
       'Comma-separated key names to unmask (env files only) — each must clear the hardcoded secret-pattern denylist and be on reveal-allowlist.toml.',
     ),
+    LINES_ARG,
   ],
   mutating: false,
   exposes: 'content',
@@ -97,6 +201,7 @@ const filesCat: OpSpec<FilesCatResult> = {
   recount: recountCat,
   buildRemote: (ctx) => {
     const path = reqStr(ctx, 'path');
+    lineRangeOf(ctx);
     const script = [
       `p=${shq(path)}`,
       'if [ ! -f "$p" ]; then echo __NOT_FOUND__; exit 0; fi',
@@ -122,7 +227,22 @@ const filesCat: OpSpec<FilesCatResult> = {
         content: null,
       };
     }
-    const shouldMask = isEnvFile(reqStr(ctx, 'path'));
+    const path = reqStr(ctx, 'path');
+    const shouldMask = isEnvFile(path);
+    const range = lineRangeOf(ctx);
+    if (range !== null) {
+      const lines = shouldMask
+        ? rangeLines(text, path, range, revealKeysOf(ctx, 'reveal'))
+        : text.split('\n').slice(range.start - 1, range.end);
+      const content = lines.join('\n');
+      return {
+        found: true,
+        truncated: false,
+        size_bytes: Buffer.byteLength(content, 'utf8'),
+        masked: shouldMask,
+        content,
+      };
+    }
     return {
       found: true,
       truncated: false,
@@ -138,10 +258,18 @@ interface FilesTailResult {
   lines_returned: number;
 }
 
-/** The lines of a file read by `tail`/`head`: env-shaped files masked whole, then PEM lines. */
-function shapeTextLines(text: string, path: string): Premasked<FilesTailResult> {
-  const unmasked = (isEnvFile(path) ? maskEnvContent(text, new Set()) : text)
-    .split('\n')
+/** The lines of a file read by `tail`/`head`: env-shaped files masked whole, then PEM lines. With
+ *  `--lines`, the range `rangeLines` cuts out of what the host sent. */
+function shapeTextLines(
+  text: string,
+  path: string,
+  range: LineRange | null,
+): Premasked<FilesTailResult> {
+  const unmasked = (
+    range === null
+      ? (isEnvFile(path) ? maskEnvContent(text, new Set()) : text).split('\n')
+      : rangeLines(text, path, range)
+  )
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0);
   const lines = maskPemLines(unmasked);
@@ -156,6 +284,7 @@ const filesTail: OpSpec<FilesTailResult> = {
   args: [
     arg('path', 'positional', true, 'Remote file path — must be on files-allowlist.toml.'),
     arg('n', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
+    LINES_ARG,
   ],
   mutating: false,
   exposes: 'content',
@@ -165,15 +294,20 @@ const filesTail: OpSpec<FilesTailResult> = {
   truncateKeeps: 'tail',
   capLines,
   recount: recountLines,
-  buildRemote: (ctx) =>
-    shellJoin([
+  buildRemote: (ctx) => {
+    const range = lineRangeOf(ctx);
+    if (range !== null) {
+      return rangeCommand(reqStr(ctx, 'path'), range);
+    }
+    return shellJoin([
       'tail',
       '-n',
       optStr(ctx, 'n', String(DEFAULT_LOG_TAIL)),
       '--',
       reqStr(ctx, 'path'),
-    ]),
-  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path')),
+    ]);
+  },
+  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path'), lineRangeOf(ctx)),
 };
 
 function boundedLineCount(ctx: OpContext, name: string, fallback: number, max: number): number {
@@ -198,6 +332,7 @@ const filesHead: OpSpec<FilesTailResult> = {
   args: [
     arg('path', 'positional', true, 'Remote file path — must be on files-allowlist.toml.'),
     arg('n', 'flag', false, `Number of lines (default ${DEFAULT_HEAD_LINES}).`),
+    LINES_ARG,
   ],
   mutating: false,
   exposes: 'content',
@@ -206,15 +341,20 @@ const filesHead: OpSpec<FilesTailResult> = {
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
   capLines,
   recount: recountLines,
-  buildRemote: (ctx) =>
-    shellJoin([
+  buildRemote: (ctx) => {
+    const range = lineRangeOf(ctx);
+    if (range !== null) {
+      return rangeCommand(reqStr(ctx, 'path'), range);
+    }
+    return shellJoin([
       'head',
       '-n',
       String(boundedLineCount(ctx, 'n', DEFAULT_HEAD_LINES, MAX_HEAD_LINES)),
       '--',
       reqStr(ctx, 'path'),
-    ]),
-  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path')),
+    ]);
+  },
+  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path'), lineRangeOf(ctx)),
 };
 
 /** Private-key-shaped file names `files grep` never reads, however the pattern matches. */
@@ -274,16 +414,77 @@ interface FilesGrepResult {
   truncated: boolean;
 }
 
-/** `path:12:text` (a match) or `path-12-text` (context): the path part, for the env-file check. */
-const GREP_LINE_PREFIX = /^(.*?)([:-])(\d+)\2/;
+/** Env-shaped basenames, the shell twin of `isEnvFile` (matched on the lower-cased basename). */
+const ENV_FILE_CASE = '*.env*|*.vars|*.secrets|credentials*|*.pem|id_*';
 
-function maskGrepLine(line: string): string {
-  const match = GREP_LINE_PREFIX.exec(line);
-  const path = match?.[1];
-  if (match === null || path === undefined || !isEnvFile(path)) {
-    return line;
+/** Run per file, so every block of grep output arrives behind the path it came from (`path NUL
+ *  lines NUL whole NUL`) and nothing has to split a path out of a line: `$1` is the pattern, the
+ *  rest are files. `whole` is empty except for an env-shaped file, where it is the file itself (its
+ *  first `FILE_CAT_MAX_BYTES`, base64 on one line): a matched line inside a multi-line value can only
+ *  be masked knowing every line above it. A NUL never occurs in a path or, with -I, in a text line. */
+function grepPerFileScript(flags: string[]): string {
+  return [
+    'p=$1',
+    'shift',
+    [
+      `for f do out=$(grep ${shellJoin(flags)} -e "$p" -- "$f" | head -n ${MAX_GREP_MATCH_LINES + 1})`,
+      '[ -n "$out" ] || continue',
+      `case "$(printf '%s' "\${f##*/}" | tr 'A-Z' 'a-z')" in ${ENV_FILE_CASE}) whole=$(head -c ${FILE_CAT_MAX_BYTES} -- "$f" | base64 | tr -d '\\n') ;; *) whole='' ;; esac`,
+      `printf '%s\\0%s\\n\\0%s\\0' "$f" "$out" "$whole"`,
+      'done',
+    ].join('; '),
+  ].join('; ');
+}
+
+/** `12:text` (a match), `12-text` (context) or `--` (between context groups) of one file. */
+const GREP_FILE_LINE = /^(\d+)([:-])(.*)$/s;
+
+/** One file's grep lines, parsed (null for a `--` separator). */
+function grepBlockLines(block: string): (RegExpExecArray | null)[] {
+  return block
+    .split('\n')
+    .filter((line) => line.length > 0)
+    .map((line) => GREP_FILE_LINE.exec(line));
+}
+
+/** One file's lines back in `path:12:text` form, masked: an env-shaped file line by line as
+ *  `maskEnvLines` masks the whole file (a line past what arrived of it is masked whole), then PEM
+ *  bodies for every file. */
+function maskGrepGroup(path: string, block: string, whole: string): string[] {
+  const parsed = grepBlockLines(block);
+  const envLines = isEnvFile(path)
+    ? maskEnvLines(Buffer.from(whole, 'base64').toString('utf8').split('\n'), new Set())
+    : null;
+  const texts = parsed.map((match) => {
+    const text = match?.[3] ?? '';
+    if (envLines === null || match === null) {
+      return text;
+    }
+    return envLines[Number(match[1]) - 1] ?? MASK;
+  });
+  const masked = maskPemLines(texts);
+  return parsed.map((match, index) =>
+    match === null ? '--' : `${path}${match[2]}${match[1]}${match[2]}${masked[index]}`,
+  );
+}
+
+/** The whole answer as grep's own `path:12:text` lines, each file's block masked as one group, and
+ *  the same lines unmasked (to count what masking changed). */
+function grepLines(text: string): { lines: string[]; unmasked: string[] } {
+  const parts = text.split('\0');
+  const lines: string[] = [];
+  const unmasked: string[] = [];
+  for (let i = 0; i + 1 < parts.length; i += 3) {
+    const path = parts[i] ?? '';
+    const block = parts[i + 1] ?? '';
+    lines.push(...maskGrepGroup(path, block, parts[i + 2] ?? ''));
+    unmasked.push(
+      ...grepBlockLines(block).map((match) =>
+        match === null ? '--' : `${path}${match[2]}${match[1]}${match[2]}${match[3]}`,
+      ),
+    );
   }
-  return match[0] + maskEnvContent(line.slice(match[0].length), new Set());
+  return { lines, unmasked };
 }
 
 function refusedSearchRoot(op: string, ctx: OpContext): OpError {
@@ -339,8 +540,8 @@ const filesGrep: OpSpec<FilesGrepResult> = {
       );
     }
     const skipped = GREP_SKIPPED_NAMES.flatMap((name) => ['!', '-name', name]);
-    const grepFlags = context > 0 ? ['-InHE', '-C', String(context)] : ['-InHE'];
-    const search = `find "$r" -type f ${shellJoin(skipped)} -exec grep ${shellJoin(grepFlags)} -e ${shq(pattern)} -- {} +`;
+    const grepFlags = context > 0 ? ['-InE', '-C', String(context)] : ['-InE'];
+    const search = `find "$r" -type f ${shellJoin(skipped)} -exec sh -c ${shq(grepPerFileScript(grepFlags))} sh ${shq(pattern)} {} +`;
     return niced(
       shellJoin([
         'sh',
@@ -361,17 +562,16 @@ const filesGrep: OpSpec<FilesGrepResult> = {
     if (marker === ESCAPE_MARKER) {
       throw refusedSearchRoot('files grep', ctx);
     }
-    const all = text.split('\n').filter((line) => line.length > 0);
-    const kept = all.slice(0, MAX_GREP_MATCH_LINES);
-    const lines = kept.map(maskGrepLine);
+    const all = grepLines(text);
+    const lines = all.lines.slice(0, MAX_GREP_MATCH_LINES);
     return new Premasked(
       {
         found: true,
         lines,
         lines_returned: lines.length,
-        truncated: all.length > MAX_GREP_MATCH_LINES,
+        truncated: all.lines.length > MAX_GREP_MATCH_LINES,
       },
-      lines.filter((line, index) => line !== kept[index]).length,
+      lines.filter((line, index) => line !== all.unmasked[index]).length,
     );
   },
 };

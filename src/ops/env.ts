@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { ENV_LENGTH_BUCKET_BOUNDS } from '../limits.ts';
 import { arg, assertPositional, FILE_TIMEOUT_SEC, optStrOrNull, reqStr } from '../op-args.ts';
 import { shellJoin, shq } from '../quote.ts';
+import { didYouMean } from '../suggest.ts';
+import { declaredContainers } from '../targets.ts';
 import { OpError, type OpSpec } from '../types.ts';
 
 // ---------------------------------------------------------------------------
@@ -18,32 +20,64 @@ export const ENV_BUCKET_LABELS = [
   `${BUCKET_MEDIUM + 1}+`,
 ];
 
-/** Reads env lines on stdin: `json` mode is one JSON string per line (`docker inspect`'s Env, where
- *  a newline inside a value is already escaped), `dotenv` mode is a `.env` file. Prints only the
- *  key, whether the value is empty, and the length bucket. */
-function awkProgram(mode: 'json' | 'dotenv'): string {
-  const unwrap =
-    mode === 'json'
-      ? 'line = substr(line, 2, length(line) - 2)'
-      : 'sub(/^[ \\t]+/, "", line); sub(/^export[ \\t]+/, "", line)';
-  const unquote =
-    mode === 'json'
-      ? ''
-      : 'if (length(val) >= 2 && (substr(val, 1, 1) == "\\"" || substr(val, 1, 1) == sprintf("%c", 39)) && substr(val, length(val), 1) == substr(val, 1, 1)) val = substr(val, 2, length(val) - 2)';
-  return [
-    '{ line = $0',
-    unwrap,
-    'eq = index(line, "="); if (eq < 2) next',
-    'key = substr(line, 1, eq - 1); if (key !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next',
-    'val = substr(line, eq + 1); sub(/^[ \\t]+/, "", val); sub(/[ \\t\\r]+$/, "", val)',
-    unquote,
-    'n = length(val)',
-    `b = (n == 0) ? "${ENV_BUCKET_LABELS[0]}" : (n <= ${BUCKET_SMALL}) ? "${ENV_BUCKET_LABELS[1]}" : (n <= ${BUCKET_MEDIUM}) ? "${ENV_BUCKET_LABELS[2]}" : "${ENV_BUCKET_LABELS[3]}"`,
-    'print key "\\t" ((n == 0) ? "empty" : "set") "\\t" b }',
-  ]
-    .filter((part) => part.length > 0)
-    .join('; ');
+const BUCKET_EXPR = (len: string): string =>
+  `(${len} == 0) ? "${ENV_BUCKET_LABELS[0]}" : (${len} <= ${BUCKET_SMALL}) ? "${ENV_BUCKET_LABELS[1]}" : (${len} <= ${BUCKET_MEDIUM}) ? "${ENV_BUCKET_LABELS[2]}" : "${ENV_BUCKET_LABELS[3]}"`;
+
+/** Reads `docker inspect`'s Env on stdin, one JSON string per line (a newline inside a value is
+ *  already escaped there). Prints only the key, whether the value is empty, and the length bucket. */
+const JSON_ENV_AWK = [
+  '{ line = $0',
+  'line = substr(line, 2, length(line) - 2)',
+  'eq = index(line, "="); if (eq < 2) next',
+  'key = substr(line, 1, eq - 1); if (key !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next',
+  'val = substr(line, eq + 1); sub(/^[ \\t]+/, "", val); sub(/[ \\t\\r]+$/, "", val)',
+  'n = length(val)',
+  `b = ${BUCKET_EXPR('n')}`,
+  'print key "\\t" ((n == 0) ? "empty" : "set") "\\t" b }',
+].join('; ');
+
+/** Reads a `.env` file the way dotenv loaders do: `[export ]KEY = value`, `#` comments, CRLF, and a
+ *  single- or double-quoted value that runs over several lines (a PEM key, JSON, wrapped base64)
+ *  until its closing quote, a backslash escaping the next character. A key is only ever read from
+ *  the start of an entry, never from a line inside a quoted value. Prints the same three columns
+ *  as `JSON_ENV_AWK`; the value's length counts the newlines inside it. */
+export const DOTENV_AWK = String.raw`
+function emit(k, n) { print k "\t" ((n == 0) ? "empty" : "set") "\t" (${BUCKET_EXPR('n')}) }
+function closing(s, q,   i, c) {
+  for (i = 1; i <= length(s); i++) {
+    c = substr(s, i, 1)
+    if (c == "\\") { i++; continue }
+    if (c == q) return i
+  }
+  return 0
 }
+{
+  line = $0
+  sub(/\r$/, "", line)
+  if (open != "") {
+    p = closing(line, open)
+    if (p == 0) { len += length(line) + 1; next }
+    emit(key, len + p - 1); open = ""; next
+  }
+  sub(/^[ \t]+/, "", line)
+  if (line == "" || substr(line, 1, 1) == "#") next
+  sub(/^export[ \t]+/, "", line)
+  eq = index(line, "="); if (eq < 2) next
+  key = substr(line, 1, eq - 1); sub(/[ \t]+$/, "", key)
+  if (key !~ /^[A-Za-z_][A-Za-z0-9_]*$/) next
+  val = substr(line, eq + 1); sub(/^[ \t]+/, "", val)
+  q = substr(val, 1, 1)
+  if (q == "\"" || q == "'") {
+    rest = substr(val, 2)
+    p = closing(rest, q)
+    if (p > 0) { emit(key, p - 1); next }
+    open = q; len = length(rest) + 1; next
+  }
+  sub(/[ \t]+#.*$/, "", val); sub(/[ \t]+$/, "", val)
+  emit(key, length(val))
+}
+END { if (open != "") emit(key, len) }
+`;
 
 export interface EnvKeyEntry {
   key: string;
@@ -74,7 +108,7 @@ function envFileScript(path: string): string {
   return [
     `p=${shq(path)}`,
     `if [ ! -f "$p" ]; then echo ${NOT_FOUND}; exit 0; fi`,
-    `awk ${shq(awkProgram('dotenv'))} "$p"`,
+    `awk ${shq(DOTENV_AWK)} "$p"`,
   ].join('; ');
 }
 
@@ -83,7 +117,7 @@ function envFileScript(path: string): string {
 export function containerEnvSummaryScript(containerRef: string): string {
   return [
     `out=$(docker inspect --type container --format '{{range .Config.Env}}{{json .}}{{"\\n"}}{{end}}' -- ${containerRef}) || exit $?`,
-    `printf '%s\\n' "$out" | awk ${shq(awkProgram('json'))}`,
+    `printf '%s\\n' "$out" | awk ${shq(JSON_ENV_AWK)}`,
   ].join('; ');
 }
 
@@ -105,6 +139,17 @@ function envSource(ctx: Parameters<OpSpec['buildRemote']>[0]): string {
   }
   if (container !== null) {
     assertPositional('container', container);
+    const declared = declaredContainers(ctx.alias);
+    if (!declared.includes(container)) {
+      throw new OpError(
+        'VALIDATION_ERROR',
+        `env keys: container '${container}' is not declared for alias '${ctx.alias}' in targets.toml`,
+        {
+          hint: 'A human lists it in containers = [...] on a targets.toml entry whose alias is this one; the agent never widens its own list.',
+          did_you_mean: didYouMean(container, declared),
+        },
+      );
+    }
     return shellJoin(['sh', '-c', containerEnvScript(container)]);
   }
   assertPositional('path', path as string);
@@ -117,7 +162,12 @@ const envKeys: OpSpec<EnvKeyEntry[]> = {
   summary:
     'Key names of a container environment or an env file, each with set/empty and a coarse length bucket — values never leave the host.',
   args: [
-    arg('container', 'flag', false, 'Container name or ID (not combined with --path).'),
+    arg(
+      'container',
+      'flag',
+      false,
+      'Container name — must be in containers = [...] of a targets.toml entry on this alias (not combined with --path).',
+    ),
     arg(
       'path',
       'flag',

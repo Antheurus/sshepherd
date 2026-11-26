@@ -5,6 +5,9 @@ CREATE ROLE sshepherd_ro WITH LOGIN;
 GRANT pg_read_all_data TO sshepherd_ro;
 ALTER ROLE sshepherd_ro SET default_transaction_read_only = on;
 
+-- A login with a password, so pg_authid holds a real SCRAM verifier for the masking checks.
+CREATE ROLE fixture_app WITH LOGIN PASSWORD 'fixture-app-password-not-a-secret';
+
 CREATE TABLE IF NOT EXISTS smoke_fixture (
   id serial PRIMARY KEY,
   note text NOT NULL

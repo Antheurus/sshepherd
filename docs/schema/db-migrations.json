@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "sshepherd/db-migrations",
   "title": "sshepherd db migrations",
-  "description": "Applied migrations (name, applied_at; newest 50 per table) from whichever of the prisma, knex, typeorm, rails and laravel tables exist.",
+  "description": "Applied migrations (current, then name and applied_at, newest 50 per table) from whichever of the prisma, knex, typeorm, rails and laravel tables exist; --dir adds the pending ones.",
   "x-sshepherd": {
     "group": "db",
     "action": "migrations",
@@ -15,6 +15,16 @@
         "name": "target",
         "kind": "positional",
         "required": true
+      },
+      {
+        "name": "table",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "dir",
+        "kind": "flag",
+        "required": false
       },
       {
         "name": "timeout",
@@ -73,6 +83,9 @@
               "items": {
                 "type": "object",
                 "properties": {
+                  "current": {
+                    "type": "string"
+                  },
                   "framework": {
                     "type": "string"
                   },
@@ -92,6 +105,9 @@
                         }
                       }
                     }
+                  },
+                  "pending": {
+                    "type": "null"
                   },
                   "table": {
                     "type": "string"

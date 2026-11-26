@@ -161,6 +161,8 @@ export function scaffold(
 export interface RoRoleOptions {
   printSql: boolean;
   role?: string;
+  /** `--tables-only`: SELECT on the app's tables instead of `pg_read_all_data`. */
+  tablesOnly?: boolean;
 }
 
 const RO_ROLE_DEFAULT = 'sshepherd_ro';
@@ -172,17 +174,36 @@ const ROLE_NAME_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
  * login role is the only boundary untrusted SQL cannot leave, because `RESET ROLE` and
  * `set_config('role', ...)` inside a query return to it.
  */
-export function roRoleSql(target: string, role: string): string {
+export function roRoleSql(target: string, role: string, tablesOnly = false): string {
+  const grants = tablesOnly
+    ? [
+        '-- --tables-only: SELECT on the tables of schema public and nothing else (no system catalog',
+        '-- such as pg_authid). Repeat the three lines below for every other schema the app uses. The',
+        '-- DEFAULT PRIVILEGES line covers tables created later by the role that runs it; run it as the',
+        '-- role that owns the app tables, or add FOR ROLE <owner>.',
+        `GRANT USAGE ON SCHEMA public TO ${role};`,
+        `GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role};`,
+        `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ${role};`,
+      ]
+    : [
+        '-- pg_read_all_data reads every table, the system catalogs included: pg_authid holds every',
+        "-- role's password verifier, and this role can SELECT it. sshepherd db query masks the",
+        '-- rolpassword and passwd columns by name (deny_columns in targets.toml), but the role itself',
+        '-- can still read them; --tables-only prints a variant that grants only the app tables.',
+        `GRANT pg_read_all_data TO ${role};`,
+      ];
   return [
     `-- Read-only login role for sshepherd pg-target '${target}'.`,
     '-- sshepherd never runs this. Apply it yourself as a superuser (or a CREATEROLE role allowed to',
-    '-- grant pg_read_all_data) on the target database; pg_read_all_data needs Postgres 14 or later.',
+    tablesOnly
+      ? '-- grant on the app schema) on the target database.'
+      : '-- grant pg_read_all_data) on the target database; pg_read_all_data needs Postgres 14 or later.',
     '-- Why a LOGIN role: SET ROLE does not sandbox SQL, because RESET ROLE or',
     "-- set_config('role', ...) inside a query returns to the login role. The login role itself must",
     '-- be the restricted one, and a member of no role it could switch to.',
     'BEGIN;',
     `CREATE ROLE ${role} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;`,
-    `GRANT pg_read_all_data TO ${role};`,
+    ...grants,
     `ALTER ROLE ${role} SET default_transaction_read_only = on;`,
     `ALTER ROLE ${role} SET statement_timeout = '${DB_STATEMENT_TIMEOUT_SEC}s';`,
     `ALTER ROLE ${role} SET lock_timeout = '${DB_LOCK_TIMEOUT_SEC}s';`,
@@ -196,13 +217,14 @@ export function roRoleSql(target: string, role: string): string {
     `SELECT rolsuper, rolcreaterole, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = '${role}'; -- expect: f | f | f | f | f`,
     `SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid WHERE m.member = '${role}'::regrole AND r.rolname <> 'pg_read_all_data'; -- expect: 0`,
     `SELECT pg_has_role('${role}', 'pg_write_all_data', 'USAGE'); -- expect: f`,
+    `SELECT has_table_privilege('${role}', 'pg_authid', 'SELECT'); -- expect: ${tablesOnly ? 'f' : 't (pg_read_all_data; see above)'}`,
     `-- Connected as ${role}: SELECT set_config('role', 'postgres', false); -- expect: ERROR: permission denied to set role "postgres"`,
     `-- Connected as ${role}: CREATE TEMP TABLE sshepherd_check (x int); -- expect: ERROR: cannot execute CREATE TABLE in a read-only transaction`,
     '',
   ].join('\n');
 }
 
-/** `setup db-target ro-role <target> --print-sql`: the SQL text, or a setup error when the call
+/** `setup db-target ro-role <target> --print-sql [--tables-only]`: the SQL text, or a setup error when the call
  *  is incomplete. Reads targets.toml only to refuse a target that is not declared. */
 export function roRole(
   target: string,
@@ -242,7 +264,7 @@ export function roRole(
       },
     });
   }
-  return { sql: roRoleSql(target, role) };
+  return { sql: roRoleSql(target, role, options.tablesOnly === true) };
 }
 
 export interface DiscoveredPostgres {

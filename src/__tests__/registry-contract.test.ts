@@ -57,7 +57,10 @@ beforeAll(() => {
   const allowlist = `[${ALIAS}]\npaths = ["${REMOTE_PATH}"]\n`;
   writeFileSync(join(scratch, 'files-allowlist.toml'), allowlist);
   writeFileSync(join(scratch, 'config-allowlist.toml'), allowlist);
-  writeFileSync(join(scratch, 'targets.toml'), '');
+  writeFileSync(
+    join(scratch, 'targets.toml'),
+    `[contract-db]\nalias = "${ALIAS}"\ncontainer = "app-db"\nuser = "ro"\ndatabase = "app"\ncontainers = ["app"]\n`,
+  );
   writeFileSync(join(scratch, 'source.txt'), 'content\n');
   writeFileSync(join(scratch, 'ssh_config'), `Host ${ALIAS}\n  HostName 10.0.0.9\n`);
   process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = join(scratch, 'files-allowlist.toml');

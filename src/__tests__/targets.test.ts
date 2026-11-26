@@ -2,7 +2,13 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildDbOpContext, loadTargets, resolveTarget } from '../targets.ts';
+import {
+  buildDbOpContext,
+  DEFAULT_DENY_COLUMNS,
+  declaredContainers,
+  loadTargets,
+  resolveTarget,
+} from '../targets.ts';
 
 function writeFixtureTargets(): string {
   const dir = mkdtempSync(join(tmpdir(), 'sshepherd-targets-test-'));
@@ -46,6 +52,8 @@ describe('loadTargets', () => {
       sudoUser: null,
       pgHost: null,
       pgPort: null,
+      denyColumns: DEFAULT_DENY_COLUMNS,
+      containers: [],
     });
     expect(targets.staging).toEqual({
       alias: 'staging-1',
@@ -61,6 +69,8 @@ describe('loadTargets', () => {
       sudoUser: null,
       pgHost: null,
       pgPort: null,
+      denyColumns: DEFAULT_DENY_COLUMNS,
+      containers: [],
     });
   });
 
@@ -122,7 +132,49 @@ describe('buildDbOpContext', () => {
       pg_host: '',
       pg_port: '',
       max_profile: '',
+      deny_columns: JSON.stringify(DEFAULT_DENY_COLUMNS),
     });
+  });
+
+  test('deny_columns replaces the default list; an empty, non-list or bad-regex one is refused', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-targets-test-'));
+    const path = join(dir, 'targets.toml');
+    const target = ['alias = "lms-server"', 'container = "pg"', 'user = "ro"', 'database = "lms"'];
+    writeFileSync(path, ['[prod]', ...target, 'deny_columns = ["^ssn$"]', ''].join('\n'));
+    expect(loadTargets(path).prod?.denyColumns).toEqual(['^ssn$']);
+    expect(buildDbOpContext('prod', {}, path).args.deny_columns).toBe('["^ssn$"]');
+    for (const bad of ['[]', '"pass"', '["("]', '[1]']) {
+      writeFileSync(path, ['[prod]', ...target, `deny_columns = ${bad}`, ''].join('\n'));
+      expect(() => loadTargets(path)).toThrow(/deny_columns/);
+    }
+  });
+
+  test('containers add up per alias across targets; a non-name entry is refused', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-targets-test-'));
+    const path = join(dir, 'targets.toml');
+    const target = (name: string, alias: string, containers: string) =>
+      [
+        `[${name}]`,
+        `alias = "${alias}"`,
+        'container = "pg"',
+        'user = "ro"',
+        'database = "d"',
+        `containers = ${containers}`,
+        '',
+      ].join('\n');
+    writeFileSync(
+      path,
+      [
+        target('a', 'web-01', '["app", "worker"]'),
+        target('b', 'web-01', '["app", "cron"]'),
+        target('c', 'db-01', '["other"]'),
+      ].join('\n'),
+    );
+    expect(declaredContainers('web-01', path)).toEqual(['app', 'cron', 'worker']);
+    expect(declaredContainers('db-01', path)).toEqual(['other']);
+    expect(declaredContainers('nowhere', path)).toEqual([]);
+    writeFileSync(path, target('a', 'web-01', '["-v"]'));
+    expect(() => loadTargets(path)).toThrow(/containers/);
   });
 
   test('a target max_profile is parsed and flattened as max_profile; an unknown value is refused', () => {

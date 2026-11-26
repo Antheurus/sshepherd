@@ -282,6 +282,7 @@ alias = "$alias"
 container = "$PREFIX-postgres"
 user = "sshepherd_ro"
 database = "fixture"
+containers = ["$PREFIX-app"]
 TOML
   cat >"$STATE/deploy.$alias.toml" <<TOML
 name = "$alias"

@@ -19,7 +19,10 @@
 #        GRANT pg_read_all_data TO sshepherd_ro;            -- PG14+
 #        ALTER ROLE sshepherd_ro SET default_transaction_read_only = on;
 #      This is the real boundary — it catches writable CTEs and volatile functions that
-#      no client-side parser can reliably detect.
+#      no client-side parser can reliably detect. `setup db-target ro-role <target>
+#      --print-sql` prints the full SQL; pg_read_all_data also reads pg_authid (every
+#      role's password verifier), and `--tables-only` prints a variant granting only the
+#      app's tables instead.
 #   2. sshepherd wraps every query in `BEGIN TRANSACTION READ ONLY; ...; ROLLBACK;`
 #      (defense in depth, not a substitute for #1 — a session can revoke read-only on
 #      itself).
@@ -43,3 +46,36 @@ alias = "staging-1"
 container = "staging_postgres_1"             # container name or ID ON THE REMOTE
 user = "sshepherd_ro"
 database = "app"
+deny_columns = ["pass(word)?|secret|token|api_?key|private_?key|credential|salt|hash", "rolpassword|passwd"]
+                                             # optional: db query masks the value of every
+                                             # column whose name matches one of these regexes
+                                             # (case-insensitive) and lists it in masked_columns.
+                                             # Absent = exactly this default list; a list here
+                                             # replaces it, so keep the default entries you want.
+containers = ["staging_app_1"]               # optional: containers on this alias whose env key
+                                             # names `env keys --container` may read (values
+                                             # never leave the host); any other is refused
+
+# URL held in an app container's env — the container's env var (env_key, default
+# DATABASE_URL) holds postgres://user:password@host/db; it is decoded into PG* variables
+# inside the remote shell and never reaches sshepherd. psql runs in `psql_container` when
+# the app image has none (omit it when the app container has psql itself). No user or
+# database here: the URL names both.
+[app]
+alias = "web-01"
+kind = "container-env"
+container = "myapp_web_1"                    # the container whose env holds the URL
+env_key = "DATABASE_URL"
+psql_container = "myapp_db_1"                # optional: a container with psql in it
+
+# psql installed on the host itself — run as `sudo_user` for peer auth (sudo -n: no
+# password prompt), or pointed at a TCP Postgres with pg_host/pg_port (a password then comes
+# from the remote ~/.pgpass, never from here).
+[reports]
+alias = "db-01"
+kind = "host"
+user = "sshepherd_ro"
+database = "reports"
+sudo_user = "postgres"                       # optional
+pg_host = "127.0.0.1"                        # optional
+pg_port = "5432"                             # optional, digits as a string
