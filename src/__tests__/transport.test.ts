@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { errorInfo } from '../errors.ts';
@@ -747,5 +747,88 @@ describe('executeOp — an audit line that cannot be written keeps the op result
     expect(envelope.error?.op_outcome).toBe('ok');
     expect(envelope.error?.message).not.toContain(dir);
     expect(envelope.data).toEqual({ container: 'web', restarted: true });
+  });
+});
+
+describe('run — a reused master older than the recheck limit gets a fresh host-key check', () => {
+  const ALIAS = 'web-recheck';
+  const HOUR_AGO = new Date(Date.now() - 3_600_000);
+
+  /** A socket file at the alias's ControlPath with the given mtime, under a private runtime dir. */
+  function masterSocket(mtime: Date): { sock: string; restore: () => void } {
+    const saved = process.env.XDG_RUNTIME_DIR;
+    const runtime = mkdtempSync('/tmp/sshp-rc-');
+    process.env.XDG_RUNTIME_DIR = runtime;
+    mkdirSync(join(runtime, 'sshepherd'), { recursive: true });
+    const name = new Bun.CryptoHasher('sha256').update(ALIAS).digest('hex').slice(0, 16);
+    const sock = join(runtime, 'sshepherd', `${name}.sock`);
+    writeFileSync(sock, '');
+    utimesSync(sock, mtime, mtime);
+    return {
+      sock,
+      restore: () => {
+        rmSync(runtime, { recursive: true, force: true });
+        if (saved === undefined) {
+          delete process.env.XDG_RUNTIME_DIR;
+        } else {
+          process.env.XDG_RUNTIME_DIR = saved;
+        }
+      },
+    };
+  }
+
+  /** `-O check` says the master is live; the fresh probe answers `probeStderr`. */
+  function liveMaster(probeStderr: string): { runner: SshRunner; calls: string[][] } {
+    const calls: string[][] = [];
+    const runner: SshRunner = async (args) => {
+      calls.push(args);
+      if (args[0] === '-G') {
+        return { code: 0, stdout: 'hostname 10.0.0.9\n', stderr: '', timedOut: false };
+      }
+      if (args.includes('PreferredAuthentications=none')) {
+        return { code: 255, stdout: '', stderr: probeStderr, timedOut: false };
+      }
+      return { code: 0, stdout: 'ok\n', stderr: '', timedOut: false };
+    };
+    return { runner, calls };
+  }
+
+  test('a key that left known_hosts behind a live master: HOST_KEY_UNKNOWN, the master is closed, nothing runs', async () => {
+    const { restore } = masterSocket(HOUR_AGO);
+    try {
+      const host = liveMaster(
+        'No ED25519 host key is known for [10.0.0.9]:22 and you have requested strict checking.\nHost key verification failed.',
+      );
+      const result = await run(ALIAS, 'echo hi', 10, { runner: host.runner });
+      expect(result.error?.code).toBe('HOST_KEY_UNKNOWN');
+      expect(host.calls.some((args) => args.includes('exit'))).toBe(true);
+      expect(host.calls.some((args) => args.includes('echo hi'))).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  test('a key that still verifies: the command runs and the recheck clock restarts', async () => {
+    const { sock, restore } = masterSocket(HOUR_AGO);
+    try {
+      const host = liveMaster('Permission denied (publickey).');
+      const result = await run(ALIAS, 'echo hi', 10, { runner: host.runner });
+      expect(result.error).toBeNull();
+      expect(Date.now() - statSync(sock).mtimeMs).toBeLessThan(60_000);
+    } finally {
+      restore();
+    }
+  });
+
+  test('a master younger than the limit is reused with no extra key exchange', async () => {
+    const { restore } = masterSocket(new Date());
+    try {
+      const host = liveMaster('Host key verification failed.');
+      const result = await run(ALIAS, 'echo hi', 10, { runner: host.runner });
+      expect(result.error).toBeNull();
+      expect(host.calls.some((args) => args.includes('PreferredAuthentications=none'))).toBe(false);
+    } finally {
+      restore();
+    }
   });
 });

@@ -22,6 +22,7 @@ services:
       BEARER_TOKEN: __C__ah
       CALLBACK_TOKEN: __C__qs
       OAUTH_CLIENT_SECRET: __C__js
+      JAVA_OPTS: -Dspring.datasource.password=__C__nj -Xmx64m
     entrypoint: ['sh', '-c']
     command:
       - |
@@ -31,6 +32,7 @@ services:
         echo "DEBUG upstream request headers: Authorization: Bearer $$BEARER_TOKEN"
         echo "INFO 172.18.0.1 GET /oauth/callback?code=abc123&token=$$CALLBACK_TOKEN HTTP/1.1 200"
         echo '{"level":"info","msg":"oauth client loaded","client_secret":"'"$$OAUTH_CLIENT_SECRET"'"}'
+        echo "INFO env JAVA_OPTS=$$JAVA_OPTS"
         echo "INFO canary app ready"
         exec sleep 3600
 

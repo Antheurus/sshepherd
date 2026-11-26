@@ -33,12 +33,21 @@ runner), but if your change touches a remote command's output shape — a new pa
 closest thing this project has to a regression suite for real Linux/Postgres behavior, since
 `bun test` mocks the transport layer entirely.
 
-`src/__tests__/canary-leak.test.ts` is the leak gate and is smoke-only too: with the fixture up
-(`just smoke-up && bun test src/__tests__/canary-leak.test.ts`) it plants a random canary in every
-secret-shaped place on both sshd variants (`scripts/sshd-fixture/canary/`) and runs every op whose
-`exposes` is not `none`; without the fixture it reports as skipped. A new exposing op is driven
-automatically; one it cannot drive goes in its `SKIP` list with a reason. Before merging a scrubber
-or exposing-op change, run it once with `SSHEPHERD_TEST_SCRUB_IDENTITY=1` too and see it fail.
+`src/__tests__/canary-leak.test.ts` is the leak gate and is fixture-only too. `just canary-fixture`
+brings the fixture up, runs it and tears it down, and `just smoke` runs it as its last step; in CI,
+and in a plain `bun test` with no fixture, it reports as skipped, which proves nothing — the recipe
+is the gate, and it fails on a skip. It plants a random canary in every secret-shaped place on both
+sshd variants (`scripts/sshd-fixture/canary/`) and runs every op, whatever its `exposes` label says,
+searching what comes back in plain text and in base64, base64url, hex, URL-encoded and gzip+base64
+form. Every driven op needs at least one drive that succeeded. A new op is driven automatically; one
+it cannot drive goes in its `SKIP` list with a reason. Before merging a scrubber or op change, run it
+once with `SSHEPHERD_TEST_SCRUB_IDENTITY=1` too (fixture up) and see it fail.
+
+One fixture per `SSHEPHERD_SMOKE_PROJECT`: `just smoke-up` refuses while that project's containers
+are running, and `just smoke-down` refuses while a `just smoke` or `just canary-fixture` run holds
+it. Two agents or worktrees testing at once each set their own `SSHEPHERD_SMOKE_PROJECT` (any
+project but the default binds ephemeral ports); sharing one would swap its keypair under the first
+holder and let either run tear the other's fixture down.
 
 ## Where things live
 

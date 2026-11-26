@@ -147,3 +147,14 @@ export const DB_MIGRATIONS_LIMIT = 50;
 /** `temp_file_limit` the read-only role SQL sets (superuser-only, so the role cannot lift it): one
  *  unbounded sort spilled 2 GB in 5 s on a shared database; 256 MiB fits any sensible ad hoc read. */
 export const DB_RO_ROLE_TEMP_FILE_LIMIT_MB = 256;
+/** A reused ControlMaster older than this gets a fresh strict host-key check first (one key
+ *  exchange, no authentication): a master authenticates once, so a key that changed or left
+ *  known_hosts would otherwise go unseen while it lives. 300 s is `CONTROL_PERSIST_SEC`'s idle life,
+ *  so a busy master is rechecked about as often as an idle one would be reopened. */
+export const MASTER_HOST_KEY_RECHECK_SEC = 300;
+/** `tunnel open` waits this long for ssh to authenticate and set up the forward, or to exit: the
+ *  connect limit plus 5 s for the key exchange and the forward request. */
+export const TUNNEL_OPEN_WAIT_SEC = CONNECT_TIMEOUT_SEC + 5;
+/** After ssh reports it authenticated, how long `tunnel open` watches it before calling the forward
+ *  up: a refused local bind exits at once, a refused remote forward within one round trip. */
+export const TUNNEL_FORWARD_SETTLE_MS = 1_000;

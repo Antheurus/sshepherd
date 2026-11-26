@@ -38,7 +38,9 @@ jobs:
         run: bun run build
 
       # scripts/smoke.sh and the canary leak gate (src/__tests__/canary-leak.test.ts, skipped here
-      # because the fixture is absent) are smoke-only; see CONTRIBUTING.md.
+      # because the fixture is absent) are fixture-only: a green run here says nothing about leaks.
+      # The gate is `just canary-fixture` (also the last step of `just smoke`), run locally against
+      # the Docker fixture before merging a scrubber or op change; see CONTRIBUTING.md.
       # scripts/smoke.sh is excluded on purpose — it drives a disposable local sshd +
       # Postgres Docker fixture, which this runner doesn't build. Unit tests (mocked
       # transport, see src/__tests__/) cover the same request-shaping logic without that

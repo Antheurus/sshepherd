@@ -407,6 +407,42 @@ describe('the env-URL script decodes the URL into PG* and never passes it as arg
     });
   });
 
+  test("a connect error naming the URL's host and user masks both before it leaves the container, keeping stdout and the exit code", () => {
+    const bin = mkdtempSync(join(scratch, 'bin-'));
+    writeFileSync(
+      join(bin, 'psql'),
+      [
+        '#!/bin/sh',
+        'printf "partial-row\\n"',
+        'printf "psql: error: connection to server at \\"%s\\" (192.0.2.10), port 5432 failed: FATAL:  password authentication failed for user \\"%s\\"\\n" "$PGHOST" "$PGUSER" >&2',
+        'printf "xdb.ledger.example.net is another host and billing_apps another user\\n" >&2',
+        'exit 2',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'psql'), 0o755);
+    const proc = Bun.spawnSync(
+      ['sh', '-c', envUrlPsqlScript('DATABASE_URL'), 'sh', '-c', 'SELECT 1'],
+      {
+        env: {
+          PATH: `${bin}:/usr/bin:/bin`,
+          DATABASE_URL: 'postgres://billing_app:pw@db.ledger.example.net:5432/app',
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+    expect({
+      code: proc.exitCode,
+      stdout: proc.stdout.toString(),
+      stderr: proc.stderr.toString(),
+    }).toEqual({
+      code: 2,
+      stdout: 'partial-row\n',
+      stderr:
+        'psql: error: connection to server at "<db-host>" (192.0.2.10), port 5432 failed: FATAL:  password authentication failed for user "<db-user>"\nxdb.ledger.example.net is another host and billing_apps another user\n',
+    });
+  });
+
   test('a non-postgres or missing URL exits 3 without echoing it', () => {
     const wrong = runScript('mysql://root:topsecretvalue@db/app');
     expect(wrong.code).toBe(3);

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Canary stand-in for systemctl (the fixtures run no systemd), installed only where no systemctl
+# exists: `show` prints a running unit's properties, so `services systemctl-status` returns ok;
+# every other verb (start, stop, restart, reload) succeeds without doing anything.
+if [ "$1" = show ]; then
+  printf 'ActiveState=active\nSubState=running\nLoadState=loaded\nUnitFileState=enabled\nMainPID=1\nNRestarts=0\nResult=success\n'
+fi
+exit 0

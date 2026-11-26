@@ -263,6 +263,23 @@ function maskPemBlocks(text: string): ScrubResult<string> {
   return { value: out, count };
 }
 
+/** The object kinds psql names in a `<kind> "<name>" does not exist` error. */
+const PSQL_NAMED_OBJECT_KINDS = [
+  'relation',
+  'role',
+  'schema',
+  'function',
+  'database',
+  'type',
+  'collation',
+  'sequence',
+  'tablespace',
+  'extension',
+  'operator class',
+  'operator family',
+  'text search (?:configuration|dictionary|parser|template)',
+].join('|');
+
 /** psql error texts that quote the value that failed, so a query that errors never hands back the
  *  data its result would have masked by column name (`SELECT password::int` echoes the password):
  *  a cast (`invalid input syntax for type <t>: "<v>"`, `invalid input value for enum <t>: "<v>"`,
@@ -272,7 +289,16 @@ function maskPemBlocks(text: string): ScrubResult<string> {
  *  for "<field>"`), JSON input (`Token "<v>" is invalid`, `but found "<v>"`, `JSON data, line N: <v>`)
  *  and a constraint's DETAIL (`Key (<cols>)=(<v>) already exists`, `Failing row contains (<v>)`).
  *  A quoted value runs to the last quote on its line, since psql never escapes one inside it.
- *  `value too long for type ...` quotes nothing. */
+ *  `value too long for type ...` quotes nothing. A computed value also comes back through a lookup:
+ *  a `reg*` cast or a function taking a name (`nextval`, `has_table_privilege`, `current_setting`,
+ *  `timezone`, `encode`, `pg_size_bytes`) quotes it as `<kind> "<v>" does not exist` (a column only
+ *  as `column "<v>" of relation`, the `has_column_privilege` form: a bare `column "x" does not exist`
+ *  names what the SQL itself wrote), `time zone
+ *  "<v>" not recognized`, `unrecognized configuration parameter "<v>"` and kin; a `tsquery`/`xml`
+ *  cast as `syntax error in tsquery: "<v>"` or the content line above libxml's caret. Last, the
+ *  backstop: on a line psql prefixes (`ERROR:`, `DETAIL:`, `HINT:`, `CONTEXT:`), a value quoted after
+ *  `word: "` or `)=(` is masked whatever the text before it says, so a cast nobody listed still masks
+ *  rather than leaks. `sql_error`'s fields carry no prefix, so only the listed texts reach those. */
 const PSQL_DATA_ECHO_RULES: ShapeRule[] = [
   {
     pattern: new RegExp(
@@ -309,6 +335,41 @@ const PSQL_DATA_ECHO_RULES: ShapeRule[] = [
   {
     pattern:
       /\b((?:conflicts with existing key \([^\n]*?\)=|Failing row contains )\()([^\n]*)(\))/g,
+    replace: (m, head = '', value = '', close = '') =>
+      isMasked(value) ? m : `${head}${MASK}${close}`,
+  },
+  {
+    pattern: new RegExp(
+      String.raw`\b((?:${PSQL_NAMED_OBJECT_KINDS}|time zone) ")([^\n]*?)(")(?=(?: for encoding "[^"\n]*")? (?:does not exist|not recognized))|\b(column ")([^\n]*?)(")(?= of relation "[^"\n]*" does not exist)`,
+      'g',
+    ),
+    replace: (m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
+      const [lead, inner, tail] = head.length > 0 ? [head, value, close] : [head2, value2, close2];
+      return isMasked(inner) ? m : `${lead}${MASK}${tail}`;
+    },
+  },
+  {
+    pattern:
+      /\b((?:unrecognized configuration parameter|unrecognized encoding:|invalid (?:source |destination )?encoding name|invalid type name|at or near|syntax error in tsquery:|invalid size:|Invalid size unit:) ")([^\n]*)(")/g,
+    replace: (m, head = '', value = '', close = '') =>
+      isMasked(value) ? m : `${head}${MASK}${close}`,
+  },
+  {
+    pattern: /\b(operator does not exist: )([^\n]+)/g,
+    replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
+  },
+  {
+    pattern: /^((?:DETAIL: {2})?line \d+: [^\n]*\n)([^\n]+)(?=\n[ \t]*\^[ \t]*$)/gm,
+    replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
+  },
+  {
+    pattern: /^((?:psql:\S*\s+)?(?:ERROR|DETAIL|HINT|CONTEXT): {2}[^\n]*?[^\s:]: ")([^\n]*)(")/gm,
+    replace: (m, head = '', value = '', close = '') =>
+      isMasked(value) ? m : `${head}${MASK}${close}`,
+  },
+  {
+    pattern:
+      /^((?:psql:\S*\s+)?(?:ERROR|DETAIL|HINT|CONTEXT): {2}[^\n]*?\)=\()([^\n]*?)(\))(?=[ .,]|$)/gm,
     replace: (m, head = '', value = '', close = '') =>
       isMasked(value) ? m : `${head}${MASK}${close}`,
   },
@@ -632,10 +693,14 @@ function isHostAfterAt(token: string): boolean {
   return !SYSTEMD_UNIT_SUFFIX.test(head);
 }
 
+/** How far a sudo log line may run from `<user> :` to its `TTY=`/`PWD=`/`COMMAND=` field: sudo's
+ *  own line is far shorter, and the bound keeps the lookahead linear. */
+const MAX_SUDO_LINE_CHARS = 512;
+
 /** The alias user. A distinctive one is masked as a whole word everywhere (`ls -l`, `ps`, `/home/x`,
  *  `id`, sudo logs). A `COMMON_USER_NAMES` one only where it names who connects: `user@<host-like>`,
  *  a URL's `://user:`, `-l user`, `User user`, `user=user`, `"user":"user"`, `login: user`, sshd's
- *  `for [invalid user ]user from`. */
+ *  `for [invalid user ]user from`, sudo's `user : TTY=... ; PWD=...` and a `/home/user` path. */
 function userRule(user: string): IdentityRule | null {
   if (user.length < MIN_MASKED_USER_CHARS) {
     return null;
@@ -651,7 +716,7 @@ function userRule(user: string): IdentityRule | null {
   const blanks = `[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}}`;
   return {
     pattern: new RegExp(
-      String.raw`((?:^|[^\w-])(?:-l|user(?:name)?|login|logname)${IDENTITY_SEP})${escaped}(?![\w.-])|((?:^|[^\w-])for${blanks}(?:invalid${blanks}user${blanks})?)${escaped}(?=${blanks}from\b)|(?<![\w.-])${escaped}(?=@([^\s"']{0,${MAX_HOSTNAME_CHARS}}))|(?<=:\/\/)${escaped}(?=:)`,
+      String.raw`((?:^|[^\w-])(?:-l|user(?:name)?|login|logname)${IDENTITY_SEP})${escaped}(?![\w.-])|((?:^|[^\w-])for${blanks}(?:invalid${blanks}user${blanks})?)${escaped}(?=${blanks}from\b)|(?<![\w.-])${escaped}(?=@([^\s"']{0,${MAX_HOSTNAME_CHARS}}))|(?<=:\/\/)${escaped}(?=:)|(?<![\w.-])${escaped}(?=${blanks}:[ \t][^\n]{0,${MAX_SUDO_LINE_CHARS}}?\b(?:TTY|PWD|COMMAND)=)|(?<=\/home\/)${escaped}(?![\w.-])`,
       'gim',
     ),
     mask: (match, [keyword = '', sshd = '', afterAt = ''], offset, whole) => {
@@ -836,6 +901,70 @@ function protectRevealedLines(text: string, revealKeys: ReadonlySet<string>): [s
   return [protectedText, kept];
 }
 
+/** How many assignments deep a value is searched for another one: `CMD="--opt=--password=v"` is
+ *  two; a deeper real one has not been seen, and the cap keeps a long `a=b=c=...` run linear. */
+const MAX_NESTED_ASSIGNMENT_DEPTH = 3;
+
+/** `KEYED_INLINE` over the text. A pair whose key is not secret is not consumed: the search resumes
+ *  at its value, so an assignment nested inside it (`JAVA_OPTS="-Dspring.datasource.password=v"`,
+ *  `CMD=--password=v`, `x=api_key=v`) is still found. Each level of nesting rescans its own value,
+ *  so the depth is capped at `MAX_NESTED_ASSIGNMENT_DEPTH`: an `a=b=c=...` chain stays linear. */
+function maskKeyedInline(text: string, revealKeys: ReadonlySet<string>): ScrubResult<string> {
+  const pattern = new RegExp(KEYED_INLINE.source, 'g');
+  const openValueEnds: number[] = [];
+  let out = '';
+  let pos = 0;
+  let count = 0;
+  for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
+    const [whole, q = '', key = '', sep = '', value = ''] = match;
+    const end = match.index + whole.length;
+    while (openValueEnds.length > 0 && match.index >= (openValueEnds.at(-1) ?? 0)) {
+      openValueEnds.pop();
+    }
+    if (!isSecretPair(key, value) || revealKeys.has(key) || isMasked(value)) {
+      if (value.length > 0 && openValueEnds.length < MAX_NESTED_ASSIGNMENT_DEPTH) {
+        openValueEnds.push(end);
+        pattern.lastIndex = end - value.length;
+      }
+      continue;
+    }
+    out += `${text.slice(pos, match.index)}${q}${key}${q}${sep}${maskedValue(value, MASK)}`;
+    pos = end;
+    count += 1;
+  }
+  return { value: `${out}${text.slice(pos)}`, count };
+}
+
+/** A base64 or base64url run (wrapped lines included, as `base64` prints them) long enough to hold
+ *  a `KEY=value` line. */
+const BASE64_BLOB =
+  /(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{16,}(?:\r?\n[A-Za-z0-9+/_-]{2,})*={0,2}(?![A-Za-z0-9+/_=-])/g;
+/** Share of a decoded blob that may be non-text before it counts as binary (a key, a digest). */
+const MAX_BINARY_SHARE = 0.1;
+
+/** Whether a base64 blob decodes to text holding anything the scrubber masks — a secret, the alias
+ *  identity, an address the envelope would number: an op that hands back a file base64-encoded must
+ *  not carry what the plain text could not. Binary payloads (public keys, digests, an identifier that
+ *  only looks like base64) are left alone. */
+function hidesSecret(
+  blob: string,
+  options: ScrubOptions,
+  addresses: AddressMasker | null,
+): boolean {
+  const decoded = Buffer.from(
+    blob.replace(/\r?\n/g, '').replaceAll('-', '+').replaceAll('_', '/'),
+    'base64',
+  ).toString('utf8');
+  if (decoded.length === 0) {
+    return false;
+  }
+  const binary = decoded.replace(/[\t\n\r\x20-\x7e -￼]/g, '').length;
+  if (binary / decoded.length > MAX_BINARY_SHARE) {
+    return false;
+  }
+  return scrubTextWith(decoded, options, addresses).count > 0;
+}
+
 /** Masks every secret in one string, then its addresses; `count` is how many values were replaced. */
 export function scrubText(text: string, options: ScrubOptions = {}): ScrubResult<string> {
   return scrubTextWith(text, options, createAddressMasker(options));
@@ -894,13 +1023,9 @@ function scrubTextWith(
       return `${lead}${q}${key}${q}${sep}${maskedValue(value, MASK)}`;
     },
   );
-  out = out.replace(KEYED_INLINE, (match, q: string, key: string, sep: string, value: string) => {
-    if (!isSecretPair(key, value) || revealKeys.has(key) || isMasked(value)) {
-      return match;
-    }
-    count += 1;
-    return `${q}${key}${q}${sep}${maskedValue(value, MASK)}`;
-  });
+  const inline = maskKeyedInline(out, revealKeys);
+  out = inline.value;
+  count += inline.count;
   for (const pattern of [KEYED_SUBSCRIPT, KEYED_CALL_ARG]) {
     out = out.replace(
       pattern,
@@ -937,6 +1062,13 @@ function scrubTextWith(
   if (kept.length > 0) {
     out = out.replace(/\uE000(\d+)\uE001/g, (_m, index: string) => kept[Number(index)] ?? '');
   }
+  out = out.replace(BASE64_BLOB, (blob) => {
+    if (!hidesSecret(blob, options, addresses)) {
+      return blob;
+    }
+    count += 1;
+    return MASK;
+  });
   if (addresses !== null) {
     const masked = addresses.apply(out, false);
     out = masked.value;

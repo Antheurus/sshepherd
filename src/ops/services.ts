@@ -72,6 +72,17 @@ function shapeServiceEntry(raw: unknown): ServiceEntry | null {
   };
 }
 
+/** One JSON line per container holding exactly the fields `shapeServiceEntry` reads — never
+ *  `Config.Env`, whose values a full `docker inspect` would ship to this process, nor a health
+ *  probe's output. The two compose labels are copied only when set; `_` closes the object. */
+const PS_TEMPLATE = [
+  '{"Id":{{json .Id}},"Name":{{json .Name}},"RestartCount":{{json .RestartCount}}',
+  '"State":{"Status":{{json .State.Status}},"OOMKilled":{{json .State.OOMKilled}},"ExitCode":{{json .State.ExitCode}},"Health":{{with index .State "Health"}}{"Status":{{json .Status}}}{{else}}null{{end}}}',
+  '"HostConfig":{"Memory":{{json .HostConfig.Memory}},"NanoCpus":{{json .HostConfig.NanoCpus}},"OomScoreAdj":{{json .HostConfig.OomScoreAdj}},"RestartPolicy":{"Name":{{json .HostConfig.RestartPolicy.Name}}}}',
+  '"NetworkSettings":{"Ports":{{json .NetworkSettings.Ports}}}',
+  '"Config":{"Image":{{json .Config.Image}},"Labels":{ {{with index .Config.Labels "com.docker.compose.project"}}"com.docker.compose.project":{{json .}},{{end}}{{with index .Config.Labels "com.docker.compose.service"}}"com.docker.compose.service":{{json .}},{{end}}"_":null}}}',
+].join(',');
+
 const servicesPs: OpSpec<ServiceEntry[]> = {
   group: 'services',
   name: 'ps',
@@ -81,7 +92,7 @@ const servicesPs: OpSpec<ServiceEntry[]> = {
   mutating: false,
   exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
-  output: 'native-json',
+  output: 'ndjson',
   buildRemote: () =>
     shellJoin([
       'sh',
@@ -89,7 +100,7 @@ const servicesPs: OpSpec<ServiceEntry[]> = {
       // A missing `docker` binary must surface as COMMAND_FAILED, not a silently empty
       // list — `command -v` guard runs first so the "no containers" and "no docker"
       // cases stay distinguishable (see phase brief §Concerns).
-      'command -v docker >/dev/null 2>&1 || exit 127; c=$(docker ps -aq); if [ -z "$c" ]; then echo "[]"; else docker inspect $c; fi',
+      `command -v docker >/dev/null 2>&1 || exit 127; c=$(docker ps -aq); if [ -n "$c" ]; then docker inspect --type container --format ${shq(PS_TEMPLATE)} $c; fi`,
     ]),
   shape: (parsed) => {
     if (!Array.isArray(parsed)) {

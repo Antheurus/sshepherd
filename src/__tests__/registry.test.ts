@@ -336,30 +336,29 @@ describe('services ps — merges docker inspect data into each entry', () => {
     if (!op) {
       throw new Error('services ps op missing');
     }
-    const inspectJson = JSON.stringify([
-      {
-        Id: 'abc123def4560000000000000000000000000000000000000000000000000',
-        Name: '/lms-app',
-        Config: {
-          Image: 'lms-app:latest',
-          Labels: { 'com.docker.compose.project': 'lms', 'com.docker.compose.service': 'app' },
-        },
-        State: {
-          Status: 'running',
-          OOMKilled: true,
-          ExitCode: 137,
-          Health: { Status: 'unhealthy' },
-        },
-        RestartCount: 3,
-        HostConfig: {
-          Memory: 536870912,
-          NanoCpus: 500000000,
-          OomScoreAdj: 500,
-          RestartPolicy: { Name: 'on-failure' },
-        },
-        NetworkSettings: { Ports: { '80/tcp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] } },
+    // One JSON line per container, as the op's inspect template prints them.
+    const inspectJson = `${JSON.stringify({
+      Id: 'abc123def4560000000000000000000000000000000000000000000000000',
+      Name: '/lms-app',
+      Config: {
+        Image: 'lms-app:latest',
+        Labels: { 'com.docker.compose.project': 'lms', 'com.docker.compose.service': 'app' },
       },
-    ]);
+      State: {
+        Status: 'running',
+        OOMKilled: true,
+        ExitCode: 137,
+        Health: { Status: 'unhealthy' },
+      },
+      RestartCount: 3,
+      HostConfig: {
+        Memory: 536870912,
+        NanoCpus: 500000000,
+        OomScoreAdj: 500,
+        RestartPolicy: { Name: 'on-failure' },
+      },
+      NetworkSettings: { Ports: { '80/tcp': [{ HostIp: '0.0.0.0', HostPort: '8080' }] } },
+    })}\n`;
 
     const runner = scriptedRunner(connectedRunOutcomes(inspectJson));
     const envelope = await executeOp(
@@ -389,6 +388,14 @@ describe('services ps — merges docker inspect data into each entry', () => {
     expect(entries[0]?.ports).toEqual([
       { host_ip: '0.0.0.0', host_port: 8080, container_port: 80, proto: 'tcp' },
     ]);
+  });
+
+  test('asks docker for a template of the fields it reads, so no Config.Env value crosses the wire', () => {
+    const command = getOp('services', 'ps')?.buildRemote({ alias: 'lms-server', args: {} }) ?? '';
+    expect(command).toContain('docker inspect --type container --format');
+    expect(command).not.toContain('.Config.Env');
+    expect(command).not.toContain('{{json .Config}}');
+    expect(command).not.toContain('{{json .State}}');
   });
 
   test('a missing docker binary surfaces as a clean COMMAND_FAILED, not a crash or an empty list', async () => {
