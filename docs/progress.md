@@ -1,5 +1,11 @@
 # sshepherd Progress
 
+## Session — 2026-11-26 — v0.4.0-rc.1 (registry split by group)
+
+Phase 01 of the overhaul: the 2536-line `src/registry.ts` is now a 53-line index over one module per group in `src/ops/` (hosts, check, logs, services, files, config, db, deploy, security, tunnel), each exporting its `OpSpec[]` as `<group>Ops`. `executeOp`, `ExecuteDeps` and the timeout-override clamp moved to `src/execute.ts`; helpers used by two or more groups (arg readers, shared timeout/size constants, `readRecord`, the compose-ps shaper that `deploy status` shares with `services compose-ps`) moved to `src/op-args.ts`; the allowlist loaders stay with `config`, the only group that owns them, and `registry.ts` re-exports every previously exported name so no importer or test changed. Ops modules import only from `op-args.ts`, `execute.ts`'s dependencies and the pre-existing modules, never from `registry.ts`, so there is no cycle. Op order in `listOps()` is unchanged. A new contract test, `src/__tests__/registry-contract.test.ts`, iterates `listOps()`: unique `group/name`, `0 < timeoutSec <= 3600`, and an audit spy through `executeOp` (failing fake runner, temp audit log, env-redirected allowlists, targets, recipe and tunnel state) that records which mutating ops write an audit row; at base all 14 mutating ops do (13 with outcome error, `tunnel close` ok) and no read-only op does. Verified: 392 tests pass (334 base plus 58 new), tsc and biome clean, and `--help` for the top level and every group is byte-identical between the base build and the new build. Follow-up (P03): the test suite still writes to the real audit log by default.
+
+---
+
 ## Session — 2026-07-20 — v0.3.0 (tunnel: local/remote/dynamic SSH port forwarding)
 
 Added a new `tunnel` op group (`open`/`list`/`close`), the first Voltius-inspired feature gap

@@ -1,5 +1,9 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.1 — internal: registry split by group
+
+- Internal change, no user-visible effect.
+
 ## v0.3.0 — New `tunnel` command: forward a port through a server without ever seeing its address
 
 - Added: `sshepherd tunnel open <alias> --kind local --remote <host:port> --duration <seconds> --yes`
