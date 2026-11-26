@@ -53,6 +53,7 @@ const deployRun: OpSpec<DeployPlan | { output: string }> = {
   mutating: true,
   exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
+  truncateKeeps: 'tail',
   output: 'raw',
   buildRemote: (ctx) => {
     if (optBool(ctx, 'dry-run', false)) {
@@ -93,6 +94,7 @@ const deployRollback: OpSpec<{ output: string }> = {
   mutating: true,
   exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
+  truncateKeeps: 'tail',
   output: 'raw',
   buildRemote: (ctx) => buildRollbackCommand(loadRecipeFromCtx(ctx)),
   shape: (parsed) => ({ output: (parsed as string).trim() }),
@@ -109,6 +111,7 @@ const deployLogs: OpSpec<{ output: string }> = {
   mutating: false,
   exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
+  truncateKeeps: 'tail',
   output: 'raw',
   buildRemote: (ctx) => {
     const recipe = loadRecipeFromCtx(ctx);
@@ -130,6 +133,7 @@ const deployMigrate: OpSpec<{ output: string }> = {
   mutating: true,
   exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
+  truncateKeeps: 'tail',
   output: 'raw',
   buildRemote: (ctx) => {
     const recipe = loadRecipeFromCtx(ctx);

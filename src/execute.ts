@@ -1,9 +1,27 @@
-import { type AuditOutcome, auditMutating, confirmGate } from './audit.ts';
+import {
+  AUDIT_IDENTIFIER_ARGS,
+  type AuditIdentifier,
+  type AuditOutcome,
+  auditMutating,
+  confirmGate,
+} from './audit.ts';
 import { describeError, errorInfo, fillNext } from './errors.ts';
-import { MAX_PARTIAL_STDOUT_CHARS, MAX_TIMEOUT_SEC } from './limits.ts';
+import {
+  DEFAULT_MAX_BYTES,
+  MAX_PARTIAL_STDOUT_CHARS,
+  MAX_STDOUT_BYTES,
+  MAX_TIMEOUT_SEC,
+} from './limits.ts';
 import { assertOpPositionals, optBool } from './op-args.ts';
 import { enforceAllowlist, loadScrubExtraPatterns, revealKeysOf } from './ops/config.ts';
-import { buildEnvelope, splitNdjson } from './output.ts';
+import {
+  buildEnvelope,
+  capEnvelope,
+  limitItems,
+  selectFields,
+  serializeJson,
+  splitNdjson,
+} from './output.ts';
 import { isEnvFile, maskEnvContent, type ScrubOptions, scrub } from './scrub.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { run, type TransportDeps } from './transport.ts';
@@ -111,14 +129,21 @@ export interface ExecuteDeps {
   timeoutSec?: number;
   /** Overrides `auditMutating`'s log path — tests point this at a temp file. */
   auditLogPath?: string;
+  /** The CLI's `--max-bytes`: the printed envelope never exceeds it (default `DEFAULT_MAX_BYTES`). */
+  maxBytes?: number;
+  /** The CLI's `--fields`, parsed: dot paths of `data` to keep. */
+  fields?: string[][];
+  /** The CLI's `--limit`: items kept per list in `data`. */
+  limit?: number;
 }
 
-function parseByMode(mode: OutputMode, stdout: string): unknown {
+function parseByMode(mode: OutputMode, stdout: string, cutShort: boolean): unknown {
   if (mode === 'native-json') {
     return stdout.trim().length > 0 ? JSON.parse(stdout) : null;
   }
   if (mode === 'ndjson') {
-    return splitNdjson(stdout);
+    // A cut-short stream ends mid-line; the unfinished line is not JSON and is dropped.
+    return splitNdjson(cutShort ? stdout.slice(0, stdout.lastIndexOf('\n') + 1) : stdout);
   }
   if (mode === 'raw') {
     return stdout;
@@ -126,17 +151,70 @@ function parseByMode(mode: OutputMode, stdout: string): unknown {
   return mode.parse(stdout);
 }
 
+/** The names (recipe, target, container, unit) that say what an audited op ran on. Anything the op
+ *  resolved from local config and hides from its envelope (`hiddenArgs`) stays out of the log too. */
+function auditIdentifiers(op: OpSpec, ctx: OpContext): Partial<Record<AuditIdentifier, string>> {
+  const identifiers: Partial<Record<AuditIdentifier, string>> = {};
+  for (const name of AUDIT_IDENTIFIER_ARGS) {
+    const value = ctx.args[name];
+    if (typeof value === 'string' && value.length > 0 && !op.hiddenArgs?.includes(name)) {
+      identifiers[name] = value;
+    }
+  }
+  return identifiers;
+}
+
 function auditFor(
   deps: ExecuteDeps,
+  op: OpSpec,
   alias: string,
   command: string,
   ctx: OpContext,
   outcome: AuditOutcome,
+  envelope: Envelope<unknown>,
 ): void {
+  const ran = outcome !== 'refused';
   auditMutating(
-    { alias, command, argsSummary: ctx.args, outcome },
+    {
+      alias,
+      command,
+      argsSummary: ctx.args,
+      outcome,
+      identifiers: auditIdentifiers(op, ctx),
+      durationMs: envelope.duration_ms,
+      remoteExit: ran
+        ? (envelope.error?.remote_exit ?? (envelope.error === null ? 0 : undefined))
+        : undefined,
+      errorCode: envelope.error?.code,
+      bytes: Buffer.byteLength(serializeJson(envelope)),
+    },
     deps.auditLogPath ? { logPath: deps.auditLogPath } : undefined,
   );
+}
+
+/** `--fields`, `--limit`, then `--max-bytes`, in that order, on the scrubbed envelope: the cap
+ *  measures what the caller selected, and runs last so it cannot cut ahead of the scrubber. */
+function shapeOutput(
+  op: OpSpec,
+  envelope: Envelope<unknown>,
+  deps: ExecuteDeps,
+  cutAtTransport: boolean,
+): Envelope<unknown> {
+  let shaped = envelope;
+  let cut = cutAtTransport;
+  if (deps.fields !== undefined) {
+    const { data, unmatched } = selectFields(shaped.data, deps.fields);
+    shaped = { ...shaped, data, ...(unmatched.length > 0 ? { fields_unmatched: unmatched } : {}) };
+  }
+  if (deps.limit !== undefined) {
+    const limited = limitItems(shaped.data, deps.limit);
+    shaped = { ...shaped, data: limited.data };
+    cut = cut || limited.cut;
+  }
+  if (cut) {
+    shaped = { ...shaped, output_truncated: true };
+  }
+  return capEnvelope(shaped, deps.maxBytes ?? DEFAULT_MAX_BYTES, op.truncateKeeps ?? 'head');
 }
 
 /** Every `OpError` the op raises, on its way into an envelope. */
@@ -156,6 +234,8 @@ interface OpResult {
   outcome: AuditOutcome;
   /** A failed command's stderr (non-255 exits only — the transport blanks it for 255). */
   commandStderr?: string;
+  /** The transport stopped reading at `MAX_STDOUT_BYTES`. */
+  outputTruncated?: boolean;
 }
 
 /**
@@ -180,9 +260,11 @@ export async function executeOp(
   const startedAtMs = Date.now();
   const command = `${op.group} ${op.name}`;
   const requiresConfirm = op.mutating && !optBool(ctx, 'dry-run', false);
+  const audited = requiresConfirm || (!op.mutating && op.exposes === 'content');
   let outcome: AuditOutcome = 'error';
   let envelope: Envelope<unknown>;
   let commandStderr = '';
+  let cutAtTransport = false;
   let scrubOptions: ScrubOptions = {};
   try {
     scrubOptions = scrubOptionsFor(op, ctx);
@@ -190,6 +272,7 @@ export async function executeOp(
       envelope,
       outcome,
       commandStderr = '',
+      outputTruncated: cutAtTransport = false,
     } = await runOp(op, ctx, deps, command, requiresConfirm, startedAtMs));
   } catch (err) {
     const error = err instanceof OpError ? opErrorInfo(err) : internalErrorInfo(command, err);
@@ -202,11 +285,12 @@ export async function executeOp(
     });
   }
   envelope = scrubEnvelope(op, ctx, envelope, commandStderr, scrubOptions);
-  if (!requiresConfirm) {
+  envelope = shapeOutput(op, envelope, deps, cutAtTransport);
+  if (!audited) {
     return envelope;
   }
   try {
-    auditFor(deps, ctx.alias, command, ctx, outcome);
+    auditFor(deps, op, ctx.alias, command, ctx, outcome, envelope);
   } catch {
     return unauditedEnvelope(envelope, command, outcome);
   }
@@ -283,7 +367,9 @@ async function runOp(
     remoteCmd,
     effectiveTimeoutSec(op, deps),
     withConfigPath(deps),
+    { stdoutCap: op.mutating ? 'drain-tail' : 'kill-head' },
   );
+  const outputTruncated = result.raw.outputTruncated === true;
   if (result.error) {
     const data =
       op.shapeError?.(result.raw, ctx) ??
@@ -294,11 +380,22 @@ async function runOp(
     return {
       ...finish(data, error, 'error'),
       commandStderr: op.exposeStderr === false ? '' : result.raw.commandStderr,
+      outputTruncated,
     };
   }
 
-  const parsed = parseByMode(op.output, result.raw.stdout);
-  return finish(op.shape(parsed, ctx), null, 'ok');
+  try {
+    const parsed = parseByMode(op.output, result.raw.stdout, outputTruncated);
+    return { ...finish(op.shape(parsed, ctx), null, 'ok'), outputTruncated };
+  } catch (err) {
+    if (!outputTruncated) {
+      throw err;
+    }
+    throw new OpError(
+      'OUTPUT_TOO_LARGE',
+      `'${command}' printed more than ${MAX_STDOUT_BYTES} bytes, so its output was cut before it could be parsed`,
+    );
+  }
 }
 
 /** The transport validates an alias against the same ssh config `hosts list` reads. */

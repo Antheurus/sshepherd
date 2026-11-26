@@ -9,6 +9,8 @@ import type { TransportDeps } from './transport.ts';
  * half is the transport discarding ssh stderr before it ever reaches an ErrorInfo).
  */
 export interface Envelope<T> {
+  /** Shape version of this envelope; fields are only ever added within a version. */
+  schema_version: 1;
   ok: boolean;
   alias: string;
   ran_at: string;
@@ -18,6 +20,10 @@ export interface Envelope<T> {
   scrubbed: number;
   data: T | null;
   error: ErrorInfo | null;
+  /** Present (true) only when `--max-bytes`, `--limit` or the transport cap cut the output. */
+  output_truncated?: true;
+  /** `--fields` paths that matched nothing in `data`; present only when some did not. */
+  fields_unmatched?: string[];
 }
 
 export type SshErrorCode =
@@ -35,6 +41,7 @@ export type SshErrorCode =
   | 'UNKNOWN_SUBGROUP'
   | 'CONFIG_PARSE_ERROR'
   | 'AUDIT_WRITE_FAILED'
+  | 'OUTPUT_TOO_LARGE'
   | 'INTERNAL_ERROR';
 
 /**
@@ -120,6 +127,8 @@ export interface RawResult {
   transportStderr: string;
   commandStderr: string;
   timedOut: boolean;
+  /** stdout hit `MAX_STDOUT_BYTES`: `stdout` is the head (or, for a mutating op, the tail) of the output. */
+  outputTruncated?: boolean;
 }
 
 /** What an op's shaped output can carry from the remote: `none` (constants, local state, echoed
@@ -171,6 +180,9 @@ export interface OpSpec<T = unknown> {
    *  very content the op masks (`files cat`, `config get`). */
   exposeStderr?: boolean;
   timeoutSec: number;
+  /** Which end of an over-long payload survives a byte cap: `tail` for output whose last lines
+   *  decide the outcome (deploy steps); default `head`. */
+  truncateKeeps?: 'head' | 'tail';
   output: OutputMode;
   buildRemote: (ctx: OpContext) => string | null;
   shape: (parsed: unknown, ctx: OpContext) => T;

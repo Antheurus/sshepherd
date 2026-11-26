@@ -1,7 +1,8 @@
 {
+  "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T15:48:26.648Z",
+  "ran_at": "2026-11-26T16:14:54.083Z",
   "command": "files tail",
   "duration_ms": 27,
   "scrubbed": 0,

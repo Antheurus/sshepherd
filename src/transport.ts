@@ -2,7 +2,12 @@ import { mkdirSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describeError, errorInfo } from './errors.ts';
-import { CONNECT_TIMEOUT_SEC, CONTROL_PERSIST_SEC, KILL_AFTER_SEC } from './limits.ts';
+import {
+  CONNECT_TIMEOUT_SEC,
+  CONTROL_PERSIST_SEC,
+  KILL_AFTER_SEC,
+  MAX_STDOUT_BYTES,
+} from './limits.ts';
 import { configMayDeclare, readSshConfigNames } from './parsers/ssh-config.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { didYouMean } from './suggest.ts';
@@ -38,13 +43,28 @@ export interface SpawnOutcome {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /** stdout reached `MAX_STDOUT_BYTES`; `stdout` holds the kept part, `code` is then the kill's. */
+  stdoutTruncated?: boolean;
+}
+
+/** What to do when stdout reaches `MAX_STDOUT_BYTES`. `kill-head` stops the ssh client and keeps
+ *  the first bytes (a read op: the rest is not wanted). `drain-tail` keeps reading, keeps the last
+ *  bytes and never kills: a mutating op must run to its end, and its last lines say how it ended. */
+export type StdoutCapPolicy = 'kill-head' | 'drain-tail';
+
+export interface RunnerOptions {
+  stdoutCap?: StdoutCapPolicy;
 }
 
 /**
  * Injected in tests with a fake implementation so transport/classification tests never
  * touch a real network or a real `ssh` binary.
  */
-export type SshRunner = (args: string[], timeoutMs: number) => Promise<SpawnOutcome>;
+export type SshRunner = (
+  args: string[],
+  timeoutMs: number,
+  options?: RunnerOptions,
+) => Promise<SpawnOutcome>;
 
 export interface TransportDeps {
   runner: SshRunner;
@@ -253,6 +273,7 @@ export async function run(
   remoteCmd: string,
   timeoutSec: number,
   deps: TransportDeps = { runner: defaultRunner },
+  options: RunnerOptions = {},
 ): Promise<TransportResult> {
   const unknownAlias = await unknownAliasError(alias, deps);
   if (unknownAlias) {
@@ -298,15 +319,20 @@ export async function run(
       remoteCmd,
     ],
     timeoutSec * 1_000 + LOCAL_TIMEOUT_BUFFER_MS,
+    options,
   );
 
+  // A kill-head cut is ours, not the remote command's: its exit code says nothing, so the
+  // call counts as a clean one that returned a prefix.
+  const killedAtCap = outcome.stdoutTruncated === true && options.stdoutCap !== 'drain-tail';
   // ssh exits 255 for its own transport failures; any other code is the remote command's.
   const raw: RawResult = {
-    code: outcome.code,
+    code: killedAtCap ? 0 : outcome.code,
     stdout: outcome.stdout,
-    transportStderr: outcome.code === 255 ? outcome.stderr : '',
-    commandStderr: outcome.code === 255 ? '' : outcome.stderr,
+    transportStderr: raw255(outcome, killedAtCap) ? outcome.stderr : '',
+    commandStderr: raw255(outcome, killedAtCap) ? '' : outcome.stderr,
     timedOut: outcome.timedOut,
+    ...(outcome.stdoutTruncated ? { outputTruncated: true } : {}),
   };
 
   return { raw, error: classify(raw, { timeoutSec, elapsedMs: Date.now() - startedAtMs }) };
@@ -357,7 +383,67 @@ export function sshConfigArgs(): string[] {
   return override && override.length > 0 ? ['-F', override] : [];
 }
 
-async function defaultRunner(args: string[], timeoutMs: number): Promise<SpawnOutcome> {
+/** A killed client exits non-zero with whatever stderr it had; that is not an ssh failure. */
+function raw255(outcome: SpawnOutcome, killedAtCap: boolean): boolean {
+  return outcome.code === 255 && !killedAtCap;
+}
+
+interface CappedRead {
+  text: string;
+  truncated: boolean;
+}
+
+/** Reads `stream` keeping at most `cap` bytes: the first ones (`head`, stops reading and calls
+ *  `onCap` at the cap) or the last ones (`tail`, reads to the end). */
+export async function readCapped(
+  stream: ReadableStream<Uint8Array>,
+  cap: number,
+  keep: 'head' | 'tail',
+  onCap: () => void,
+): Promise<CappedRead> {
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  let kept = 0;
+  let truncated = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    const chunk = Buffer.from(value);
+    if (keep === 'head') {
+      const room = cap - kept;
+      if (chunk.length <= room) {
+        chunks.push(chunk);
+        kept += chunk.length;
+        continue;
+      }
+      chunks.push(chunk.subarray(0, room));
+      truncated = true;
+      onCap();
+      await reader.cancel();
+      break;
+    }
+    chunks.push(chunk);
+    kept += chunk.length;
+    while (chunks.length > 1 && kept - (chunks[0]?.length ?? 0) >= cap) {
+      kept -= chunks.shift()?.length ?? 0;
+      truncated = true;
+    }
+  }
+  let all = Buffer.concat(chunks);
+  if (all.length > cap) {
+    truncated = true;
+    all = keep === 'head' ? all.subarray(0, cap) : all.subarray(all.length - cap);
+  }
+  return { text: all.toString('utf8'), truncated };
+}
+
+async function defaultRunner(
+  args: string[],
+  timeoutMs: number,
+  options: RunnerOptions = {},
+): Promise<SpawnOutcome> {
   const proc = Bun.spawn(['ssh', ...sshConfigArgs(), ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
@@ -370,12 +456,13 @@ async function defaultRunner(args: string[], timeoutMs: number): Promise<SpawnOu
     proc.kill();
   }, timeoutMs);
 
+  const keep = options.stdoutCap === 'drain-tail' ? 'tail' : 'head';
   const [stdout, stderr, code] = await Promise.all([
-    new Response(proc.stdout).text(),
+    readCapped(proc.stdout, MAX_STDOUT_BYTES, keep, () => proc.kill()),
     new Response(proc.stderr).text(),
     proc.exited,
   ]);
   clearTimeout(timer);
 
-  return { code, stdout, stderr, timedOut };
+  return { code, stdout: stdout.text, stderr, timedOut, stdoutTruncated: stdout.truncated };
 }

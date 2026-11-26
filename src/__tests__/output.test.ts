@@ -47,7 +47,17 @@ describe('buildEnvelope', () => {
 
     const keys = Object.keys(envelope);
     expect(keys.sort()).toEqual(
-      ['ok', 'alias', 'ran_at', 'command', 'duration_ms', 'scrubbed', 'data', 'error'].sort(),
+      [
+        'schema_version',
+        'ok',
+        'alias',
+        'ran_at',
+        'command',
+        'duration_ms',
+        'scrubbed',
+        'data',
+        'error',
+      ].sort(),
     );
   });
 });

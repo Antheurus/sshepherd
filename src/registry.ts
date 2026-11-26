@@ -1,3 +1,4 @@
+import { auditOps } from './ops/audit.ts';
 import { checkOps } from './ops/check.ts';
 import { configOps } from './ops/config.ts';
 import { dbOps } from './ops/db.ts';
@@ -21,6 +22,7 @@ const REGISTRY: OpSpec[] = [
   ...deployOps,
   ...securityOps,
   ...tunnelOps,
+  ...auditOps,
 ];
 
 export function getOp(group: string, name: string): OpSpec | undefined {

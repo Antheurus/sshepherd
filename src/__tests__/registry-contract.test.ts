@@ -119,6 +119,7 @@ function auditRows(logPath: string): Array<{ command: string; outcome: string }>
 interface Probe {
   name: string;
   mutating: boolean;
+  exposes: OpSpec['exposes'];
   rows: Array<{ command: string; outcome: string }>;
 }
 
@@ -138,7 +139,12 @@ async function probe(op: OpSpec, index: number): Promise<Probe> {
   } catch {
     // a throw before the audit line is itself the observed state for this op
   }
-  return { name: `${op.group} ${op.name}`, mutating: op.mutating, rows: auditRows(auditLogPath) };
+  return {
+    name: `${op.group} ${op.name}`,
+    mutating: op.mutating,
+    exposes: op.exposes,
+    rows: auditRows(auditLogPath),
+  };
 }
 
 describe('registry contract — every op in listOps()', () => {
@@ -225,13 +231,14 @@ describe('registry contract — every op in listOps()', () => {
     });
   }
 
-  test('audit rows through executeOp: read-only ops write none, mutating ops are the recorded set', async () => {
+  test('audit rows through executeOp: read-only ops write one only when they expose content, mutating ops are the recorded set', async () => {
     const probes: Probe[] = [];
     for (const [index, op] of ops.entries()) {
       probes.push(await probe(op, index));
     }
     for (const p of probes.filter((entry) => !entry.mutating)) {
-      expect({ op: p.name, rows: p.rows }).toEqual({ op: p.name, rows: [] });
+      const expected = p.exposes === 'content' ? 1 : 0;
+      expect({ op: p.name, rows: p.rows.length }).toEqual({ op: p.name, rows: expected });
     }
     const mutating = probes.filter((entry) => entry.mutating);
     const audited = mutating.filter((p) => p.rows.length === 1).map((p) => p.name);

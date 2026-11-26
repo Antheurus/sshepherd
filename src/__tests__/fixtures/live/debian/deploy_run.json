@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T16:14:47.826Z",
+  "command": "deploy run",
+  "duration_ms": 25,
+  "scrubbed": 0,
+  "data": {
+    "output": "smoke-deploy-ok"
+  },
+  "error": null
+}

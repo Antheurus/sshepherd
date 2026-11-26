@@ -1,5 +1,15 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.6 — Output limits, field selection and a readable audit log
+
+- No command prints more than 64 KiB by default (`--max-bytes <n>`, 8,192 to 2,097,152). A cut is marked `output_truncated: true`; errors are never cut. A container that logs megabytes now returns a readable slice instead of flooding the session, and the connection stays usable afterwards.
+- `--fields a,b.c` keeps only the parts of `data` you name (`--fields data.rows` is accepted too) and `--limit <n>` keeps the first n items of a list. A field that matched nothing is listed in `fields_unmatched`. `--tail` must be 1 to 5000.
+- Every response carries `schema_version: 1`. JSON Schemas for the envelope and for each command are in `docs/schema/`.
+- New `sshepherd audit tail [--n 50] [--alias X] [--op "deploy run"]` shows the newest audit rows: what ran (recipe, target, container or unit name), how long it took, the remote exit status and a sha256 of the arguments. Argument values are never logged. Commands that show content (`db query`, `files cat`, logs) are audited too, and the log rotates at 50 MiB keeping 5 files.
+- A deploy that prints more than 2 MiB is never interrupted; its last 64 KiB is returned.
+- New error `OUTPUT_TOO_LARGE`: a command printed more than sshepherd reads and the result could not be parsed.
+- Internal: unit tests no longer read your real allowlist files.
+
 ## v0.4.0-rc.5 — Secrets in command output are masked everywhere
 
 - Every command's output now passes one secret filter: passwords, tokens, API keys, JWTs, private keys, the password inside connection URLs and Bearer tokens show as `***`, while ordinary values such as `PORT=3000` or a database host stay visible. Each response says how many values were masked (`scrubbed`).

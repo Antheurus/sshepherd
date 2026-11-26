@@ -3,8 +3,15 @@
 import { readFileSync } from 'node:fs';
 import { describeError } from './errors.ts';
 import { internalErrorInfo } from './execute.ts';
-import { MAX_TIMEOUT_SEC } from './limits.ts';
-import { buildEnvelope, printJson, printPretty } from './output.ts';
+import {
+  CEILING_MAX_BYTES,
+  DEFAULT_MAX_BYTES,
+  MAX_LIMIT_ITEMS,
+  MAX_TAIL_LINES,
+  MAX_TIMEOUT_SEC,
+  MIN_MAX_BYTES,
+} from './limits.ts';
+import { buildEnvelope, parseFieldPaths, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
 import { type ExecuteDeps, executeOp, getOp, listOps, runDoctor } from './registry.ts';
 import { runSetup } from './setup.ts';
@@ -47,6 +54,9 @@ const GLOBAL_FLAGS = [
   '--yes              confirm a mutating op (required — sshepherd never prompts interactively)',
   '--dry-run          deploy run: print the resolved plan, execute nothing',
   `--timeout <sec>    any op: seconds the remote command may run (1-${MAX_TIMEOUT_SEC}; each op has its own default)`,
+  `--max-bytes <n>   any op: the printed JSON never exceeds n bytes (${MIN_MAX_BYTES}-${CEILING_MAX_BYTES}, default ${DEFAULT_MAX_BYTES}); a cut sets output_truncated`,
+  '--fields <a,b.c>   any op: keep only these dot paths of data (a list is walked per item)',
+  `--limit <n>        any op: keep the first n items of data or of each list directly under it (1-${MAX_LIMIT_ITEMS})`,
   '--pretty           render a human table/key-value view instead of JSON',
   '--reveal <keys>    files cat/download: comma-separated env keys to unmask',
   '--from <path>      config put: local file to read + base64-encode (instead of --content-base64)',
@@ -85,7 +95,17 @@ function usageError(message: string, next?: string): OpError {
 }
 
 /** Per-flag parse state for the flags every op accepts; anything else must be an op arg. */
-const GLOBAL_FLAG_NAMES = new Set(['yes', 'dry-run', 'timeout', 'pretty', 'help', 'from']);
+const GLOBAL_FLAG_NAMES = new Set([
+  'yes',
+  'dry-run',
+  'timeout',
+  'pretty',
+  'help',
+  'from',
+  'max-bytes',
+  'fields',
+  'limit',
+]);
 
 // -- argv parsing (mirrors anywrite's src/cli.ts parseFlags) --------------------------------
 // Exported so `setup.ts` reuses the same parsing instead of reinventing it for its own,
@@ -215,6 +235,9 @@ function buildOpContext(
     const args = mapArgsToCtx(op, positionals, flags);
     return { alias: typeof args.alias === 'string' ? args.alias : '', args };
   }
+  if (group === 'audit') {
+    return { alias: '', args: mapArgsToCtx(op, positionals, flags) };
+  }
   if (group === 'db' && action === 'list') {
     return { alias: '', args: mapArgsToCtx(op, positionals, flags) };
   }
@@ -338,18 +361,58 @@ function formatGroupHelp(group: string): string {
 
 // -- dispatch ---------------------------------------------------------------------------------
 
-/** Reads the global `--timeout <sec>`: an integer in 1..MAX_TIMEOUT_SEC, else a string
- *  describing what was wrong (the caller wraps it in an `INVALID_ARGS` envelope). */
-function parseTimeoutFlag(flags: FlagMap): { sec?: number; problem?: string } {
-  const raw = getFlag(flags, 'timeout');
+/** Reads a global integer flag that must lie in `min..max`; a bad value is described in
+ *  `problem` (the caller wraps it in an `INVALID_ARGS` envelope). */
+function parseIntFlag(
+  flags: FlagMap,
+  name: string,
+  min: number,
+  max: number,
+  unit: string,
+): { value?: number; problem?: string } {
+  const raw = getFlag(flags, name);
   if (raw === undefined) {
     return {};
   }
-  const sec = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
-  if (!Number.isInteger(sec) || sec < 1 || sec > MAX_TIMEOUT_SEC) {
-    return { problem: `--timeout must be a whole number of seconds from 1 to ${MAX_TIMEOUT_SEC}` };
+  const value = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isInteger(value) || value < min || value > max) {
+    return { problem: `--${name} must be a whole number of ${unit} from ${min} to ${max}` };
   }
-  return { sec };
+  return { value };
+}
+
+interface GlobalOptions {
+  timeoutSec?: number;
+  maxBytes?: number;
+  limit?: number;
+  fields?: string[][];
+}
+
+/** The flags every op accepts, parsed once; the first malformed one is the `problem`. */
+function parseGlobalOptions(flags: FlagMap): { options: GlobalOptions; problem?: string } {
+  const timeout = parseIntFlag(flags, 'timeout', 1, MAX_TIMEOUT_SEC, 'seconds');
+  const maxBytes = parseIntFlag(flags, 'max-bytes', MIN_MAX_BYTES, CEILING_MAX_BYTES, 'bytes');
+  const limit = parseIntFlag(flags, 'limit', 1, MAX_LIMIT_ITEMS, 'items');
+  const tail = parseIntFlag(flags, 'tail', 1, MAX_TAIL_LINES, 'lines');
+  const rawFields = getFlag(flags, 'fields');
+  const fields = rawFields === undefined ? undefined : parseFieldPaths(rawFields);
+  const problem =
+    timeout.problem ??
+    maxBytes.problem ??
+    limit.problem ??
+    tail.problem ??
+    (fields === null
+      ? '--fields must be dot paths separated by commas, e.g. data.rows,data.id'
+      : undefined);
+  return {
+    options: {
+      timeoutSec: timeout.value,
+      maxBytes: maxBytes.value,
+      limit: limit.value,
+      fields: fields ?? undefined,
+    },
+    problem,
+  };
 }
 
 export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<void> {
@@ -428,14 +491,14 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
   rejectUnknownFlags(op, flags);
   applyConfigPutFromFlag(group, action, flags);
   const ctx = resolveContext(group, action, op, positionals, flags);
-  const timeout = parseTimeoutFlag(flags);
-  if (timeout.problem !== undefined) {
+  const global = parseGlobalOptions(flags);
+  if (global.problem !== undefined) {
     const envelope: Envelope<null> = buildEnvelope({
       alias: ctx.alias,
       command: `${group} ${action}`,
       startedAtMs: Date.now(),
       data: null,
-      error: describeError('INVALID_ARGS', timeout.problem, {
+      error: describeError('INVALID_ARGS', global.problem, {
         next: `sshepherd ${group} ${action} --help`,
       }),
     });
@@ -444,7 +507,7 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
     return;
   }
 
-  const deps: ExecuteDeps = { ...baseDeps, yes: hasFlag(flags, 'yes'), timeoutSec: timeout.sec };
+  const deps: ExecuteDeps = { ...baseDeps, yes: hasFlag(flags, 'yes'), ...global.options };
   const envelope = await executeOp(op, ctx, deps);
   if (hasFlag(flags, 'pretty')) {
     printPretty(envelope);
