@@ -64,3 +64,12 @@ export const AUDIT_KEEP_FILES = 5;
 export const DEFAULT_AUDIT_TAIL = 50;
 /** `audit tail --n` ceiling: 1,000 rows of ~500 bytes fit under `DEFAULT_MAX_BYTES` x 8. */
 export const MAX_AUDIT_TAIL = 1_000;
+/** A dotless target hostname shorter than this (`db`, `app`, `web1`) is not masked as a bare word:
+ *  it is too common a word to mask in prose, and on its own it names no reachable machine. */
+export const MIN_BARE_HOSTNAME_CHARS = 6;
+/** A target user name shorter than this is not masked: two letters match too much (`id`, `pi`
+ *  aside, nothing real is that short) and say nothing about who connects. */
+export const MIN_MASKED_USER_CHARS = 3;
+/** Blanks allowed between an identity keyword and its value (`for  opsuser`, `-p   2222`): a
+ *  bound keeps the context rules linear on a line of spaces; real output never pads more than 8. */
+export const MAX_IDENTITY_GAP_CHARS = 8;

@@ -135,6 +135,38 @@ export function loadRevealAllowlist(path: string = defaultRevealAllowlistPath())
 
 export { REVEAL_DENYLIST_PATTERNS };
 
+/** The `[<alias>.scrub]` table of reveal-allowlist.toml, empty when absent. */
+function aliasScrubTable(alias: string, path: string): Record<string, unknown> {
+  const parsed = readRevealAllowlistFile(path);
+  const aliasTable =
+    typeof parsed[alias] === 'object' && parsed[alias] !== null ? parsed[alias] : {};
+  const scrubTable = (aliasTable as Record<string, unknown>).scrub;
+  return typeof scrubTable === 'object' && scrubTable !== null
+    ? (scrubTable as Record<string, unknown>)
+    : {};
+}
+
+/** `[<alias>.scrub] reveal_addresses = true` keeps that alias's IP literals visible (no `<ip-N>`);
+ *  its own hostname, user and port stay masked whatever this says. Anything but a boolean is refused
+ *  without echoing the value. */
+export function loadRevealAddresses(
+  alias: string,
+  path: string = defaultRevealAllowlistPath(),
+): boolean {
+  const value = aliasScrubTable(alias, path).reveal_addresses;
+  if (value === undefined) {
+    return false;
+  }
+  if (typeof value !== 'boolean') {
+    throw new OpError(
+      'CONFIG_PARSE_ERROR',
+      `reveal-allowlist.toml: [${alias}.scrub] reveal_addresses must be true or false`,
+      { hint: REVEAL_ALLOWLIST_HINT },
+    );
+  }
+  return value;
+}
+
 /** An alias's own extra scrub patterns, from `[<alias>.scrub] extra_patterns = ["regex", ...]`
  *  in reveal-allowlist.toml — the per-alias file that already says what is secret for it. Every
  *  match is masked in that alias's output. A pattern that does not compile is refused by index,
@@ -143,14 +175,7 @@ export function loadScrubExtraPatterns(
   alias: string,
   path: string = defaultRevealAllowlistPath(),
 ): RegExp[] {
-  const parsed = readRevealAllowlistFile(path);
-  const aliasTable =
-    typeof parsed[alias] === 'object' && parsed[alias] !== null ? parsed[alias] : {};
-  const scrubTable = (aliasTable as Record<string, unknown>).scrub;
-  const record =
-    typeof scrubTable === 'object' && scrubTable !== null
-      ? (scrubTable as Record<string, unknown>)
-      : {};
+  const record = aliasScrubTable(alias, path);
   const sources = Array.isArray(record.extra_patterns) ? record.extra_patterns : [];
   return sources
     .filter((source): source is string => typeof source === 'string')

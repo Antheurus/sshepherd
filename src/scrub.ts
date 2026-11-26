@@ -8,6 +8,12 @@
  * that happen to be values mask ordinary prose.
  */
 
+import {
+  MAX_IDENTITY_GAP_CHARS,
+  MIN_BARE_HOSTNAME_CHARS,
+  MIN_MASKED_USER_CHARS,
+} from './limits.ts';
+
 export const MASK = '***';
 export const ENV_MASK = '***MASKED***';
 
@@ -288,6 +294,14 @@ const SHAPE_RULES: ShapeRule[] = [
   },
 ];
 
+/** The alias's own connection identity, from the `ssh -G` the transport already runs to validate
+ *  the alias. A port is present only when it is not 22, a hostname only when it is not the alias. */
+export interface ConnectionIdentity {
+  hostname?: string;
+  user?: string;
+  port?: string;
+}
+
 export interface ScrubOptions {
   /** Keys a `--reveal` already cleared (denylist + reveal-allowlist): their lines are left as-is. */
   revealKeys?: ReadonlySet<string>;
@@ -296,6 +310,228 @@ export interface ScrubOptions {
   /** Exact strings masked wherever they stand as a whole word — the db connection fields an
    *  error echoes (`role "<user>" does not exist`), which an envelope never carries. */
   literals?: string[];
+  /** Masked as `<host>`/`<user>`/`<port>` wherever it appears; no per-alias setting turns it off. */
+  identity?: ConnectionIdentity;
+  /** Every other non-loopback, specified IP literal becomes `<ip-N>`, numbered per `scrub` call.
+   *  Only the envelope pass sets it (`[<alias>.scrub] reveal_addresses = true` clears it): a file
+   *  `files download` writes to disk is the user's own bytes and keeps its addresses. */
+  maskAddresses?: boolean;
+}
+
+const HOST_MASK = '<host>';
+const USER_MASK = '<user>';
+const PORT_MASK = '<port>';
+
+const OCTET = String.raw`(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)`;
+const IPV4 = String.raw`(?:${OCTET}\.){3}${OCTET}`;
+const IPV4_EXACT = new RegExp(`^${IPV4}$`);
+const HEX_GROUP = /^[0-9A-Fa-f]{1,4}$/;
+
+/** One pass for both families, so `<ip-N>` numbers follow first appearance. IPv6: two to seven
+ *  `:`s between hex groups of at most four digits (an optional dotted IPv4 tail), starting where no
+ *  word character, `.` or `:` precedes — `ipv6Groups` decides; a MAC (six groups, no `::`) and a
+ *  `12:34:56` time never qualify. IPv4: four octets with no leading zero, not preceded by a word
+ *  character or `.` and not followed by one or by `.<digit>` — so `1.2.3.4.5`, `v10.0.0.1` and
+ *  `nginx:1.25.3` stay, while `addr:192.0.2.1` is masked. A `/24` or `:443` after it stays visible. */
+const ADDRESS_CANDIDATE = new RegExp(
+  String.raw`(?<![\w.:])([0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?:\.\d{1,3}){0,3})|(?<![\w.])(${IPV4})(?![\w]|\.\d)`,
+  'g',
+);
+
+/** The eight 16-bit groups of an IPv6 literal, or null when it is not one. A `::` form needs a
+ *  group of three or more hex digits or an IPv4 tail, so `a::b` and `ab::cd` (Rust and C++ paths)
+ *  are not addresses — nor are `::1` and `::`, which are kept anyway. */
+function ipv6Groups(text: string): number[] | null {
+  let body = text;
+  const lastColon = body.lastIndexOf(':');
+  const tail = body.slice(lastColon + 1);
+  let v4: number[] = [];
+  if (tail.includes('.')) {
+    if (!IPV4_EXACT.test(tail)) {
+      return null;
+    }
+    const [a = 0, b = 0, c = 0, d = 0] = tail.split('.').map(Number);
+    v4 = [a * 256 + b, c * 256 + d];
+    body = body.slice(0, lastColon + 1);
+    if (!body.endsWith('::')) {
+      body = body.slice(0, -1);
+    }
+  }
+  const halves = body.split('::');
+  if (halves.length > 2) {
+    return null;
+  }
+  const parts = halves.map((half) => (half.length === 0 ? [] : half.split(':')));
+  const groups = parts.flat();
+  if (!groups.every((group) => HEX_GROUP.test(group))) {
+    return null;
+  }
+  const present = groups.length + v4.length;
+  const values = (list: string[]): number[] => list.map((group) => Number.parseInt(group, 16));
+  if (halves.length === 1) {
+    return present === 8 ? [...values(groups), ...v4] : null;
+  }
+  if (present > 7) {
+    return null;
+  }
+  if (v4.length === 0 && !groups.some((group) => group.length >= 3)) {
+    return null;
+  }
+  const [head = [], rest = []] = parts;
+  const zeros = new Array<number>(8 - present).fill(0);
+  return [...values(head), ...zeros, ...values(rest), ...v4];
+}
+
+function isKeptIPv4(address: string): boolean {
+  return address.startsWith('127.') || address === '0.0.0.0';
+}
+
+function isKeptIPv6(groups: number[]): boolean {
+  return groups.slice(0, 7).every((value) => value === 0) && (groups[7] ?? 0) <= 1;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const GAP = `[ \\t]{0,${MAX_IDENTITY_GAP_CHARS}}`;
+/** Between an identity keyword and its value: `=`/`:` with blanks around it, or blanks alone,
+ *  either side optionally quoted (`user=x`, `"user": "x"`, `for user "x"`, `-l x`, `-p2222`). */
+const IDENTITY_SEP = `["']?(?:${GAP}[=:]${GAP}|${GAP})["']?`;
+
+function hostnamePattern(hostname: string): RegExp | null {
+  const escaped = escapeRegExp(hostname);
+  if (IPV4_EXACT.test(hostname)) {
+    return new RegExp(String.raw`(?<![\w.])${escaped}(?![\w]|\.\d)`, 'g');
+  }
+  if (hostname.includes(':')) {
+    return new RegExp(String.raw`(?<![\w.:])${escaped}(?![\w:])`, 'gi');
+  }
+  if (!hostname.includes('.') && hostname.length < MIN_BARE_HOSTNAME_CHARS) {
+    return null;
+  }
+  return new RegExp(String.raw`(?<![\w.-])${escaped}(?![\w-]|\.[\w-])`, 'gi');
+}
+
+/** The user only where it names who connects: `user@`, a URL's `://user:`, `-l user`, `User user`,
+ *  `for user`, `for [invalid] user "user"`, `user=user`, `login: user` — never as a bare word in prose. */
+function userPattern(user: string): RegExp | null {
+  if (user.length < MIN_MASKED_USER_CHARS) {
+    return null;
+  }
+  const escaped = escapeRegExp(user);
+  return new RegExp(
+    String.raw`((?:^|[^\w-])(?:-l|for(?:[ \t]+invalid)?(?:[ \t]+user)?|user(?:name)?|login|logname)${IDENTITY_SEP})${escaped}(?![\w.-])|(?<![\w.-])${escaped}(?=@)|(?<=:\/\/)${escaped}(?=:)`,
+    'gim',
+  );
+}
+
+/** The port only where it is one: `host:port`, `-p port`/`-P port`, `port port`, `Port=port`. */
+function portPattern(port: string): RegExp | null {
+  if (!/^\d+$/.test(port)) {
+    return null;
+  }
+  return new RegExp(
+    String.raw`((?:[\w\]>]:|(?:^|[^\w-])(?:-p|-P|port)${IDENTITY_SEP}))${port}(?!\d)`,
+    'gim',
+  );
+}
+
+interface AddressMasker {
+  /** Masks one string; `keyOnly` (an object key) skips the context rules and a dotless hostname,
+   *  so a fixed field name can never be rewritten. */
+  apply: (text: string, keyOnly: boolean) => ScrubResult<string>;
+}
+
+/** Rule 1 (the alias's identity) then rule 2 (every other address), sharing one `<ip-N>` table. */
+function createAddressMasker(options: ScrubOptions): AddressMasker | null {
+  const identity = options.identity ?? {};
+  const hostname = identity.hostname ? hostnamePattern(identity.hostname) : null;
+  const hostnameInKeys =
+    hostname !== null && identity.hostname !== undefined && /[.:]/.test(identity.hostname);
+  const user = identity.user ? userPattern(identity.user) : null;
+  const port = identity.port ? portPattern(identity.port) : null;
+  const maskAddresses = options.maskAddresses === true;
+  if (hostname === null && user === null && port === null && !maskAddresses) {
+    return null;
+  }
+  const tokens = new Map<string, string>();
+  const tokenFor = (address: string): string => {
+    const key = address.toLowerCase();
+    let token = tokens.get(key);
+    if (token === undefined) {
+      token = `<ip-${tokens.size + 1}>`;
+      tokens.set(key, token);
+    }
+    return token;
+  };
+  const maskOneAddress = (
+    match: string,
+    v6: string | undefined,
+    v4: string | undefined,
+    offset: number,
+    whole: string,
+  ): string => {
+    if (v4 !== undefined) {
+      return isKeptIPv4(v4) ? match : tokenFor(v4);
+    }
+    const candidate = v6 ?? '';
+    const next = whole[offset + match.length] ?? '';
+    const groups = /[\w:]/.test(next) ? null : ipv6Groups(candidate);
+    if (groups === null) {
+      const tail = /(?<=:)(?:\d{1,3}\.){3}\d{1,3}$/.exec(candidate)?.[0];
+      if (tail !== undefined && IPV4_EXACT.test(tail) && !isKeptIPv4(tail) && !/[\w:]/.test(next)) {
+        return `${candidate.slice(0, -tail.length)}${tokenFor(tail)}`;
+      }
+      return match;
+    }
+    return isKeptIPv6(groups) ? match : tokenFor(candidate);
+  };
+  return {
+    apply: (text, keyOnly) => {
+      let out = text;
+      let count = 0;
+      const replaceCounted = (
+        pattern: RegExp | null,
+        mask: (...args: string[]) => string,
+      ): void => {
+        if (pattern === null) {
+          return;
+        }
+        out = out.replace(pattern, (...args: unknown[]) => {
+          const groups = args.slice(0, -2).map((arg) => (typeof arg === 'string' ? arg : ''));
+          count += 1;
+          return mask(...groups);
+        });
+      };
+      if (!keyOnly || hostnameInKeys) {
+        replaceCounted(hostname, () => HOST_MASK);
+      }
+      if (!keyOnly) {
+        replaceCounted(user, (_m, lead) => `${lead}${USER_MASK}`);
+        replaceCounted(port, (_m, lead) => `${lead}${PORT_MASK}`);
+      }
+      if (maskAddresses) {
+        out = out.replace(
+          ADDRESS_CANDIDATE,
+          (
+            match: string,
+            v6: string | undefined,
+            v4: string | undefined,
+            offset: number,
+            whole: string,
+          ) => {
+            const masked = maskOneAddress(match, v6, v4, offset, whole);
+            if (masked !== match) {
+              count += 1;
+            }
+            return masked;
+          },
+        );
+      }
+      return { value: out, count };
+    },
+  };
 }
 
 export interface ScrubResult<T> {
@@ -337,8 +573,16 @@ function protectRevealedLines(text: string, revealKeys: ReadonlySet<string>): [s
   return [protectedText, kept];
 }
 
-/** Masks every secret in one string; `count` is how many values were replaced. */
+/** Masks every secret in one string, then its addresses; `count` is how many values were replaced. */
 export function scrubText(text: string, options: ScrubOptions = {}): ScrubResult<string> {
+  return scrubTextWith(text, options, createAddressMasker(options));
+}
+
+function scrubTextWith(
+  text: string,
+  options: ScrubOptions,
+  addresses: AddressMasker | null,
+): ScrubResult<string> {
   const revealKeys = options.revealKeys ?? new Set<string>();
   let out = text;
   let count = 0;
@@ -422,6 +666,11 @@ export function scrubText(text: string, options: ScrubOptions = {}): ScrubResult
   if (kept.length > 0) {
     out = out.replace(/\uE000(\d+)\uE001/g, (_m, index: string) => kept[Number(index)] ?? '');
   }
+  if (addresses !== null) {
+    const masked = addresses.apply(out, false);
+    out = masked.value;
+    count += masked.count;
+  }
   return { value: out, count };
 }
 
@@ -432,19 +681,30 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /**
  * Walks any shaped payload: every string goes through `scrubText`, and every string or number
  * under a secret key name (`{"password": 123}`, `{"tokens": ["x"]}`, `{"password_hash": {...}}`
- * from a `db query` row) is masked whole, at any depth. Returns a copy; the input is never mutated.
+ * from a `db query` row) is masked whole, at any depth. Object keys get the address rules only
+ * (a `docker inspect` map keyed by IP). One `<ip-N>` table spans the whole value, so the same
+ * address carries the same token in `data` and `error`. Returns a copy; the input is never mutated.
  */
 export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
   let count = 0;
   const revealKeys = options.revealKeys ?? new Set<string>();
   const underSecret = (key: string): boolean => isSecretKey(key) && !revealKeys.has(key);
+  const addresses = createAddressMasker(options);
+  const maskKey = (key: string): string => {
+    if (addresses === null) {
+      return key;
+    }
+    const masked = addresses.apply(key, true);
+    count += masked.count;
+    return masked.value;
+  };
   const walk = (node: unknown, secret: boolean): unknown => {
     if (typeof node === 'string') {
       if (secret && node.length > 0 && node !== MASK) {
         count += 1;
         return MASK;
       }
-      const result = scrubText(node, options);
+      const result = scrubTextWith(node, options, addresses);
       count += result.count;
       return result.value;
     }
@@ -458,7 +718,7 @@ export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
     if (isPlainObject(node)) {
       const copy: Record<string, unknown> = {};
       for (const [childKey, child] of Object.entries(node)) {
-        copy[childKey] = walk(child, secret || underSecret(childKey));
+        copy[maskKey(childKey)] = walk(child, secret || underSecret(childKey));
       }
       return copy;
     }

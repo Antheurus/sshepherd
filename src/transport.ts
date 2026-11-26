@@ -9,6 +9,7 @@ import {
   MAX_STDOUT_BYTES,
 } from './limits.ts';
 import { configMayDeclare, readSshConfigNames } from './parsers/ssh-config.ts';
+import type { ConnectionIdentity } from './scrub.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { didYouMean } from './suggest.ts';
 import type { ErrorInfo, RawResult } from './types.ts';
@@ -77,6 +78,8 @@ export interface TransportDeps {
 export interface TransportResult {
   raw: RawResult;
   error: ErrorInfo | null;
+  /** What `ssh -G` resolved the alias to — handed to the scrubber to mask, never put in an envelope. */
+  identity?: ConnectionIdentity;
 }
 
 export { errorInfo };
@@ -175,26 +178,49 @@ function socketPath(alias: string): string {
   return full;
 }
 
+/** The hostname (unless it is the alias itself), user and non-22 port `ssh -G` printed. */
+function identityOf(sshG: string, alias: string): ConnectionIdentity {
+  const field = (name: string): string | undefined =>
+    new RegExp(`^${name}\\s+(\\S+)`, 'im').exec(sshG)?.[1];
+  const hostname = field('hostname');
+  const user = field('user');
+  const port = field('port');
+  return {
+    ...(hostname !== undefined && hostname.toLowerCase() !== alias.toLowerCase()
+      ? { hostname }
+      : {}),
+    ...(user !== undefined ? { user } : {}),
+    ...(port !== undefined && port !== '22' ? { port } : {}),
+  };
+}
+
 /** `ssh -G <anything>` exits 0 even for a name no config declares — it just echoes the name back
  *  as the hostname. So an alias is unknown when `-G` fails, or when it resolved to itself AND
  *  nothing in the config (followed through `Include`) can apply to it: no literal `Host` entry,
- *  no matching wildcard `Host` line, no `Match` block. The hostname is compared and dropped,
- *  never kept or returned. */
-async function unknownAliasError(alias: string, deps: TransportDeps): Promise<ErrorInfo | null> {
+ *  no matching wildcard `Host` line, no `Match` block. A known alias's hostname, user and port are
+ *  kept only as the scrubber's `identity`, never returned in an error or a result. */
+async function resolveAlias(
+  alias: string,
+  deps: TransportDeps,
+): Promise<{ error: ErrorInfo | null; identity: ConnectionIdentity }> {
   const result = await deps.runner(['-G', alias], VALIDATE_TIMEOUT_MS);
   const resolved = result.code === 0 && result.stdout.trim().length > 0;
   const resolvedHost = /^hostname\s+(\S+)/im.exec(result.stdout)?.[1];
   const echoed = resolvedHost !== undefined && resolvedHost.toLowerCase() === alias.toLowerCase();
+  const identity = resolved ? identityOf(result.stdout, alias) : {};
   if (resolved && !echoed) {
-    return null;
+    return { error: null, identity };
   }
   const names = readSshConfigNames(deps.sshConfigPath ?? defaultSshConfigPath());
   if (resolved && configMayDeclare(names, alias)) {
-    return null;
+    return { error: null, identity };
   }
-  return describeError('UNKNOWN_ALIAS', `ssh alias '${alias}' is not defined in ssh config`, {
-    did_you_mean: didYouMean(alias, names.aliases),
-  });
+  return {
+    error: describeError('UNKNOWN_ALIAS', `ssh alias '${alias}' is not defined in ssh config`, {
+      did_you_mean: didYouMean(alias, names.aliases),
+    }),
+    identity: {},
+  };
 }
 
 type MasterOutcome = { sock: string; failure: null } | { sock: string; failure: TransportResult };
@@ -277,7 +303,7 @@ export async function run(
   deps: TransportDeps = { runner: defaultRunner },
   options: RunnerOptions = {},
 ): Promise<TransportResult> {
-  const unknownAlias = await unknownAliasError(alias, deps);
+  const { error: unknownAlias, identity } = await resolveAlias(alias, deps);
   if (unknownAlias) {
     return {
       raw: { code: -1, stdout: '', transportStderr: '', commandStderr: '', timedOut: false },
@@ -287,7 +313,7 @@ export async function run(
 
   const master = await ensureMaster(alias, deps.runner);
   if (master.failure) {
-    return master.failure;
+    return { ...master.failure, identity };
   }
 
   const startedAtMs = Date.now();
@@ -337,7 +363,11 @@ export async function run(
     ...(outcome.stdoutTruncated ? { outputTruncated: true } : {}),
   };
 
-  return { raw, error: classify(raw, { timeoutSec, elapsedMs: Date.now() - startedAtMs }) };
+  return {
+    raw,
+    error: classify(raw, { timeoutSec, elapsedMs: Date.now() - startedAtMs }),
+    identity,
+  };
 }
 
 /** Tears down one alias's ControlMaster (`hosts disconnect <alias>`); true when one was up. */

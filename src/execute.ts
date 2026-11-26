@@ -13,7 +13,12 @@ import {
   MAX_TIMEOUT_SEC,
 } from './limits.ts';
 import { assertOpPositionals, optBool } from './op-args.ts';
-import { enforceAllowlist, loadScrubExtraPatterns, revealKeysOf } from './ops/config.ts';
+import {
+  enforceAllowlist,
+  loadRevealAddresses,
+  loadScrubExtraPatterns,
+  revealKeysOf,
+} from './ops/config.ts';
 import {
   buildEnvelope,
   capEnvelope,
@@ -22,7 +27,13 @@ import {
   serializeJson,
   splitNdjson,
 } from './output.ts';
-import { isEnvFile, maskEnvContent, type ScrubOptions, scrub } from './scrub.ts';
+import {
+  type ConnectionIdentity,
+  isEnvFile,
+  maskEnvContent,
+  type ScrubOptions,
+  scrub,
+} from './scrub.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { run, type TransportDeps } from './transport.ts';
 import {
@@ -77,13 +88,15 @@ function stderrTail(scrubbedStderr: string): string {
   return bytes.subarray(bytes.length - STDERR_TAIL_MAX_BYTES).toString('utf8');
 }
 
-/** Keys a `--reveal` named (already cleared by `enforceAllowlist`) plus the alias's own extra
- *  patterns. Loaded before the op runs, so a malformed reveal-allowlist.toml fails the op up front. */
+/** Keys a `--reveal` named (already cleared by `enforceAllowlist`), the alias's own extra
+ *  patterns and its `reveal_addresses` opt-out. Loaded before the op runs, so a malformed
+ *  reveal-allowlist.toml fails the op up front. */
 function scrubOptionsFor(op: OpSpec, ctx: OpContext): ScrubOptions {
   const reveal = op.allowlist?.find((policy) => policy.kind === 'reveal-keys');
   return {
     revealKeys: reveal ? revealKeysOf(ctx, reveal.argName) : new Set(),
     extraPatterns: loadScrubExtraPatterns(ctx.alias),
+    maskAddresses: !loadRevealAddresses(ctx.alias),
   };
 }
 
@@ -97,7 +110,9 @@ function hiddenValues(op: OpSpec, ctx: OpContext): string[] {
  * The one scrub pass over an envelope: the shaped data when the op exposes anything, every
  * error (message, `data`, partial stdout on the error path) and the command's stderr, which then
  * becomes `stderr_tail`. Revealed keys are honoured only on success — an error never unmasks —
- * and an op's `hiddenArgs` values are masked only in errors, where they would be echoed.
+ * and an op's `hiddenArgs` values are masked only in errors, where they would be echoed. The
+ * alias's identity is always masked, and IP literals are too unless the alias opted out (also
+ * when the options never loaded, e.g. a reveal-allowlist.toml that failed to parse).
  */
 function scrubEnvelope(
   op: OpSpec,
@@ -107,10 +122,11 @@ function scrubEnvelope(
   options: ScrubOptions,
 ): Envelope<unknown> {
   const scrubData = envelope.error !== null || op.exposes !== 'none';
+  const withAddresses = { ...options, maskAddresses: options.maskAddresses ?? true };
   const effective =
     envelope.error === null
-      ? options
-      : { ...options, revealKeys: new Set<string>(), literals: hiddenValues(op, ctx) };
+      ? withAddresses
+      : { ...withAddresses, revealKeys: new Set<string>(), literals: hiddenValues(op, ctx) };
   const { value, count } = scrub(
     { data: scrubData ? envelope.data : null, error: envelope.error, stderr: commandStderr },
     effective,
@@ -264,6 +280,8 @@ interface OpResult {
   outputTruncated?: boolean;
   /** Values the op's `shape` masked itself (`Premasked`), added to the scrubber's count. */
   premasked?: number;
+  /** The alias's resolved hostname/user/port, for the scrubber only. */
+  identity?: ConnectionIdentity;
 }
 
 /**
@@ -303,6 +321,7 @@ export async function executeOp(
       commandStderr = '',
       outputTruncated: cutAtTransport = false,
       premasked = 0,
+      identity: scrubOptions.identity,
     } = await runOp(op, ctx, deps, command, requiresConfirm, startedAtMs));
   } catch (err) {
     const error = err instanceof OpError ? opErrorInfo(err) : internalErrorInfo(command, err);
@@ -404,6 +423,7 @@ async function runOp(
     },
   );
   const outputTruncated = result.raw.outputTruncated === true;
+  const { identity } = result;
   if (result.error) {
     const data =
       op.shapeError?.(result.raw, ctx) ??
@@ -415,6 +435,7 @@ async function runOp(
       ...finish(data, error, 'error'),
       commandStderr: op.exposeStderr === false ? '' : result.raw.commandStderr,
       outputTruncated,
+      identity,
     };
   }
 
@@ -426,9 +447,10 @@ async function runOp(
         ...finish(shaped.data, null, 'ok'),
         outputTruncated,
         premasked: shaped.count,
+        identity,
       };
     }
-    return { ...finish(shaped, null, 'ok'), outputTruncated };
+    return { ...finish(shaped, null, 'ok'), outputTruncated, identity };
   } catch (err) {
     // An op's own error (files download refusing a short payload) says more than the generic one.
     if (!outputTruncated || err instanceof OpError) {

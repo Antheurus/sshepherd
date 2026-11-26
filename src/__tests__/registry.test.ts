@@ -1945,7 +1945,7 @@ describe('security fail2ban — degrades to {available:false} when fail2ban-clie
           jail: 'sshd',
           currently_banned: 2,
           total_banned: 5,
-          banned_ips: ['1.2.3.4', '5.6.7.8'],
+          banned_ips: ['<ip-1>', '<ip-2>'],
         },
       ],
     });
