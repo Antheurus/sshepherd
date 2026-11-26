@@ -26,7 +26,34 @@ user = "sshepherd_ro"
 database = "app"
 ```
 
-A target declares either `{compose_file, service}` or `{container}` — never both
+Two more `kind`s reach psql another way:
+
+```toml
+# The app container's DATABASE_URL, read inside one remote shell and decoded into PG* env vars,
+# so the URL never reaches sshepherd, an argv (`ps`) or the audit log. psql runs in
+# psql_container when the app image has none (default: the container itself).
+[app]
+alias = "myserver"
+kind = "container-env"
+container = "app_web_1"
+env_key = "DATABASE_URL"          # default
+psql_container = "app_db_1"       # optional
+
+# psql installed on the host; sudo_user for peer auth, pg_host/pg_port for TCP.
+[hostdb]
+alias = "myserver"
+kind = "host"
+sudo_user = "postgres"            # optional
+user = "sshepherd_ro"
+database = "app"
+```
+
+`setup db-target ro-role <target> --print-sql` prints the SQL that creates a read-only LOGIN role
+(`pg_read_all_data`, `default_transaction_read_only`, statement/lock/temp-file limits) and the
+checks that prove it; a human applies it, sshepherd never does. `doctor` lists the targets whose
+`user` does not name such a role under `pg_targets_without_ro_role`.
+
+A `container` target declares either `{compose_file, service}` or `{container}` — never both
 (`readTarget` in `targets.ts` throws if a target declares both, or neither). Missing
 `targets.toml` yields an empty target map, same missing-config behavior as
 `~/.ssh/config` for the `hosts` group — every target refused until declared.
@@ -97,7 +124,17 @@ All sizes are in **bytes**, never a human string like `3.9Gi`.
 | `db connections` | `{ backends_total, max_connections, by_state: Record<string, number> }` |
 | `db slow` | `{ available, reason, queries: [...] }` — `available: false` with a `reason` string when `pg_stat_statements` isn't installed (checked in a separate round trip before ever referencing the extension, because Postgres validates catalog references at parse time even inside an untaken branch); otherwise the top 20 queries by `mean_exec_time` |
 | `db size` | `{ databases: Array<{ datname, size_bytes }> }` — every non-template database |
-| `db query` | a bare JSON array — whatever the `SELECT` returns, via `json_agg` |
+| `db query` | `{ rows, row_count, truncated }` — at most `--max-rows` rows (default 500, max 10,000) of whatever the `SELECT` returns, via `json_agg`; `truncated: true` when the query had more. **Shape change:** before 0.4.0 `data` was the bare row array; read `data.rows` now (`--fields data.rows` keeps just the rows) |
+| `db describe` | `{ schema, table, columns: [{name, type, nullable, default}], indexes: [{name, unique, primary, definition}], foreign_keys: [{name, columns, references_table, references_columns, definition}] }` — an unknown table is a `VALIDATION_ERROR` naming `db tables` |
+| `db count` | `{ count }` — `count(*)` of the table, `--where-eq col=value` for one equality filter (the column becomes a quoted identifier, the value a literal) |
+| `db migrations` | `{ tables: [{framework, table, migrations: [{name, applied_at}]}] }` — newest 50 per table, from whichever of `_prisma_migrations`, `knex_migrations`, `migrations_typeorm`, `schema_migrations` (rails) and `migrations` (laravel) exist; `applied_at` is null where the table keeps no time |
+
+Every bounded read (`query`, `describe`, `count`, `migrations`) sends `SET statement_timeout`/`SET
+lock_timeout` as its own psql buffer before the read-only transaction. The statement limit is the
+call's budget (`--timeout`, default 75 s for `query`, 60 s for the others) less 15 s, so Postgres
+cancels a runaway statement itself and the envelope says `COMMAND_TIMEOUT` with
+`Postgres cancelled the statement at statement_timeout (60 s)`; a lock wait past 2 s is a
+`COMMAND_TIMEOUT` naming `lock_timeout`.
 
 `wrapAsJsonAgg` turns zero result rows into SQL `NULL`, which `psql -qAt` prints as an
 empty string — `parseJsonArray` in `registry.ts` normalizes that back to `[]`.

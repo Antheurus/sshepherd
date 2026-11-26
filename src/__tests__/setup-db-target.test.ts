@@ -45,6 +45,12 @@ describe('scaffold', () => {
       user: 'sshepherd_ro',
       database: 'lms',
       maxProfile: null,
+      kind: 'container' as const,
+      envKey: null,
+      psqlContainer: null,
+      sudoUser: null,
+      pgHost: null,
+      pgPort: null,
     };
     const targets = loadTargets(path);
     expect(targets.prod).toEqual(expectedTarget);
@@ -84,6 +90,12 @@ describe('scaffold', () => {
       user: 'sshepherd_ro',
       database: 'app',
       maxProfile: null,
+      kind: 'container' as const,
+      envKey: null,
+      psqlContainer: null,
+      sudoUser: null,
+      pgHost: null,
+      pgPort: null,
     };
     const targets = loadTargets(path);
     expect(targets.staging).toEqual(expectedTarget);

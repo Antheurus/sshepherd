@@ -160,6 +160,11 @@ const CANARY_FILES = [
 
 /** The pg-target whose container's PGHOST/PGPORT point at the unreachable peer and identity host. */
 const pgConnectTarget = (alias: string): string => `${alias}-pgconnect`;
+/** `kind = "container-env"` pg-targets on `canary-dburl`, whose DATABASE_URL carries the canary as
+ *  its password: psql in that container, and psql in the fixture postgres (`psql_container`). */
+const envUrlTarget = (alias: string): string => `${alias}-envurl`;
+const envViaTarget = (alias: string): string => `${alias}-envvia`;
+const ENV_URL_CONTAINER = `${PREFIX}-canary-dburl`;
 
 function argValues(alias: string): Record<string, string[]> {
   return {
@@ -169,7 +174,8 @@ function argValues(alias: string): Record<string, string[]> {
     path: CANARY_FILES,
     file: ['/opt/canary/docker-compose.yml'],
     project_dir: ['/opt/canary'],
-    target: [alias, pgConnectTarget(alias)],
+    target: [alias, pgConnectTarget(alias), envUrlTarget(alias), envViaTarget(alias)],
+    table: ['canary_users'],
     sql: ['SELECT * FROM canary_users', ...Object.values(DB_ECHO_PROBES).map((probe) => probe.sql)],
     recipe: ['canary-ok', 'canary-fail'],
     pattern: ['.'],
@@ -182,7 +188,7 @@ function argOverrides(alias: string): Record<string, Record<string, string[]>> {
     'files disk-usage': { path: ['/opt/canary'] },
     'files find': { path: ['/opt/canary'] },
     'files grep': { path: ['/opt/canary', '/var/log/auth.log'] },
-    'db query': { target: [alias] },
+    'db query': { target: [alias, envUrlTarget(alias)] },
   };
 }
 
@@ -345,6 +351,8 @@ function writeFixtureConfig(): void {
     .flatMap((alias) => [
       `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
       `[${pgConnectTarget(alias)}]\nalias = "${alias}"\ncontainer = "${PREFIX}-canary-pg"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
+      `[${envUrlTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\n`,
+      `[${envViaTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\nenv_key = "DATABASE_URL"\npsql_container = "${PREFIX}-postgres"\n`,
     ])
     .join('\n');
   writeFileSync(join(scratch, 'targets.toml'), targets);
@@ -794,6 +802,62 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
         }
       }
     }, 120_000);
+    test(`${variant}: a container-env target connects from the URL, and the URL is in no argv, envelope or audit row`, async () => {
+      const alias = `smoke-${variant}`;
+      const op = exposingOps().find(
+        (candidate) => candidate.group === 'db' && candidate.name === 'query',
+      );
+      if (op === undefined) {
+        throw new Error('no db query op');
+      }
+      const argvSeen: string[] = [];
+      const sampleArgv = (): void => {
+        for (const container of [
+          `${PREFIX}-sshd-${variant}`,
+          ENV_URL_CONTAINER,
+          `${PREFIX}-postgres`,
+        ]) {
+          const proc = Bun.spawnSync(
+            ['docker', 'exec', container, 'sh', '-c', 'ps -eo args 2>/dev/null || ps -o args'],
+            {
+              stdout: 'pipe',
+              stderr: 'pipe',
+            },
+          );
+          argvSeen.push(proc.stdout.toString());
+        }
+      };
+      const results: { target: string; ok: boolean; user: unknown; leaked: boolean }[] = [];
+      for (const [index, target] of [envUrlTarget(alias), envViaTarget(alias)].entries()) {
+        const auditLogPath = join(scratch, `audit-envurl-${alias}-${index}.jsonl`);
+        const pending = executeOp(
+          op,
+          buildDbOpContext(target, { sql: 'SELECT current_user AS u, pg_sleep(2) AS slept' }),
+          {
+            transport: { runner: defaultRunner, sshConfigPath: sshConfig },
+            sshConfigPath: sshConfig,
+            auditLogPath,
+          },
+        );
+        await Bun.sleep(1_000);
+        sampleArgv();
+        const envelope = await pending;
+        const rows = (envelope.data as { rows?: { u?: unknown }[] } | null)?.rows ?? [];
+        const audit = existsSync(auditLogPath) ? readFileSync(auditLogPath, 'utf8') : '';
+        results.push({
+          target,
+          ok: envelope.ok,
+          user: rows[0]?.u,
+          leaked: JSON.stringify(envelope).includes(canary) || audit.includes(canary),
+        });
+      }
+      expect(results).toEqual([
+        { target: envUrlTarget(alias), ok: true, user: 'sshepherd_ro', leaked: false },
+        { target: envViaTarget(alias), ok: true, user: 'sshepherd_ro', leaked: false },
+      ]);
+      expect(argvSeen.join('\n')).toContain('pg_sleep(2)');
+      expect(argvSeen.filter((text) => text.includes(canary))).toEqual([]);
+    }, 60_000);
   }
 
   test(`the compiled binary ignores ${IDENTITY_HOOK}: files cat still masks the canary`, async () => {

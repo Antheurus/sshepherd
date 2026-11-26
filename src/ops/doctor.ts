@@ -11,6 +11,8 @@ export interface DoctorReport {
   skill_registry_match: boolean | null;
   targets_file: 'present' | 'missing';
   pg_targets_without_ro_role: string[] | null;
+  /** The command that prints the read-only role SQL for a listed target; null when none is listed. */
+  pg_ro_role_next: string | null;
 }
 
 /** A target's `user` counts as a dedicated read-only role when its name says so: `ro` as a whole
@@ -96,11 +98,16 @@ function targetsWithoutReadOnlyRole(): string[] {
 export function runDoctor(): DoctorReport {
   const skill = skillPath();
   const targetsFilePresent = existsSync(defaultTargetsPath());
+  const withoutRoRole = targetsFilePresent ? targetsWithoutReadOnlyRole() : null;
   return {
     installed_sha: sha256OfFile(installedBinaryPath()),
     dist_sha: sha256OfFile(distBinaryPath(skill)),
     skill_registry_match: skillMatchesRegistry(skill),
     targets_file: targetsFilePresent ? 'present' : 'missing',
-    pg_targets_without_ro_role: targetsFilePresent ? targetsWithoutReadOnlyRole() : null,
+    pg_targets_without_ro_role: withoutRoRole,
+    pg_ro_role_next:
+      withoutRoRole !== null && withoutRoRole.length > 0
+        ? 'sshepherd setup db-target ro-role <target> --print-sql'
+        : null,
   };
 }

@@ -40,6 +40,12 @@ describe('loadTargets', () => {
       user: 'sshepherd_ro',
       database: 'lms',
       maxProfile: null,
+      kind: 'container',
+      envKey: null,
+      psqlContainer: null,
+      sudoUser: null,
+      pgHost: null,
+      pgPort: null,
     });
     expect(targets.staging).toEqual({
       alias: 'staging-1',
@@ -49,6 +55,12 @@ describe('loadTargets', () => {
       user: 'sshepherd_ro',
       database: 'app',
       maxProfile: null,
+      kind: 'container',
+      envKey: null,
+      psqlContainer: null,
+      sudoUser: null,
+      pgHost: null,
+      pgPort: null,
     });
   });
 
@@ -103,6 +115,12 @@ describe('buildDbOpContext', () => {
       container: '',
       db_user: 'sshepherd_ro',
       db_name: 'lms',
+      db_kind: 'container',
+      env_key: '',
+      psql_container: '',
+      sudo_user: '',
+      pg_host: '',
+      pg_port: '',
       max_profile: '',
     });
   });
