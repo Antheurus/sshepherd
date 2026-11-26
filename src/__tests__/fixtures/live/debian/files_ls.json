@@ -1,0 +1,70 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:53.056Z",
+  "command": "files ls",
+  "duration_ms": 23,
+  "data": [
+    {
+      "name": ".",
+      "permissions": "drwx------",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 8,
+      "modified_at": "2026-11-26T06:37",
+      "is_dir": true,
+      "is_symlink": false,
+      "link_target": null
+    },
+    {
+      "name": "..",
+      "permissions": "drwxr-xr-x",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 26,
+      "modified_at": "2026-11-26T06:43",
+      "is_dir": true,
+      "is_symlink": false,
+      "link_target": null
+    },
+    {
+      "name": ".bashrc",
+      "permissions": "-rw-r--r--",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 571,
+      "modified_at": "2021-04-10T20:00",
+      "is_dir": false,
+      "is_symlink": false,
+      "link_target": null
+    },
+    {
+      "name": ".profile",
+      "permissions": "-rw-r--r--",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 161,
+      "modified_at": "2019-07-09T10:05",
+      "is_dir": false,
+      "is_symlink": false,
+      "link_target": null
+    },
+    {
+      "name": ".ssh",
+      "permissions": "drwx------",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 30,
+      "modified_at": "2026-11-26T06:43",
+      "is_dir": true,
+      "is_symlink": false,
+      "link_target": null
+    }
+  ],
+  "error": null
+}

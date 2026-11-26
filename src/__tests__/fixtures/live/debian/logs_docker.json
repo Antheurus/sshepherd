@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:52.821Z",
+  "command": "logs docker",
+  "duration_ms": 29,
+  "data": {
+    "source": "docker:sshepherd-fixture-app",
+    "lines_returned": 0,
+    "truncated": false,
+    "lines": [],
+    "next_since": null
+  },
+  "error": null
+}

@@ -1,0 +1,18 @@
+{
+  "ok": false,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T06:44:01.495Z",
+  "command": "db query",
+  "duration_ms": 2033,
+  "data": null,
+  "error": {
+    "code": "COMMAND_TIMEOUT",
+    "message": "Remote command timed out",
+    "hint": "The command outran its budget; re-run with a larger --timeout <sec> (max 3600) or narrow what it does.",
+    "retryable": true,
+    "phase": "command",
+    "timeout_sec": 2,
+    "budget_sec": 2,
+    "elapsed_ms": 2016
+  }
+}

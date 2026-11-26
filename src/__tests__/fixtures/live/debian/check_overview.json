@@ -1,0 +1,94 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:52.378Z",
+  "command": "check overview",
+  "duration_ms": 30,
+  "data": {
+    "nproc": 10,
+    "mem": {
+      "mem": {
+        "total": 4179505152,
+        "used": 2055147520,
+        "free": 671817728,
+        "shared": 152477696,
+        "buff_cache": 1797840896,
+        "available": 2124357632
+      },
+      "swap": {
+        "total": 5253238784,
+        "used": 851132416,
+        "free": 4402106368
+      }
+    },
+    "disk": [
+      {
+        "filesystem": "overlay",
+        "size_bytes": 69256347648,
+        "used_bytes": 23099576320,
+        "avail_bytes": 46156771328,
+        "use_percent": 34,
+        "mounted_on": "/"
+      },
+      {
+        "filesystem": "tmpfs",
+        "size_bytes": 67108864,
+        "used_bytes": 0,
+        "avail_bytes": 67108864,
+        "use_percent": 0,
+        "mounted_on": "/dev"
+      },
+      {
+        "filesystem": "shm",
+        "size_bytes": 2088763392,
+        "used_bytes": 0,
+        "avail_bytes": 2088763392,
+        "use_percent": 0,
+        "mounted_on": "/dev/shm"
+      },
+      {
+        "filesystem": "/dev/vdb1",
+        "size_bytes": 69256347648,
+        "used_bytes": 23099576320,
+        "avail_bytes": 46156771328,
+        "use_percent": 34,
+        "mounted_on": "/etc/hosts"
+      },
+      {
+        "filesystem": "mac",
+        "size_bytes": 494384795648,
+        "used_bytes": 445720207360,
+        "avail_bytes": 48664588288,
+        "use_percent": 91,
+        "mounted_on": "/root/.ssh/authorized_keys"
+      },
+      {
+        "filesystem": "orbstack",
+        "size_bytes": 2089750528,
+        "used_bytes": 4096,
+        "avail_bytes": 2089746432,
+        "use_percent": 1,
+        "mounted_on": "/run/docker.sock"
+      },
+      {
+        "filesystem": "tmpfs",
+        "size_bytes": 4096,
+        "used_bytes": 0,
+        "avail_bytes": 4096,
+        "use_percent": 0,
+        "mounted_on": "/proc/asound"
+      }
+    ],
+    "uptime": {
+      "time": "06:43:52",
+      "uptime": "1 day,  1:12",
+      "users": 0,
+      "load_1m": 0.29,
+      "load_5m": 0.82,
+      "load_15m": 0.72
+    },
+    "psi_mem": null,
+    "dead_end_risk": true
+  },
+  "error": null
+}

@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "alias": "",
+  "ran_at": "2026-11-26T06:43:53.297Z",
+  "command": "db list",
+  "duration_ms": 0,
+  "data": {
+    "targets": [
+      "smoke-debian"
+    ]
+  },
+  "error": null
+}

@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T06:43:59.250Z",
+  "command": "db query",
+  "duration_ms": 74,
+  "data": [
+    {
+      "note": "hello from sshepherd smoke fixture"
+    }
+  ],
+  "error": null
+}

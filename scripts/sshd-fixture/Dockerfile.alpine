@@ -1,0 +1,25 @@
+# Alpine sibling of Dockerfile.debian: ash login shell and BUSYBOX `timeout` (the part of the
+# remote command wrapper GNU hosts never exercise), with GNU coreutils for everything else the
+# ops assume (`ls --time-style` does not exist in busybox). coreutils would put its own
+# /usr/bin/timeout ahead of busybox's on PATH, so that one path is pointed back at busybox. Same bind-mounted
+# authorized_keys, same host docker socket, same key-only root login; not for production use.
+
+FROM alpine:3.20
+
+RUN apk add --no-cache openssh-server coreutils iproute2 procps-ng ca-certificates \
+  && ln -sf /bin/busybox /usr/bin/timeout \
+  && ssh-keygen -A \
+  && mkdir -p /root/.ssh \
+  && chmod 700 /root/.ssh \
+  && sed -i -e 's/^root:!:/root:*:/' /etc/shadow \
+  && sed -i -e 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /etc/ssh/sshd_config \
+  && { \
+       echo 'PermitRootLogin prohibit-password'; \
+       echo 'PubkeyAuthentication yes'; \
+       echo 'PasswordAuthentication no'; \
+     } >> /etc/ssh/sshd_config
+
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+
+EXPOSE 22
+CMD ["/usr/sbin/sshd", "-D", "-e"]

@@ -1,11 +1,10 @@
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { type AuditOutcome, auditMutating, confirmGate } from './audit.ts';
 import { describeError, errorInfo, fillNext } from './errors.ts';
 import { MAX_PARTIAL_STDOUT_CHARS, MAX_TIMEOUT_SEC } from './limits.ts';
 import { assertOpPositionals, optBool } from './op-args.ts';
 import { enforceAllowlist } from './ops/config.ts';
 import { buildEnvelope, splitNdjson } from './output.ts';
+import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { run, type TransportDeps } from './transport.ts';
 import {
   type Envelope,
@@ -160,7 +159,7 @@ async function runOp(
         `registry: op '${command}' has no buildRemote output and no runLocal fallback`,
       );
     }
-    const sshConfigPath = deps.sshConfigPath ?? join(homedir(), '.ssh', 'config');
+    const sshConfigPath = deps.sshConfigPath ?? defaultSshConfigPath();
     try {
       const data = await op.runLocal(ctx, sshConfigPath, deps.transport);
       return finish(data, null, 'ok');

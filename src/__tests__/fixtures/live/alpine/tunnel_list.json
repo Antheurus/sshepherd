@@ -1,0 +1,24 @@
+{
+  "ok": true,
+  "alias": "",
+  "ran_at": "2026-11-26T06:44:02.774Z",
+  "command": "tunnel list",
+  "duration_ms": 0,
+  "data": {
+    "tunnels": [
+      {
+        "id": "t-a934db06-c457-467a-b8e2-6bc5f6096ba4",
+        "alias": "smoke-alpine",
+        "kind": "local",
+        "localPort": 51416,
+        "remoteTarget": "app:80",
+        "localTarget": null,
+        "pid": 41248,
+        "openedAt": "2026-11-26T06:44:01.603Z",
+        "expiresAt": "2026-11-26T06:46:01.603Z",
+        "remainingSec": 119
+      }
+    ]
+  },
+  "error": null
+}

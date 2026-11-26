@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:52.212Z",
+  "command": "hosts test",
+  "duration_ms": 22,
+  "data": {
+    "reachable": true
+  },
+  "error": null
+}

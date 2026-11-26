@@ -29,6 +29,11 @@ jobs:
       - name: Unit tests
         run: bun run test
 
+      - uses: extractions/setup-just@v2
+
+      - name: SKILL.md matches the registry
+        run: just check-skill
+
       - name: Build binary
         run: bun run build
 

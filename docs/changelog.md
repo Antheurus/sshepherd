@@ -1,5 +1,13 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.4 — sshepherd doctor and a safe install/rollback
+
+- New `sshepherd doctor`: shows whether the installed binary differs from the built one, whether SKILL.md still lists exactly the commands that exist, and which db targets do not use a read-only role (names only).
+- `sshepherd --version` now reports the real version plus the git commit, build time and a hash of the command list, so you can tell which build is running.
+- `just release <version>` tests, builds and installs the binary in one atomic step, keeping the previous one; `just rollback` puts it back. A symlinked install is replaced by a real file and the old target is left untouched.
+- Commands that hit their `--timeout` on Alpine/busybox hosts now report `COMMAND_TIMEOUT` instead of a generic failure.
+- `just smoke` now runs live against a Debian and an Alpine test server (ports 8422 and 8423) and no longer touches `~/.ssh/config`; `just canary <alias>` checks a real host read-only.
+
 ## v0.4.0-rc.3 — Errors now tell you the next command
 
 - Every failure is now a JSON envelope with a `hint` (what to do), `retryable` (whether running it again can help) and, where one exists, `next` (an exact command to run) and `did_you_mean` (close names). This includes typos in the group, action, flag, pg-target or recipe name, which used to print bare text on stderr.

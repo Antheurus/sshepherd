@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:55.976Z",
+  "command": "tunnel open",
+  "duration_ms": 2,
+  "data": {
+    "id": "t-f9591da9-1027-4b43-a1ae-1abf2884813d",
+    "alias": "smoke-debian",
+    "kind": "local",
+    "localPort": 51401,
+    "remoteTarget": "app:80",
+    "localTarget": null,
+    "expiresAt": "2026-11-26T06:45:55.975Z"
+  },
+  "error": null
+}

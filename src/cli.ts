@@ -5,7 +5,7 @@ import { describeError } from './errors.ts';
 import { MAX_TIMEOUT_SEC } from './limits.ts';
 import { buildEnvelope, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
-import { type ExecuteDeps, executeOp, getOp, listOps } from './registry.ts';
+import { type ExecuteDeps, executeOp, getOp, listOps, runDoctor } from './registry.ts';
 import { runSetup } from './setup.ts';
 import { didYouMean, didYouMeanOrAll } from './suggest.ts';
 import { buildDbOpContext } from './targets.ts';
@@ -19,8 +19,7 @@ import {
   type OpSpec,
   type SshErrorCode,
 } from './types.ts';
-
-const VERSION = '0.3.0';
+import { versionLine } from './version.ts';
 
 /** Flags that never take a value: `parseArgv` must not let them swallow the next token
  *  (`--yes r1` is a flag plus a positional), and `mapArgsToCtx` reads them as booleans.
@@ -312,6 +311,7 @@ function formatTopHelp(): string {
     'Groups:',
     ...GROUPS.map((group) => `  ${group}`),
     '  setup             human-only — writes local config, see `sshepherd setup --help`',
+    '  doctor            report drift: installed vs built binary, SKILL.md vs registry, db targets without a read-only role',
     '',
     'Run `sshepherd <group> --help` to see actions + args for a group.',
     'Run `sshepherd <group> <action> --help` to see one action.',
@@ -357,7 +357,7 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
     return;
   }
   if (first === '--version' || first === '-v') {
-    process.stdout.write(`sshepherd ${VERSION}\n`);
+    process.stdout.write(`${versionLine()}\n`);
     return;
   }
 
@@ -377,6 +377,19 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
 
   if (first === 'setup') {
     await runSetup(rest);
+    return;
+  }
+
+  if (first === 'doctor') {
+    printJson(
+      buildEnvelope({
+        alias: '',
+        command: 'doctor',
+        startedAtMs: Date.now(),
+        data: runDoctor(),
+        error: null,
+      }),
+    );
     return;
   }
 

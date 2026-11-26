@@ -1,0 +1,102 @@
+{
+  "check overview": {
+    "data": [
+      "dead_end_risk",
+      "disk",
+      "mem",
+      "nproc",
+      "psi_mem",
+      "uptime"
+    ],
+    "envelope": [
+      "alias",
+      "command",
+      "data",
+      "duration_ms",
+      "error",
+      "ok",
+      "ran_at"
+    ],
+    "ok": true
+  },
+  "db tables": {
+    "data": [
+      "schema",
+      "size_bytes",
+      "table"
+    ],
+    "envelope": [
+      "alias",
+      "command",
+      "data",
+      "duration_ms",
+      "error",
+      "ok",
+      "ran_at"
+    ],
+    "ok": true
+  },
+  "hosts test": {
+    "data": [
+      "reachable"
+    ],
+    "envelope": [
+      "alias",
+      "command",
+      "data",
+      "duration_ms",
+      "error",
+      "ok",
+      "ran_at"
+    ],
+    "ok": true
+  },
+  "logs docker": {
+    "data": [
+      "lines",
+      "lines_returned",
+      "next_since",
+      "source",
+      "truncated"
+    ],
+    "envelope": [
+      "alias",
+      "command",
+      "data",
+      "duration_ms",
+      "error",
+      "ok",
+      "ran_at"
+    ],
+    "ok": true
+  },
+  "services ps": {
+    "data": [
+      "compose_project",
+      "compose_service",
+      "exit_code",
+      "health",
+      "id",
+      "image",
+      "mem_limit_bytes",
+      "name",
+      "nano_cpus",
+      "oom_killed",
+      "oom_score_adj",
+      "ports",
+      "restart_count",
+      "restart_policy",
+      "state"
+    ],
+    "envelope": [
+      "alias",
+      "command",
+      "data",
+      "duration_ms",
+      "error",
+      "ok",
+      "ran_at"
+    ],
+    "ok": true
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T06:43:59.069Z",
+  "command": "db tables",
+  "duration_ms": 71,
+  "data": [
+    {
+      "schema": "public",
+      "table": "smoke_fixture",
+      "size_bytes": 32768
+    }
+  ],
+  "error": null
+}

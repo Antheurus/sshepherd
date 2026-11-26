@@ -1,0 +1,33 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:53.188Z",
+  "command": "security listeners",
+  "duration_ms": 26,
+  "data": {
+    "listening": [
+      {
+        "proto": "tcp",
+        "local_addr": "0.0.0.0",
+        "port": 22,
+        "process": "sshd",
+        "pid": 1
+      },
+      {
+        "proto": "tcp",
+        "local_addr": "127.0.0.11",
+        "port": 36837,
+        "process": null,
+        "pid": null
+      },
+      {
+        "proto": "tcp",
+        "local_addr": "[::]",
+        "port": 22,
+        "process": "sshd",
+        "pid": 1
+      }
+    ]
+  },
+  "error": null
+}

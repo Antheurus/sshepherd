@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T06:43:57.799Z",
+  "command": "hosts test",
+  "duration_ms": 18,
+  "data": {
+    "reachable": true
+  },
+  "error": null
+}

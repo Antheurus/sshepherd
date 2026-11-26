@@ -1,0 +1,22 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:53.732Z",
+  "command": "deploy run",
+  "duration_ms": 1,
+  "data": {
+    "recipe": "smoke-debian",
+    "alias": "smoke-debian",
+    "workdir": "/root",
+    "steps": [
+      {
+        "name": "check-app",
+        "kind": "shell",
+        "mutates": false,
+        "depends_on": null,
+        "remote_command": "'sh' '-c' 'cd '\\''/root'\\'' && docker ps'"
+      }
+    ]
+  },
+  "error": null
+}

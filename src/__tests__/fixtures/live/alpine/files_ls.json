@@ -1,0 +1,46 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T06:43:58.646Z",
+  "command": "files ls",
+  "duration_ms": 21,
+  "data": [
+    {
+      "name": ".",
+      "permissions": "drwx------",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 8,
+      "modified_at": "2026-11-26T06:40",
+      "is_dir": true,
+      "is_symlink": false,
+      "link_target": null
+    },
+    {
+      "name": "..",
+      "permissions": "drwxr-xr-x",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 26,
+      "modified_at": "2026-11-26T06:43",
+      "is_dir": true,
+      "is_symlink": false,
+      "link_target": null
+    },
+    {
+      "name": ".ssh",
+      "permissions": "drwx------",
+      "links": 1,
+      "owner": "root",
+      "group": "root",
+      "size_bytes": 30,
+      "modified_at": "2026-11-26T06:43",
+      "is_dir": true,
+      "is_symlink": false,
+      "link_target": null
+    }
+  ],
+  "error": null
+}

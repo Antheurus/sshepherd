@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T06:44:03.013Z",
+  "command": "hosts disconnect",
+  "duration_ms": 12,
+  "data": {
+    "closed": 1
+  },
+  "error": null
+}

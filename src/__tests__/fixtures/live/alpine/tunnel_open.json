@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T06:44:01.603Z",
+  "command": "tunnel open",
+  "duration_ms": 2,
+  "data": {
+    "id": "t-a934db06-c457-467a-b8e2-6bc5f6096ba4",
+    "alias": "smoke-alpine",
+    "kind": "local",
+    "localPort": 51416,
+    "remoteTarget": "app:80",
+    "localTarget": null,
+    "expiresAt": "2026-11-26T06:46:01.603Z"
+  },
+  "error": null
+}

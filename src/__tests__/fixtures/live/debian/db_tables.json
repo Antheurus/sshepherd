@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:53.464Z",
+  "command": "db tables",
+  "duration_ms": 61,
+  "data": [
+    {
+      "schema": "public",
+      "table": "smoke_fixture",
+      "size_bytes": 32768
+    }
+  ],
+  "error": null
+}

@@ -32,7 +32,6 @@ export function listOps(): OpSpec[] {
 }
 
 export { type ExecuteDeps, executeOp } from './execute.ts';
-
 // Re-exported for parser unit tests and future CLI --help rendering.
 // Re-exported for setup config-allowlist/files-allowlist/reveal-allowlist scaffolding and
 // their round-trip tests (mirrors targets.ts's exported loadTargets/defaultTargetsPath —
@@ -50,4 +49,5 @@ export {
   loadRevealAllowlist,
   REVEAL_DENYLIST_PATTERNS,
 } from './ops/config.ts';
+export { runDoctor } from './ops/doctor.ts';
 export { parseHumanBytes } from './parsers/bytes.ts';

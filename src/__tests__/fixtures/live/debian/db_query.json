@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:53.627Z",
+  "command": "db query",
+  "duration_ms": 56,
+  "data": [
+    {
+      "note": "hello from sshepherd smoke fixture"
+    }
+  ],
+  "error": null
+}

@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { listHostAliases } from './parsers/ssh-config.ts';
 import { writeTextSecure } from './setup-file-io.ts';
+import { sshConfigArgs } from './transport.ts';
 import { OpRunLocalError } from './types.ts';
 
 export type TunnelKind = 'local' | 'remote' | 'dynamic';
@@ -173,7 +174,16 @@ function defaultSpawnSupervisor(
 ): SpawnSupervisorResult {
   const selfInvocation = resolveSelfInvocation();
   const proc = Bun.spawn(
-    [...selfInvocation, 'tunnel', '__supervise', id, String(durationSec), 'ssh', ...sshArgs],
+    [
+      ...selfInvocation,
+      'tunnel',
+      '__supervise',
+      id,
+      String(durationSec),
+      'ssh',
+      ...sshConfigArgs(),
+      ...sshArgs,
+    ],
     {
       stdio: ['ignore', 'ignore', 'ignore'],
       detached: true,

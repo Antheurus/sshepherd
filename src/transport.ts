@@ -1,9 +1,10 @@
 import { mkdirSync, readdirSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describeError, errorInfo } from './errors.ts';
 import { CONNECT_TIMEOUT_SEC, CONTROL_PERSIST_SEC, KILL_AFTER_SEC } from './limits.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
+import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { didYouMean } from './suggest.ts';
 import type { ErrorInfo, RawResult } from './types.ts';
 
@@ -88,6 +89,17 @@ function commandTimeoutInfo(ctx: ClassifyContext): ErrorInfo {
   return info;
 }
 
+/** busybox `timeout` hands back the child's own status (143 after TERM, or whatever a `docker exec`
+ *  client exits with) instead of GNU's 124, so exit codes alone miss a timeout there. A non-zero
+ *  exit that took the whole budget is one: the remote clock starts after the local one, so a real
+ *  timeout always measures at least `timeoutSec` locally. ssh's own 255 is a transport failure. */
+function ranOutOfBudget(raw: RawResult, ctx: ClassifyContext): boolean {
+  if (raw.code === 0 || raw.code === 255 || ctx.timeoutSec === undefined) {
+    return false;
+  }
+  return ctx.elapsedMs !== undefined && ctx.elapsedMs >= ctx.timeoutSec * 1_000;
+}
+
 /**
  * Reads `raw.transportStderr` only to decide the code, never to build the message —
  * the stderr text is discarded after this function returns. No redaction allowlist:
@@ -95,7 +107,7 @@ function commandTimeoutInfo(ctx: ClassifyContext): ErrorInfo {
  * shape that can't eventually leak an IP or hostname.
  */
 export function classify(raw: RawResult, ctx: ClassifyContext = {}): ErrorInfo | null {
-  if (raw.timedOut || REMOTE_TIMEOUT_EXIT_CODES.includes(raw.code)) {
+  if (raw.timedOut || REMOTE_TIMEOUT_EXIT_CODES.includes(raw.code) || ranOutOfBudget(raw, ctx)) {
     return commandTimeoutInfo(ctx);
   }
   if (raw.code === 255) {
@@ -152,7 +164,7 @@ async function unknownAliasError(alias: string, deps: TransportDeps): Promise<Er
   if (resolved && !echoed) {
     return null;
   }
-  const declared = listHostAliases(deps.sshConfigPath ?? join(homedir(), '.ssh', 'config'));
+  const declared = listHostAliases(deps.sshConfigPath ?? defaultSshConfigPath());
   if (resolved && declared.includes(alias)) {
     return null;
   }
@@ -336,8 +348,15 @@ export async function closeAllMasters(
   return closed;
 }
 
+/** `-F <path>` when `SSHEPHERD_SSH_CONFIG_PATH` is set (the smoke fixture's own config), so a
+ *  run never needs a stanza in the real `~/.ssh/config`; empty when unset. */
+export function sshConfigArgs(): string[] {
+  const override = process.env.SSHEPHERD_SSH_CONFIG_PATH;
+  return override && override.length > 0 ? ['-F', override] : [];
+}
+
 async function defaultRunner(args: string[], timeoutMs: number): Promise<SpawnOutcome> {
-  const proc = Bun.spawn(['ssh', ...args], {
+  const proc = Bun.spawn(['ssh', ...sshConfigArgs(), ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
     stdin: 'ignore',

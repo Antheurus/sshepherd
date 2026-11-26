@@ -1,0 +1,106 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T06:43:52.685Z",
+  "command": "services ps",
+  "duration_ms": 204,
+  "data": [
+    {
+      "id": "611e772f83db",
+      "name": "sshepherd-fixture-sshd-debian",
+      "image": "sshepherd-smoke-sshd-debian",
+      "state": "running",
+      "health": null,
+      "restart_count": 0,
+      "oom_killed": false,
+      "exit_code": 0,
+      "mem_limit_bytes": null,
+      "nano_cpus": null,
+      "oom_score_adj": 0,
+      "restart_policy": "no",
+      "ports": [
+        {
+          "host_ip": "127.0.0.1",
+          "host_port": 8422,
+          "container_port": 22,
+          "proto": "tcp"
+        }
+      ],
+      "compose_project": "sshepherd-smoke",
+      "compose_service": "sshd-debian"
+    },
+    {
+      "id": "101c9be0082e",
+      "name": "sshepherd-fixture-sshd-alpine",
+      "image": "sshepherd-smoke-sshd-alpine",
+      "state": "running",
+      "health": null,
+      "restart_count": 0,
+      "oom_killed": false,
+      "exit_code": 0,
+      "mem_limit_bytes": null,
+      "nano_cpus": null,
+      "oom_score_adj": 0,
+      "restart_policy": "no",
+      "ports": [
+        {
+          "host_ip": "127.0.0.1",
+          "host_port": 8423,
+          "container_port": 22,
+          "proto": "tcp"
+        }
+      ],
+      "compose_project": "sshepherd-smoke",
+      "compose_service": "sshd-alpine"
+    },
+    {
+      "id": "75f9e2dfb9f2",
+      "name": "sshepherd-fixture-postgres",
+      "image": "postgres:16-alpine",
+      "state": "running",
+      "health": null,
+      "restart_count": 0,
+      "oom_killed": false,
+      "exit_code": 0,
+      "mem_limit_bytes": null,
+      "nano_cpus": null,
+      "oom_score_adj": 0,
+      "restart_policy": "no",
+      "ports": [
+        {
+          "host_ip": null,
+          "host_port": null,
+          "container_port": 5432,
+          "proto": "tcp"
+        }
+      ],
+      "compose_project": "sshepherd-smoke",
+      "compose_service": "postgres"
+    },
+    {
+      "id": "c28d8d03065a",
+      "name": "sshepherd-fixture-app",
+      "image": "nginx:alpine",
+      "state": "running",
+      "health": null,
+      "restart_count": 0,
+      "oom_killed": false,
+      "exit_code": 0,
+      "mem_limit_bytes": null,
+      "nano_cpus": null,
+      "oom_score_adj": 0,
+      "restart_policy": "no",
+      "ports": [
+        {
+          "host_ip": null,
+          "host_port": null,
+          "container_port": 80,
+          "proto": "tcp"
+        }
+      ],
+      "compose_project": "sshepherd-smoke",
+      "compose_service": "app"
+    }
+  ],
+  "error": null
+}
