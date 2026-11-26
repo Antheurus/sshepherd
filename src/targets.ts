@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { didYouMean } from './suggest.ts';
+import { parseTomlFile } from './toml-parse.ts';
 import { type OpContext, OpError } from './types.ts';
 
 /**
@@ -35,19 +36,6 @@ const TARGETS_HINT =
 
 function targetsError(message: string): OpError {
   return new OpError('CONFIG_PARSE_ERROR', message, { hint: TARGETS_HINT });
-}
-
-/** Bun's TOML parser throws a BuildMessage, not an Error: its `message` and `position.line`
- *  name the problem; `position.lineText` is never copied, since a target line can hold a secret. */
-function tomlSyntaxError(err: unknown): OpError {
-  const record = typeof err === 'object' && err !== null ? (err as Record<string, unknown>) : {};
-  const reason = typeof record.message === 'string' ? record.message : 'invalid TOML';
-  const position =
-    typeof record.position === 'object' && record.position !== null
-      ? (record.position as Record<string, unknown>)
-      : {};
-  const line = typeof position.line === 'number' ? ` at line ${position.line}` : '';
-  return targetsError(`targets.toml is not valid TOML${line}: ${reason}`);
 }
 
 function readTarget(name: string, raw: unknown): PgTarget {
@@ -94,12 +82,7 @@ export function loadTargets(path: string = defaultTargetsPath()): Record<string,
   } catch {
     return {};
   }
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = Bun.TOML.parse(text) as Record<string, unknown>;
-  } catch (err) {
-    throw tomlSyntaxError(err);
-  }
+  const parsed = parseTomlFile(text, 'targets.toml', TARGETS_HINT);
   const targets: Record<string, PgTarget> = {};
   for (const [name, raw] of Object.entries(parsed)) {
     targets[name] = readTarget(name, raw);

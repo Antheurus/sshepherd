@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { shellJoin, shq } from './quote.ts';
 import { didYouMean } from './suggest.ts';
+import { parseTomlFile } from './toml-parse.ts';
 import { type OpContext, OpError } from './types.ts';
 
 /**
@@ -481,7 +482,11 @@ export function loadRecipe(name: string, path?: string): Recipe {
       did_you_mean: didYouMean(name, listRecipeNames()),
     });
   }
-  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  const parsed = parseTomlFile(
+    text,
+    `recipe '${name}'`,
+    'Fix the line the message names in the recipe file (SSHEPHERD_RECIPE_PATH, else .sshepherd/deploy.<name>.toml, else ~/.config/sshepherd/recipes/<name>.toml), then run the command again.',
+  );
   const recipeName = typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : name;
   const alias = typeof parsed.alias === 'string' ? parsed.alias : '';
   const workdir = typeof parsed.workdir === 'string' ? parsed.workdir : '';

@@ -10,6 +10,7 @@ import {
   reqStr,
 } from '../op-args.ts';
 import { shellJoin, shq } from '../quote.ts';
+import { parseTomlFile } from '../toml-parse.ts';
 import { type AllowlistPolicy, type OpContext, OpError, type OpSpec } from '../types.ts';
 
 // ---------------------------------------------------------------------------
@@ -54,7 +55,11 @@ export function loadPathAllowlist(
   } catch {
     return {};
   }
-  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  const parsed = parseTomlFile(
+    text,
+    `${scope}-allowlist.toml`,
+    `Fix the line named in ${scope}-allowlist.toml (SSHEPHERD_${scope.toUpperCase()}_ALLOWLIST_PATH, else ~/.config/sshepherd/${scope}-allowlist.toml), then run the command again.`,
+  );
   const allowlist: ConfigAllowlist = {};
   for (const [alias, raw] of Object.entries(parsed)) {
     const record = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
@@ -110,7 +115,11 @@ export function loadRevealAllowlist(path: string = defaultRevealAllowlistPath())
   } catch {
     return {};
   }
-  const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
+  const parsed = parseTomlFile(
+    text,
+    'reveal-allowlist.toml',
+    'Fix the line named in reveal-allowlist.toml (SSHEPHERD_REVEAL_ALLOWLIST_PATH, else ~/.config/sshepherd/reveal-allowlist.toml), then run the command again.',
+  );
   const allowlist: RevealAllowlist = {};
   for (const [alias, raw] of Object.entries(parsed)) {
     const record = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};

@@ -3,13 +3,14 @@ import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { listOps } from '../registry.ts';
-import { loadTargets } from '../targets.ts';
+import { defaultTargetsPath, loadTargets } from '../targets.ts';
 
 export interface DoctorReport {
   installed_sha: string | null;
   dist_sha: string | null;
   skill_registry_match: boolean | null;
-  pg_targets_without_ro_role: string[];
+  targets_file: 'present' | 'missing';
+  pg_targets_without_ro_role: string[] | null;
 }
 
 /** A target's `user` counts as a dedicated read-only role when its name says so: `ro` as a whole
@@ -94,10 +95,12 @@ function targetsWithoutReadOnlyRole(): string[] {
 
 export function runDoctor(): DoctorReport {
   const skill = skillPath();
+  const targetsFilePresent = existsSync(defaultTargetsPath());
   return {
     installed_sha: sha256OfFile(installedBinaryPath()),
     dist_sha: sha256OfFile(distBinaryPath(skill)),
     skill_registry_match: skillMatchesRegistry(skill),
-    pg_targets_without_ro_role: targetsWithoutReadOnlyRole(),
+    targets_file: targetsFilePresent ? 'present' : 'missing',
+    pg_targets_without_ro_role: targetsFilePresent ? targetsWithoutReadOnlyRole() : null,
   };
 }

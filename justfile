@@ -7,6 +7,9 @@ install:
 build: install
     bun run build
 
+clean:
+    rm -rf dist node_modules
+
 test: install
     bun run test
 

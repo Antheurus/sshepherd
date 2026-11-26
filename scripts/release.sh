@@ -37,6 +37,12 @@ release() {
     exit 2
   fi
 
+  mkdir -p "$INSTALL_DIR" 2>/dev/null || true
+  if [[ ! -d "$INSTALL_DIR" || ! -w "$INSTALL_DIR" ]]; then
+    echo "release: install dir $INSTALL_DIR is not writable; set SSHEPHERD_INSTALL_DIR to a writable directory" >&2
+    exit 1
+  fi
+
   bun test
   bun run check
 

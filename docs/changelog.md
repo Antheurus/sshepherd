@@ -11,6 +11,9 @@
 - A malformed `targets.toml` now reports `CONFIG_PARSE_ERROR` with the line number and how to fix it (exit 2), instead of "sshepherd failed unexpectedly".
 - Aliases defined in a file your ssh config `Include`s, matched by a wildcard `Host` line, or set by a `Match` block are no longer refused as unknown; `hosts list` also shows the aliases from `Include`d files.
 - File paths with spaces, brackets, `#`, accents or other characters now work in the `files` and `config` commands; only a leading `-`, a NUL or a line break is refused.
+- `sshepherd doctor` says `targets_file: "missing"` (and no target list) when targets.toml does not exist, instead of an empty list that looks like all is well.
+- A malformed files, config or reveal allowlist or deploy recipe now reports `CONFIG_PARSE_ERROR` with the file and line (exit 2) instead of an internal error.
+- `just release` stops immediately, before tests, when the install directory is not writable, and says how to fix it; `just clean` is back.
 - `setup` commands now refuse an unknown flag with `PARSE_ERROR` (exit 2) instead of silently ignoring it.
 
 ## v0.4.0-rc.3 — Errors now tell you the next command
