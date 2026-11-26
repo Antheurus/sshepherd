@@ -544,7 +544,7 @@ describe('files cat — env file masking', () => {
 });
 
 describe('executeOp — zero-knowledge error path never leaks transport stderr', () => {
-  test('a COMMAND_FAILED error carries only the static ErrorInfo shape, never raw stderr text', async () => {
+  test('an ssh transport failure (exit 255) carries only the static ErrorInfo shape, never raw stderr text', async () => {
     const op = getOp('check', 'ports');
     if (!op) {
       throw new Error('check ports op missing');
@@ -554,7 +554,7 @@ describe('executeOp — zero-knowledge error path never leaks transport stderr',
     const runner = scriptedRunner([
       { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false }, // -G validate
       { code: 0, stdout: '', stderr: '', timedOut: false }, // -O check
-      { code: 1, stdout: '', stderr: secretStderr, timedOut: false }, // remote command fails
+      { code: 255, stdout: '', stderr: secretStderr, timedOut: false }, // ssh itself fails
     ]);
 
     const envelope = await executeOp(
@@ -565,10 +565,38 @@ describe('executeOp — zero-knowledge error path never leaks transport stderr',
 
     expect(envelope.ok).toBe(false);
     expect(envelope.data).toBeNull();
+    expect(envelope.error?.code).toBe('SSH_TRANSPORT_ERROR');
+    expect(envelope.error?.stderr_tail).toBeUndefined();
     const serialized = JSON.stringify(envelope);
     expect(serialized).not.toContain('10.55.66.77');
     expect(serialized).not.toContain('deploy');
     expect(serialized).not.toContain('Connection refused');
+  });
+
+  test('a remote command failure (non-255) keeps the static message and adds a scrubbed stderr_tail', async () => {
+    const op = getOp('check', 'ports');
+    if (!op) {
+      throw new Error('check ports op missing');
+    }
+    const stderr = 'ss: netlink failure\nretrying with API_TOKEN=fake-secret-value-1';
+    const runner = scriptedRunner([
+      { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false },
+      { code: 0, stdout: '', stderr: '', timedOut: false },
+      { code: 1, stdout: '', stderr, timedOut: false },
+    ]);
+
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+
+    expect(envelope.error).toEqual({
+      ...errorInfo('COMMAND_FAILED', 1),
+      stderr_tail: 'ss: netlink failure\nretrying with API_TOKEN=***',
+    });
+    expect(envelope.scrubbed).toBe(1);
+    expect(JSON.stringify(envelope)).not.toContain('fake-secret-value-1');
   });
 });
 
@@ -626,7 +654,11 @@ describe('db group — layered read-only enforcement', () => {
     ]);
     const envelope = await executeOp(op, ctx, { transport: { runner } });
     expect(envelope.ok).toBe(false);
-    expect(envelope.error).toEqual(errorInfo('COMMAND_FAILED', 3));
+    expect(envelope.error).toEqual({
+      ...errorInfo('COMMAND_FAILED', 3),
+      data: { sql_error: { message: 'cannot execute INSERT in a read-only transaction' } },
+      stderr_tail: 'ERROR:  cannot execute INSERT in a read-only transaction',
+    });
   });
 
   test('db activity returns numeric query_seconds/blocked_by and backends_total vs max_connections rollups', async () => {
@@ -783,8 +815,8 @@ describe('db group — layered read-only enforcement', () => {
     const ctx = buildDbOpContext('prod', {}, writeSensitiveFixtureTargets());
     // Simulate psql actually failing with an error message that WOULD contain the
     // real user/database name (e.g. `FATAL: role "sshepherd_ro_SECRET_USER" does not
-    // exist`) — this must never reach the envelope, only the classified code + a
-    // static message + the numeric exit code.
+    // exist`) — the stderr tail keeps the error, but the target's own connection
+    // fields are masked before it reaches the envelope.
     const runner = scriptedRunner([
       { code: 0, stdout: 'HostName 10.0.0.9\n', stderr: '', timedOut: false },
       { code: 0, stdout: '', stderr: '', timedOut: false },
@@ -799,11 +831,13 @@ describe('db group — layered read-only enforcement', () => {
     const envelope = await executeOp(op, ctx, { transport: { runner } });
 
     expect(envelope.ok).toBe(false);
-    expect(envelope.error).toEqual(errorInfo('COMMAND_FAILED', 2));
+    expect(envelope.error).toEqual({
+      ...errorInfo('COMMAND_FAILED', 2),
+      stderr_tail: 'FATAL:  role "***" does not exist on database ***',
+    });
     const serialized = JSON.stringify(envelope);
     expect(serialized).not.toContain('SECRET_USER');
     expect(serialized).not.toContain('SECRET_DATABASE_NAME');
-    expect(serialized).not.toContain('does not exist');
   });
 });
 
@@ -1948,15 +1982,45 @@ describe('files download — writes straight to local disk, never inlines conten
         truncated: false,
         size_bytes: SECRET_CONTENT.length,
         written: true,
+        masked: true,
         local_path: localPath,
       });
-      expect(readFileSync(localPath, 'utf8')).toBe(SECRET_CONTENT);
+      expect(readFileSync(localPath, 'utf8')).toBe(
+        ['DB_PASSWORD=***MASKED***', 'JWT_SECRET=***MASKED***', ''].join('\n'),
+      );
 
       const serialized = JSON.stringify(envelope);
       expect(serialized).not.toContain('content_base64');
       expect(serialized).not.toContain('s3cr3t-value');
       expect(serialized).not.toContain('abcd1234');
       expect(serialized).not.toContain(contentBase64);
+    } finally {
+      delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+    }
+  });
+
+  test('a binary file is written byte for byte, never rewritten by the scrubber', async () => {
+    const op = getOp('files', 'download');
+    if (!op) {
+      throw new Error('files download op missing');
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-files-download-test-'));
+    const localPath = join(dir, 'archive.bin');
+    const allowlistPath = join(dir, 'files-allowlist.toml');
+    writeFileSync(allowlistPath, '[lms-server]\npaths = ["/opt/app/archive.bin"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistPath;
+    try {
+      const bytes = Buffer.concat([Buffer.from([0x1f, 0x8b, 0x00, 0xff]), Buffer.from('TOKEN=x')]);
+      const runner = scriptedRunner(
+        connectedRunOutcomes(`__OK__:${bytes.length}\n${bytes.toString('base64')}`),
+      );
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/opt/app/archive.bin', local_path: localPath } },
+        { transport: { runner } },
+      );
+      expect((envelope.data as { masked: boolean }).masked).toBe(false);
+      expect(readFileSync(localPath).equals(bytes)).toBe(true);
     } finally {
       delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
     }
@@ -1987,6 +2051,7 @@ describe('files download — writes straight to local disk, never inlines conten
         truncated: false,
         size_bytes: null,
         written: false,
+        masked: false,
         local_path: null,
       });
       expect(existsSync(localPath)).toBe(false);
@@ -2020,6 +2085,7 @@ describe('files download — writes straight to local disk, never inlines conten
         truncated: true,
         size_bytes: 99999999,
         written: false,
+        masked: false,
         local_path: null,
       });
       expect(existsSync(localPath)).toBe(false);
@@ -2161,6 +2227,7 @@ test('executeOp converts a thrown OpRunLocalError into a structured Envelope err
     summary: 'test-only op that always throws OpRunLocalError',
     args: [],
     mutating: false,
+    exposes: 'none',
     timeoutSec: 5,
     output: 'raw',
     buildRemote: () => null,
@@ -2185,6 +2252,7 @@ test('executeOp turns a non-OpError throw into an INTERNAL_ERROR envelope that n
     summary: 'test-only op that throws a plain Error, not OpRunLocalError',
     args: [],
     mutating: false,
+    exposes: 'none',
     timeoutSec: 5,
     output: 'raw',
     buildRemote: () => null,

@@ -2,8 +2,9 @@ import { type AuditOutcome, auditMutating, confirmGate } from './audit.ts';
 import { describeError, errorInfo, fillNext } from './errors.ts';
 import { MAX_PARTIAL_STDOUT_CHARS, MAX_TIMEOUT_SEC } from './limits.ts';
 import { assertOpPositionals, optBool } from './op-args.ts';
-import { enforceAllowlist } from './ops/config.ts';
+import { enforceAllowlist, loadScrubExtraPatterns, revealKeysOf } from './ops/config.ts';
 import { buildEnvelope, splitNdjson } from './output.ts';
+import { type ScrubOptions, scrub } from './scrub.ts';
 import { defaultSshConfigPath } from './setup-ssh-alias.ts';
 import { run, type TransportDeps } from './transport.ts';
 import {
@@ -28,6 +29,66 @@ function partialStdout(error: ErrorInfo, stdout: string): Record<string, unknown
     return undefined;
   }
   return { partial_stdout: stdout.slice(0, MAX_PARTIAL_STDOUT_CHARS) };
+}
+
+/** `error.stderr_tail` is the last 20 lines of a failed command's stderr, then at most its last
+ *  2 KiB: enough for the error and its context lines, never a dump of a chatty command. */
+const STDERR_TAIL_MAX_LINES = 20;
+const STDERR_TAIL_MAX_BYTES = 2_048;
+
+/** Cut after scrubbing, so a cut can never split a `KEY=value` pair into an unrecognised one. */
+function stderrTail(scrubbedStderr: string): string {
+  const lines = scrubbedStderr.trimEnd().split('\n');
+  const tail = lines.slice(-STDERR_TAIL_MAX_LINES).join('\n');
+  const bytes = Buffer.from(tail, 'utf8');
+  if (bytes.length <= STDERR_TAIL_MAX_BYTES) {
+    return tail;
+  }
+  return bytes.subarray(bytes.length - STDERR_TAIL_MAX_BYTES).toString('utf8');
+}
+
+/** Keys a `--reveal` named (already cleared by `enforceAllowlist`) plus the alias's own extra
+ *  patterns. Loaded before the op runs, so a malformed reveal-allowlist.toml fails the op up front. */
+function scrubOptionsFor(op: OpSpec, ctx: OpContext): ScrubOptions {
+  const reveal = op.allowlist?.find((policy) => policy.kind === 'reveal-keys');
+  return {
+    revealKeys: reveal ? revealKeysOf(ctx, reveal.argName) : new Set(),
+    extraPatterns: loadScrubExtraPatterns(ctx.alias),
+  };
+}
+
+function hiddenValues(op: OpSpec, ctx: OpContext): string[] {
+  return (op.hiddenArgs ?? [])
+    .map((name) => ctx.args[name])
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+/**
+ * The one scrub pass over an envelope: the shaped data when the op exposes anything, every
+ * error (message, `data`, partial stdout on the error path) and the command's stderr, which then
+ * becomes `stderr_tail`. Revealed keys are honoured only on success — an error never unmasks —
+ * and an op's `hiddenArgs` values are masked only in errors, where they would be echoed.
+ */
+function scrubEnvelope(
+  op: OpSpec,
+  ctx: OpContext,
+  envelope: Envelope<unknown>,
+  commandStderr: string,
+  options: ScrubOptions,
+): Envelope<unknown> {
+  const scrubData = envelope.error !== null || op.exposes !== 'none';
+  const effective =
+    envelope.error === null
+      ? options
+      : { ...options, revealKeys: new Set<string>(), literals: hiddenValues(op, ctx) };
+  const { value, count } = scrub(
+    { data: scrubData ? envelope.data : null, error: envelope.error, stderr: commandStderr },
+    effective,
+  );
+  const tail = stderrTail(value.stderr);
+  const error =
+    value.error !== null && tail.length > 0 ? { ...value.error, stderr_tail: tail } : value.error;
+  return { ...envelope, data: scrubData ? value.data : envelope.data, error, scrubbed: count };
 }
 
 export interface ExecuteDeps {
@@ -82,6 +143,8 @@ export function internalErrorInfo(command: string, err: unknown): ErrorInfo {
 interface OpResult {
   envelope: Envelope<unknown>;
   outcome: AuditOutcome;
+  /** A failed command's stderr (non-255 exits only — the transport blanks it for 255). */
+  commandStderr?: string;
 }
 
 /**
@@ -108,8 +171,15 @@ export async function executeOp(
   const requiresConfirm = op.mutating && !optBool(ctx, 'dry-run', false);
   let outcome: AuditOutcome = 'error';
   let envelope: Envelope<unknown>;
+  let commandStderr = '';
+  let scrubOptions: ScrubOptions = {};
   try {
-    ({ envelope, outcome } = await runOp(op, ctx, deps, command, requiresConfirm, startedAtMs));
+    scrubOptions = scrubOptionsFor(op, ctx);
+    ({
+      envelope,
+      outcome,
+      commandStderr = '',
+    } = await runOp(op, ctx, deps, command, requiresConfirm, startedAtMs));
   } catch (err) {
     const error = err instanceof OpError ? opErrorInfo(err) : internalErrorInfo(command, err);
     envelope = buildEnvelope({
@@ -120,6 +190,7 @@ export async function executeOp(
       error: fillNext(error, ctx.alias),
     });
   }
+  envelope = scrubEnvelope(op, ctx, envelope, commandStderr, scrubOptions);
   if (!requiresConfirm) {
     return envelope;
   }
@@ -205,7 +276,12 @@ async function runOp(
   if (result.error) {
     const data =
       op.shapeError?.(result.raw, ctx) ?? partialStdout(result.error, result.raw.stdout) ?? null;
-    return finish(data, result.error, 'error');
+    const errorData = op.errorData?.(result.raw.commandStderr);
+    const error = errorData ? { ...result.error, data: errorData } : result.error;
+    return {
+      ...finish(data, error, 'error'),
+      commandStderr: op.exposeStderr === false ? '' : result.raw.commandStderr,
+    };
   }
 
   const parsed = parseByMode(op.output, result.raw.stdout);

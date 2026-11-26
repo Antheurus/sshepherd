@@ -1,21 +1,22 @@
 {
   "ok": true,
   "alias": "",
-  "ran_at": "2026-11-26T06:53:54.729Z",
+  "ran_at": "2026-11-26T07:18:34.945Z",
   "command": "tunnel list",
-  "duration_ms": 0,
+  "duration_ms": 1,
+  "scrubbed": 0,
   "data": {
     "tunnels": [
       {
-        "id": "t-95fad2c1-0c78-4772-a28b-45a4fed5e380",
+        "id": "t-449260de-3306-435e-ac62-a2a59dee08fb",
         "alias": "smoke-alpine",
         "kind": "local",
-        "localPort": 52251,
+        "localPort": 53473,
         "remoteTarget": "app:80",
         "localTarget": null,
-        "pid": 65628,
-        "openedAt": "2026-11-26T06:53:53.533Z",
-        "expiresAt": "2026-11-26T06:55:53.533Z",
+        "pid": 93052,
+        "openedAt": "2026-11-26T07:18:33.774Z",
+        "expiresAt": "2026-11-26T07:20:33.774Z",
         "remainingSec": 119
       }
     ]

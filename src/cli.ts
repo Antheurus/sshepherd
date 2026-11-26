@@ -48,7 +48,7 @@ const GLOBAL_FLAGS = [
   '--dry-run          deploy run: print the resolved plan, execute nothing',
   `--timeout <sec>    any op: seconds the remote command may run (1-${MAX_TIMEOUT_SEC}; each op has its own default)`,
   '--pretty           render a human table/key-value view instead of JSON',
-  '--reveal <keys>    files cat: comma-separated env keys to unmask',
+  '--reveal <keys>    files cat/download: comma-separated env keys to unmask',
   '--from <path>      config put: local file to read + base64-encode (instead of --content-base64)',
   '--version, -v      print the sshepherd version',
 ];

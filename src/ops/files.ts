@@ -10,7 +10,9 @@ import {
 import { parseDu } from '../parsers/du.ts';
 import { parseLs } from '../parsers/ls.ts';
 import { shellJoin, shq } from '../quote.ts';
+import { isEnvFile, maskEnvContent, scrubText } from '../scrub.ts';
 import { OpError, type OpSpec } from '../types.ts';
+import { loadScrubExtraPatterns, revealKeysOf } from './config.ts';
 
 const DOWNLOAD_TIMEOUT_SEC = 30;
 const DOWNLOAD_MAX_BYTES = 10_485_760; // 10 MiB
@@ -27,6 +29,7 @@ const filesLs: OpSpec<ReturnType<typeof parseLs>> = {
     arg('path', 'positional', true, 'Remote directory path — must be on files-allowlist.toml.'),
   ],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
@@ -34,29 +37,6 @@ const filesLs: OpSpec<ReturnType<typeof parseLs>> = {
     shellJoin(['ls', '-la', '--time-style=long-iso', '--', reqStr(ctx, 'path')]),
   shape: (parsed) => parseLs(parsed as string),
 };
-
-const ENV_FILE_PATTERN = /(^|\/)\.env(\.|$)/;
-
-function isEnvFile(path: string): boolean {
-  return ENV_FILE_PATTERN.test(path);
-}
-
-function maskEnvContent(content: string, revealedKeys: Set<string>): string {
-  return content
-    .split('\n')
-    .map((line) => {
-      const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
-      if (!match) {
-        return line;
-      }
-      const key = match[1];
-      if (key === undefined || revealedKeys.has(key)) {
-        return line;
-      }
-      return `${key}=***MASKED***`;
-    })
-    .join('\n');
-}
 
 interface FilesCatResult {
   found: boolean;
@@ -80,6 +60,8 @@ const filesCat: OpSpec<FilesCatResult> = {
     ),
   ],
   mutating: false,
+  exposes: 'content',
+  exposeStderr: false,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [
@@ -113,20 +95,13 @@ const filesCat: OpSpec<FilesCatResult> = {
         content: null,
       };
     }
-    const path = reqStr(ctx, 'path');
-    const shouldMask = isEnvFile(path);
-    const revealedKeys = new Set(
-      optStr(ctx, 'reveal', '')
-        .split(',')
-        .map((key) => key.trim())
-        .filter((key) => key.length > 0),
-    );
+    const shouldMask = isEnvFile(reqStr(ctx, 'path'));
     return {
       found: true,
       truncated: false,
       size_bytes: Buffer.byteLength(text, 'utf8'),
       masked: shouldMask,
-      content: shouldMask ? maskEnvContent(text, revealedKeys) : text,
+      content: shouldMask ? maskEnvContent(text, revealKeysOf(ctx, 'reveal')) : text,
     };
   },
 };
@@ -145,6 +120,7 @@ const filesTail: OpSpec<FilesTailResult> = {
     arg('n', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
   ],
   mutating: false,
+  exposes: 'content',
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
@@ -156,8 +132,9 @@ const filesTail: OpSpec<FilesTailResult> = {
       '--',
       reqStr(ctx, 'path'),
     ]),
-  shape: (parsed) => {
-    const lines = (parsed as string)
+  shape: (parsed, ctx) => {
+    const text = parsed as string;
+    const lines = (isEnvFile(reqStr(ctx, 'path')) ? maskEnvContent(text, new Set()) : text)
       .split('\n')
       .map((line) => line.trimEnd())
       .filter((line) => line.length > 0);
@@ -170,7 +147,41 @@ interface FilesDownloadResult {
   truncated: boolean;
   size_bytes: number | null;
   written: boolean;
+  masked: boolean;
   local_path: string | null;
+}
+
+const UTF8 = new TextDecoder('utf-8', { fatal: true });
+
+function decodeText(bytes: Buffer): string | null {
+  try {
+    const text = UTF8.decode(bytes);
+    return text.includes('\u0000') ? null : text;
+  } catch {
+    return null;
+  }
+}
+
+/** What `files download` writes: a text file gets the same masking `files cat` shows (whole-file
+ *  for env-shaped paths, then the scrubber), with `--reveal` keys left as they are; a binary file
+ *  (invalid UTF-8 or a NUL byte) is written byte for byte, since rewriting it would corrupt it. */
+function downloadBytes(
+  contentBase64: string,
+  path: string,
+  alias: string,
+  revealKeys: Set<string>,
+): { bytes: Buffer; masked: boolean } {
+  const raw = Buffer.from(contentBase64, 'base64');
+  const text = decodeText(raw);
+  if (text === null) {
+    return { bytes: raw, masked: false };
+  }
+  const envMasked = isEnvFile(path) ? maskEnvContent(text, revealKeys) : text;
+  const scrubbed = scrubText(envMasked, {
+    revealKeys,
+    extraPatterns: loadScrubExtraPatterns(alias),
+  }).value;
+  return { bytes: Buffer.from(scrubbed, 'utf8'), masked: scrubbed !== text };
 }
 
 /** Writes the decoded bytes straight to local disk and never returns them — this is the
@@ -181,9 +192,9 @@ interface FilesDownloadResult {
  *  this process's memory to decode — that's the same local-process exposure `files cat`
  *  already has before masking runs, not a new one; the fix is that raw content never
  *  crosses back into the envelope that reaches the agent. */
-function writeDownloadedFile(localPath: string, contentBase64: string): void {
+function writeDownloadedFile(localPath: string, bytes: Buffer): void {
   try {
-    writeFileSync(localPath, Buffer.from(contentBase64, 'base64'));
+    writeFileSync(localPath, bytes);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new OpError(
@@ -200,11 +211,21 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
   args: [
     arg('path', 'positional', true, 'Remote file path — must be on files-allowlist.toml.'),
     arg('local_path', 'positional', true, 'Local destination path to write the file to.'),
+    arg(
+      'reveal',
+      'flag',
+      false,
+      'Comma-separated key names written unmasked — same denylist + reveal-allowlist.toml gate as files cat.',
+    ),
   ],
   mutating: false,
+  exposes: 'content',
   timeoutSec: DOWNLOAD_TIMEOUT_SEC,
   output: 'raw',
-  allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
+  allowlist: [
+    { kind: 'path', scope: 'files', argName: 'path' },
+    { kind: 'reveal-keys', argName: 'reveal' },
+  ],
   buildRemote: (ctx) => {
     const path = reqStr(ctx, 'path');
     const script = [
@@ -222,7 +243,14 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
     const firstLine = (newlineIndex === -1 ? text : text.slice(0, newlineIndex)).trim();
 
     if (firstLine === '__NOT_FOUND__') {
-      return { found: false, truncated: false, size_bytes: null, written: false, local_path: null };
+      return {
+        found: false,
+        truncated: false,
+        size_bytes: null,
+        written: false,
+        masked: false,
+        local_path: null,
+      };
     }
     const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(firstLine);
     if (tooLarge) {
@@ -232,18 +260,26 @@ const filesDownload: OpSpec<FilesDownloadResult> = {
         truncated: true,
         size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
         written: false,
+        masked: false,
         local_path: null,
       };
     }
     const ok = /^__OK__:(\d+)/.exec(firstLine);
     const size = ok?.[1];
     const contentBase64 = newlineIndex === -1 ? '' : text.slice(newlineIndex + 1).trim();
-    writeDownloadedFile(localPath, contentBase64);
+    const { bytes, masked } = downloadBytes(
+      contentBase64,
+      reqStr(ctx, 'path'),
+      ctx.alias,
+      revealKeysOf(ctx, 'reveal'),
+    );
+    writeDownloadedFile(localPath, bytes);
     return {
       found: true,
       truncated: false,
       size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
       written: true,
+      masked,
       local_path: localPath,
     };
   },
@@ -260,6 +296,7 @@ const filesDiskUsage: OpSpec<FilesDiskUsageResult> = {
   summary: 'Total size in bytes of a remote path (du -sb).',
   args: [arg('path', 'positional', true, 'Remote path — must be on files-allowlist.toml.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
@@ -302,6 +339,7 @@ const filesUpload: OpSpec<FilesUploadResult> = {
     ),
   ],
   mutating: true,
+  exposes: 'none',
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'remote_path' }],

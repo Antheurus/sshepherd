@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T07:18:30.180Z",
+  "command": "files cat",
+  "duration_ms": 20,
+  "scrubbed": 1,
+  "data": {
+    "found": true,
+    "truncated": false,
+    "size_bytes": 93,
+    "masked": false,
+    "content": "#!/bin/sh\nexport PORT=3000\nexport SESSION_SECRET=***\nexec /usr/local/bin/app\n"
+  },
+  "error": null
+}

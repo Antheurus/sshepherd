@@ -1,15 +1,16 @@
 {
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T06:53:50.750Z",
+  "ran_at": "2026-11-26T07:18:30.794Z",
   "command": "security listeners",
   "duration_ms": 22,
+  "scrubbed": 0,
   "data": {
     "listening": [
       {
         "proto": "tcp",
         "local_addr": "127.0.0.11",
-        "port": 44529,
+        "port": 38037,
         "process": null,
         "pid": null
       },

@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T07:18:30.412Z",
+  "command": "files tail",
+  "duration_ms": 20,
+  "scrubbed": 1,
+  "data": {
+    "lines": [
+      "#!/bin/sh",
+      "export PORT=3000",
+      "export SESSION_SECRET=***",
+      "exec /usr/local/bin/app"
+    ],
+    "lines_returned": 4
+  },
+  "error": null
+}

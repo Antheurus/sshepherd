@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-26T07:18:30.062Z",
+  "command": "files cat",
+  "duration_ms": 20,
+  "scrubbed": 0,
+  "data": {
+    "found": true,
+    "truncated": false,
+    "size_bytes": 89,
+    "masked": true,
+    "content": "DB_PASSWORD=***MASKED***\nNODE_ENV=***MASKED***\nexport API_KEY=\"***MASKED***\"\n"
+  },
+  "error": null
+}

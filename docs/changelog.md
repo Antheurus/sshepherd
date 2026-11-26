@@ -1,5 +1,12 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.5 — Secrets in command output are masked everywhere
+
+- Every command's output now passes one secret filter: passwords, tokens, API keys, JWTs, private keys, the password inside connection URLs and Bearer tokens show as `***`, while ordinary values such as `PORT=3000` or a database host stay visible. Each response says how many values were masked (`scrubbed`).
+- Secret-looking files (`.env`, `prod.env`, `*.vars`, `*.secrets`, `credentials`, `*.pem`, `id_*`) are masked in `files cat`, `files tail`, `config get` and in the file `files download` writes to disk. `files download` accepts `--reveal` with the same rules as `files cat`.
+- When a remote command fails, the error now includes the last lines of what it printed to stderr (masked), and a failed database query reports the database's own error message in `error.data.sql_error`.
+- You can add your own patterns to mask for one server in `reveal-allowlist.toml` under `[<alias>.scrub] extra_patterns`.
+
 ## v0.4.0-rc.4 — sshepherd doctor and a safe install/rollback
 
 - New `sshepherd doctor`: shows whether the installed binary differs from the built one, whether SKILL.md still lists exactly the commands that exist, and which db targets do not use a read-only role (names only).

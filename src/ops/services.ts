@@ -78,6 +78,7 @@ const servicesPs: OpSpec<ServiceEntry[]> = {
     'All containers (running + stopped), each entry merged from docker inspect (health/restarts/oom/limits).',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'native-json',
   buildRemote: () =>
@@ -151,6 +152,7 @@ const servicesStats: OpSpec<ServiceStatsEntry[]> = {
   summary: 'One-shot resource usage snapshot per container, sizes converted to bytes.',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'ndjson',
   buildRemote: () => shellJoin(['docker', 'stats', '--no-stream', '--format', 'json']),
@@ -192,6 +194,7 @@ const servicesInspect: OpSpec<ServiceInspectDetail[]> = {
   summary: 'Full inspect detail for one container — cap audit + exit-137 evidence in one call.',
   args: [arg('container', 'positional', true, 'Container name or ID.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'native-json',
   buildRemote: (ctx) => shellJoin(['docker', 'inspect', '--', reqStr(ctx, 'container')]),
@@ -211,6 +214,7 @@ const servicesComposePs: OpSpec<ComposePsEntry[]> = {
   summary: 'docker compose ps for a given compose file, ports parsed into structured objects.',
   args: [arg('file', 'positional', true, 'Path to the docker-compose file on the remote.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'ndjson',
   buildRemote: (ctx) =>
@@ -240,6 +244,7 @@ const servicesHealthcheck: OpSpec<HealthcheckResult> = {
   summary: 'Container .State.Health status + failing streak + last probe log.',
   args: [arg('container', 'positional', true, 'Container name or ID.')],
   mutating: false,
+  exposes: 'content',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'native-json',
   buildRemote: (ctx) =>
@@ -279,6 +284,7 @@ const servicesSystemctlStatus: OpSpec<ReturnType<typeof parseSystemctlShow>> = {
     'systemd unit status via `systemctl show --property=` (portable across systemd versions).',
   args: [arg('unit', 'positional', true, 'systemd unit name.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) =>
@@ -297,6 +303,7 @@ const servicesRestart: OpSpec<{ container: string; restarted: boolean }> = {
   summary: 'docker restart a container.',
   args: [arg('container', 'positional', true, 'Container name or ID.')],
   mutating: true,
+  exposes: 'none',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) => shellJoin(['docker', 'restart', '--', reqStr(ctx, 'container')]),
@@ -314,6 +321,7 @@ function systemctlVerbOp(
     summary: `systemctl ${verb} a unit.`,
     args: [arg('unit', 'positional', true, 'systemd unit name.')],
     mutating: true,
+    exposes: 'none',
     timeoutSec: SERVICES_TIMEOUT_SEC,
     output: 'raw',
     buildRemote: (ctx) => shellJoin(['systemctl', verb, '--', reqStr(ctx, 'unit')]),

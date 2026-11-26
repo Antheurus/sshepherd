@@ -124,6 +124,7 @@ use_fixture_env() {
   export SSHEPHERD_TUNNEL_STATE_DIR="$STATE/tunnels"
   export SSHEPHERD_TARGETS_PATH="$STATE/targets.toml"
   export SSHEPHERD_FILES_ALLOWLIST_PATH="$STATE/files-allowlist.toml"
+  export SSHEPHERD_REVEAL_ALLOWLIST_PATH="$STATE/reveal-allowlist.toml"
   export XDG_RUNTIME_DIR="$STATE/run"
 }
 
@@ -245,12 +246,33 @@ run_matrix() {
     "d['ok'] is True and 'lines' in d['data'] and 'next_since' in d['data']"
 
   step "[$variant] setup files-allowlist scaffold, then files ls"
-  run_cli setup_files_allowlist setup files-allowlist scaffold "$alias" --paths /root --yes
+  run_cli setup_files_allowlist setup files-allowlist scaffold "$alias" \
+    --paths /root,/opt/myapp/prod.env,/opt/myapp/start.sh --yes
   assert_json "[$variant] files-allowlist scaffolded for /root" setup_files_allowlist \
     "d['ok'] is True and '/root' in d['data']['paths']"
   run_cli files_ls files ls "$alias" /root
   assert_json "[$variant] files ls: array of entries" files_ls \
     "d['ok'] is True and isinstance(d['data'], list)"
+
+  step "[$variant] secret-shaped files: files cat / tail / download mask every value"
+  run_cli files_cat_env files cat "$alias" /opt/myapp/prod.env
+  assert_json "[$variant] files cat prod.env: masked, no fake value" files_cat_env \
+    "d['ok'] is True and d['data']['masked'] is True and 'fake-secret-value' not in json.dumps(d) and 'DB_PASSWORD=***' in d['data']['content'] and 'export API_KEY=' in d['data']['content']"
+  run_cli files_cat_export files cat "$alias" /opt/myapp/start.sh
+  assert_json "[$variant] files cat start.sh: export KEY=v scrubbed, PORT kept" files_cat_export \
+    "d['ok'] is True and 'export SESSION_SECRET=***' in d['data']['content'] and 'export PORT=3000' in d['data']['content'] and d['scrubbed'] == 1 and 'fake-secret-value' not in json.dumps(d)"
+  run_cli files_tail_env files tail "$alias" /opt/myapp/prod.env
+  assert_json "[$variant] files tail prod.env: masked, no fake value" files_tail_env \
+    "d['ok'] is True and 'DB_PASSWORD=***MASKED***' in d['data']['lines'] and 'fake-secret-value' not in json.dumps(d)"
+  run_cli files_tail_export files tail "$alias" /opt/myapp/start.sh
+  assert_json "[$variant] files tail start.sh: export KEY=v scrubbed" files_tail_export \
+    "d['ok'] is True and 'export SESSION_SECRET=***' in d['data']['lines'] and 'fake-secret-value' not in json.dumps(d)"
+  run_cli files_download_env files download "$alias" /opt/myapp/prod.env "$OUT/prod.env.download"
+  assert_json "[$variant] files download prod.env: masked bytes on disk" files_download_env \
+    "d['ok'] is True and d['data']['masked'] is True and 'fake-secret-value' not in open('$OUT/prod.env.download').read() and 'DB_PASSWORD=***MASKED***' in open('$OUT/prod.env.download').read()"
+  run_cli files_download_export files download "$alias" /opt/myapp/start.sh "$OUT/start.sh.download"
+  assert_json "[$variant] files download start.sh: export KEY=v scrubbed on disk" files_download_export \
+    "d['ok'] is True and 'export SESSION_SECRET=***' in open('$OUT/start.sh.download').read() and 'export PORT=3000' in open('$OUT/start.sh.download').read() and 'fake-secret-value' not in open('$OUT/start.sh.download').read()"
 
   step "[$variant] security listeners"
   run_cli security_listeners security listeners "$alias"
@@ -267,6 +289,10 @@ run_matrix() {
   run_cli db_query db query "$alias" "SELECT note FROM smoke_fixture"
   assert_json "[$variant] db query: seeded row comes back" db_query \
     "d['ok'] is True and d['data'][0]['note'] == 'hello from sshepherd smoke fixture'"
+
+  run_cli_any db_query_error db query "$alias" "SELECT nonexistent"
+  assert_json "[$variant] db query error: sql_error names the column, no password text" db_query_error \
+    "d['ok'] is False and 'column' in d['error']['data']['sql_error']['message'] and 'password' not in json.dumps(d).lower()"
 
   step "[$variant] deploy run --dry-run"
   run_cli deploy_dry_run deploy run "$alias" --dry-run

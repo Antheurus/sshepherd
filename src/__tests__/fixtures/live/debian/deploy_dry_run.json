@@ -1,9 +1,10 @@
 {
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T06:53:45.786Z",
+  "ran_at": "2026-11-26T07:18:25.157Z",
   "command": "deploy run",
   "duration_ms": 0,
+  "scrubbed": 0,
   "data": {
     "recipe": "smoke-debian",
     "alias": "smoke-debian",

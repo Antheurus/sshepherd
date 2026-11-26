@@ -37,5 +37,11 @@ RUN mkdir -p /run/sshd /root/.ssh \
        echo 'ChallengeResponseAuthentication no'; \
      } >> /etc/ssh/sshd_config
 
+# Secret-shaped files for the masking checks in scripts/smoke.sh: an env file and a plain script
+# that exports a secret. Every value is an obviously fake fixture string.
+RUN mkdir -p /opt/myapp \
+  && printf 'DB_PASSWORD=fake-secret-value-1\nNODE_ENV=production\nexport API_KEY="fake-secret-value-1"\n' > /opt/myapp/prod.env \
+  && printf '#!/bin/sh\nexport PORT=3000\nexport SESSION_SECRET=fake-secret-value-2\nexec /usr/local/bin/app\n' > /opt/myapp/start.sh
+
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D", "-e"]

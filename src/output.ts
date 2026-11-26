@@ -61,6 +61,8 @@ export interface BuildEnvelopeInput<T> {
   startedAtMs: number;
   data: T | null;
   error: ErrorInfo | null;
+  /** Set by `executeOp` after its scrub pass; envelopes built elsewhere mask nothing. */
+  scrubbed?: number;
 }
 
 /**
@@ -75,6 +77,7 @@ export function buildEnvelope<T>(input: BuildEnvelopeInput<T>): Envelope<T> {
     ran_at: new Date().toISOString(),
     command: input.command,
     duration_ms: Date.now() - input.startedAtMs,
+    scrubbed: input.scrubbed ?? 0,
     data: input.data,
     error: input.error,
   };

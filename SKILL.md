@@ -77,8 +77,11 @@ exception noted below.
   path not pre-declared for that alias in `~/.config/sshepherd/files-allowlist.toml` —
   fail-closed, same rule as `config get`/`put`/`validate` and `config-allowlist.toml`. See
   Gotchas #11.
-- `.env`-shaped files (`files cat`) are masked by default (`KEY=***MASKED***`); an agent
-  must pass `--reveal KEY1,KEY2` to unmask specific keys, and each key must clear a
+- Secret-shaped files — a basename containing `.env` (`.env`, `.env.local`, `prod.env`), ending
+  `.vars`/`.secrets`, `credentials*`, `*.pem`, `id_*` — are masked by default
+  (`KEY=***MASKED***`, `export` and quoted/continued values included) in `files cat`, `files tail`,
+  `files download` (the bytes written to disk) and `config get`; an agent
+  must pass `--reveal KEY1,KEY2` (`files cat`/`files download`) to unmask specific keys, and each key must clear a
   hardcoded secret-pattern denylist (`PASSWORD`, `SECRET`, `TOKEN`, `PRIVATE_KEY`,
   `CREDENTIAL`, `API_KEY`, ...) *and* be pre-declared in
   `~/.config/sshepherd/reveal-allowlist.toml` — the denylist wins even over a mistaken
@@ -125,10 +128,19 @@ The **first positional** differs by group:
 | `--dry-run` | `deploy run` only: print the resolved plan, execute nothing, no `--yes` needed |
 | `--timeout <sec>` | any op: seconds the remote command may run, 1-3600 (each op has its own default); out of range returns `INVALID_ARGS` |
 | `--pretty` | render a human table/key-value view instead of JSON |
-| `--reveal <keys>` | `files cat` only: comma-separated env-var keys to unmask |
+| `--reveal <keys>` | `files cat`/`files download`: comma-separated env-var keys to unmask |
 | `--from <path>` | `config put` only: local file to read + base64-encode (instead of typing `--content-base64` by hand) |
 
 Output is JSON to stdout by default (one `Envelope` per call — see `references/output-shapes.md`).
+Every op output that can carry remote text passes one scrubber before it is printed: secret-named
+values (`DB_PASSWORD=`, `token:`, `"api_key":`), JWTs, `sk-`/`ghp_`/`xox?-` tokens, AWS key ids,
+PEM private keys, the password in `scheme://user:pass@` and `Bearer` tokens become `***`;
+`PORT=3000` or `DB_HOST=…` stay visible. The envelope's `scrubbed` is how many values were masked
+(a count, never the originals). A per-alias `[<alias>.scrub] extra_patterns = ["regex"]` table in
+`reveal-allowlist.toml` masks anything else that is secret for that host. A command that ran and
+failed (any exit but ssh's own 255) carries `error.stderr_tail` — its last 20 lines / 2 KB of
+stderr, scrubbed (not for `files cat`/`config get`); `db` ops add `error.data.sql_error`
+`{message, detail?, hint?}` from psql's `ERROR:` lines, with the target's user/database masked.
 Exit codes: `0` success, `1` the op ran and failed (transport/command error, or a refused
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).

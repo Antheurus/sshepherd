@@ -1,9 +1,10 @@
 {
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T06:53:49.466Z",
+  "ran_at": "2026-11-26T07:18:28.788Z",
   "command": "hosts disconnect",
   "duration_ms": 7,
+  "scrubbed": 0,
   "data": {
     "closed": 1
   },

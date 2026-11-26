@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T07:18:23.950Z",
+  "command": "files tail",
+  "duration_ms": 21,
+  "scrubbed": 0,
+  "data": {
+    "lines": [
+      "DB_PASSWORD=***MASKED***",
+      "NODE_ENV=***MASKED***",
+      "export API_KEY=\"***MASKED***\""
+    ],
+    "lines_returned": 3
+  },
+  "error": null
+}

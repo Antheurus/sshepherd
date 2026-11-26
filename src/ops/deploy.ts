@@ -51,6 +51,7 @@ const deployRun: OpSpec<DeployPlan | { output: string }> = {
     ),
   ],
   mutating: true,
+  exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) => {
@@ -71,6 +72,7 @@ const deployStatus: OpSpec<ComposePsEntry[]> = {
   summary: 'docker compose ps for the recipe workdir — live image tag/health per service.',
   args: [arg('recipe', 'positional', true, 'Recipe name.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: DEFAULT_TIMEOUT_SEC,
   output: 'ndjson',
   buildRemote: (ctx) => {
@@ -89,6 +91,7 @@ const deployRollback: OpSpec<{ output: string }> = {
   summary: 'Roll back using the recipe [rollback] block — refuses when the recipe declares none.',
   args: [arg('recipe', 'positional', true, 'Recipe name.')],
   mutating: true,
+  exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) => buildRollbackCommand(loadRecipeFromCtx(ctx)),
@@ -104,6 +107,7 @@ const deployLogs: OpSpec<{ output: string }> = {
     arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
   ],
   mutating: false,
+  exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) => {
@@ -124,6 +128,7 @@ const deployMigrate: OpSpec<{ output: string }> = {
   summary: 'Run only the migrate-kind steps of a recipe, in resolved order.',
   args: [arg('recipe', 'positional', true, 'Recipe name.')],
   mutating: true,
+  exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) => {

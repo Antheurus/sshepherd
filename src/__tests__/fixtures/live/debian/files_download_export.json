@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T07:18:24.318Z",
+  "command": "files download",
+  "duration_ms": 21,
+  "scrubbed": 0,
+  "data": {
+    "found": true,
+    "truncated": false,
+    "size_bytes": 93,
+    "written": true,
+    "masked": true,
+    "local_path": "/tmp/sshepherd-smoke/out/debian/start.sh.download"
+  },
+  "error": null
+}

@@ -1,11 +1,12 @@
 {
   "ok": true,
   "alias": "",
-  "ran_at": "2026-11-26T06:53:49.347Z",
+  "ran_at": "2026-11-26T07:18:28.677Z",
   "command": "tunnel close",
   "duration_ms": 1,
+  "scrubbed": 0,
   "data": {
-    "id": "t-b1223f24-7fe8-4dee-a0f4-eebf65bedfcc",
+    "id": "t-3fe592e2-af1d-46ca-9926-a192ce7fe21d",
     "closed": true
   },
   "error": null

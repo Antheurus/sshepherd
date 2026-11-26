@@ -32,6 +32,7 @@ const checkOverview: OpSpec<CheckOverviewResult> = {
   summary: 'Bundled survival denominators: nproc/mem/disk/uptime/PSI + a dead_end_risk verdict.',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
@@ -82,6 +83,7 @@ const checkMem: OpSpec<CheckMemResult> = {
   summary: 'Memory usage + PSI pressure with a dead_end_risk verdict.',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
@@ -122,6 +124,7 @@ const checkDisk: OpSpec<CheckDiskResult> = {
   summary: 'Disk usage + inodes + top space consumers with a dead_end_risk verdict.',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
@@ -164,6 +167,7 @@ const checkCpu: OpSpec<CheckCpuResult> = {
   summary: 'Load average vs core count + top CPU processes.',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>
@@ -200,6 +204,7 @@ const checkPorts: OpSpec<CheckPortsResult> = {
   summary: 'Listening TCP ports (ss -tlnp), structured — never a raw address string.',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: CHECK_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: () => shellJoin(['ss', '-H', '-tlnp']),
@@ -216,6 +221,7 @@ const checkOomHistory: OpSpec<CheckOomHistoryResult> = {
   summary: 'Kernel OOM-killer events from dmesg (per-container OOM lives in services ps).',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: CHECK_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: () =>
@@ -236,6 +242,7 @@ const checkKernel: OpSpec<CheckKernelResult> = {
   summary: 'swappiness/overcommit_memory/file-max + cgroup swapaccount cmdline flag.',
   args: [],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: CHECK_TIMEOUT_SEC,
   output: { parse: splitSections },
   buildRemote: () =>

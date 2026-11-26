@@ -1,0 +1,22 @@
+{
+  "ok": false,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-26T07:18:25.054Z",
+  "command": "db query",
+  "duration_ms": 61,
+  "scrubbed": 0,
+  "data": null,
+  "error": {
+    "code": "COMMAND_FAILED",
+    "message": "Remote command exited with a non-zero status",
+    "hint": "The command ran and exited non-zero; read remote_exit and the data payload, then fix the cause before re-running.",
+    "retryable": false,
+    "remote_exit": 1,
+    "data": {
+      "sql_error": {
+        "message": "column \"nonexistent\" does not exist"
+      }
+    },
+    "stderr_tail": "ERROR:  column \"nonexistent\" does not exist\nLINE 1: ...ACTION READ ONLY; SELECT json_agg(t) FROM (SELECT nonexisten...\n                                                             ^"
+  }
+}

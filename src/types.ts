@@ -14,6 +14,8 @@ export interface Envelope<T> {
   ran_at: string;
   command: string;
   duration_ms: number;
+  /** How many values `scrub` masked while building this envelope — a count, never the originals. */
+  scrubbed: number;
   data: T | null;
   error: ErrorInfo | null;
 }
@@ -63,6 +65,10 @@ export interface ErrorInfo {
   op_outcome?: 'ok' | 'error' | 'refused';
   /** `AUDIT_WRITE_FAILED` only: the op's own error, when it had one; `data` keeps its result. */
   op_error?: ErrorInfo;
+  /** Non-255 exits only: the last lines of the remote command's stderr, scrubbed. */
+  stderr_tail?: string;
+  /** Structured detail an op recovered from the failure (`db` ops: `sql_error`), scrubbed. */
+  data?: Record<string, unknown>;
 }
 
 /** Optional guidance a raiser attaches to an `OpError`; each field overrides the per-code default. */
@@ -116,6 +122,11 @@ export interface RawResult {
   timedOut: boolean;
 }
 
+/** What an op's shaped output can carry from the remote: `none` (constants, local state, echoed
+ *  args), `metadata` (structured system facts — names, sizes, process command lines), `content`
+ *  (file text, log lines, query rows). `executeOp` scrubs `metadata` and `content` output. */
+export type Exposure = 'none' | 'metadata' | 'content';
+
 export type OutputMode = 'native-json' | 'ndjson' | 'raw' | { parse: (stdout: string) => unknown };
 
 export interface OpContext {
@@ -155,6 +166,10 @@ export interface OpSpec<T = unknown> {
   summary: string;
   args: ArgSpec[];
   mutating: boolean;
+  exposes: Exposure;
+  /** Default true: a non-255 failure carries `error.stderr_tail`. False where stderr can echo the
+   *  very content the op masks (`files cat`, `config get`). */
+  exposeStderr?: boolean;
   timeoutSec: number;
   output: OutputMode;
   buildRemote: (ctx: OpContext) => string | null;
@@ -164,6 +179,12 @@ export interface OpSpec<T = unknown> {
    *  step failed. Reads `raw.stdout` only, never `transportStderr`/`commandStderr`.
    *  Returns `undefined` when nothing to add, in which case `data` stays `null`. */
   shapeError?: (raw: RawResult, ctx: OpContext) => Record<string, unknown> | undefined;
+  /** Optional: recovers structured detail from a failed command's stderr into `error.data`
+   *  (scrubbed with the rest of the envelope) — e.g. psql's `ERROR:`/`DETAIL:`/`HINT:` lines. */
+  errorData?: (commandStderr: string) => Record<string, unknown> | undefined;
+  /** Args resolved from local config that an envelope never carries (a db target's user,
+   *  database, container, compose file, service): masked as whole words in every error. */
+  hiddenArgs?: string[];
   runLocal?: (ctx: OpContext, sshConfigPath: string, transport?: TransportDeps) => T | Promise<T>;
   /** Optional: one or more allowlist gates `executeOp` enforces before `buildRemote`. */
   allowlist?: AllowlistPolicy[];

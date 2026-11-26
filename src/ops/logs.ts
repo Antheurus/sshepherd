@@ -39,6 +39,7 @@ const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
     arg('since', 'flag', false, 'Only lines newer than this timestamp/duration.'),
   ],
   mutating: false,
+  exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: buildLogsDocker,
@@ -71,6 +72,7 @@ const logsService: OpSpec<ReturnType<typeof buildLogsResult>> = {
     arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
   ],
   mutating: false,
+  exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
   output: 'ndjson',
   buildRemote: (ctx) =>
@@ -94,6 +96,7 @@ const logsDockerDaemon: OpSpec<ReturnType<typeof buildLogsResult>> = {
   summary: 'Tail the docker daemon journal (feeds the exit-137 differential).',
   args: [arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`)],
   mutating: false,
+  exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
   output: 'ndjson',
   buildRemote: (ctx) =>
@@ -121,6 +124,7 @@ const logsNginx: OpSpec<ReturnType<typeof buildLogsResult>> = {
     arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
   ],
   mutating: false,
+  exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) => {

@@ -1,8 +1,9 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { executeOp, listOps } from '../registry.ts';
+import * as scrubModule from '../scrub.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
 import type { OpSpec } from '../types.ts';
 
@@ -39,6 +40,9 @@ const AUDITED_MUTATING_OPS = [
 ];
 
 const UNAUDITED_MUTATING_OPS: string[] = [];
+
+const EXPOSURES = ['none', 'metadata', 'content'];
+const FAKE_SECRET = 'fake-secret-value-1';
 
 let scratch = '';
 const savedEnv: Record<string, string | undefined> = {};
@@ -147,6 +151,71 @@ describe('registry contract — every op in listOps()', () => {
   test('group/name is unique across the registry', () => {
     const keys = ops.map((op) => `${op.group}/${op.name}`);
     expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  test('every op declares exposes as none, metadata or content', () => {
+    for (const op of ops) {
+      const name = `${op.group} ${op.name}`;
+      expect({ op: name, exposes: EXPOSURES.includes(op.exposes) }).toEqual({
+        op: name,
+        exposes: true,
+      });
+    }
+  });
+
+  test('every op that exposes output hands its shaped data to scrub, and no secret in it reaches the envelope', async () => {
+    const succeedingRunner: SshRunner = async (args) => ({
+      code: 0,
+      stdout: args[0] === '-G' ? 'hostname 10.0.0.9\n' : '',
+      stderr: '',
+      timedOut: false,
+    });
+    const spy = spyOn(scrubModule, 'scrub');
+    const checked: string[] = [];
+    try {
+      for (const [index, op] of ops.filter((entry) => entry.exposes !== 'none').entries()) {
+        const name = `${op.group} ${op.name}`;
+        const payload = { probe: name, line: `API_TOKEN=${FAKE_SECRET}` };
+        const probing: OpSpec = { ...op, shape: () => payload };
+        if (op.runLocal) {
+          probing.runLocal = () => payload;
+        }
+        const args = op.group === 'db' ? { ...argsFor(op), container: 'app-db' } : argsFor(op);
+        spy.mockClear();
+        const envelope = await executeOp(
+          probing,
+          { alias: ALIAS, args },
+          {
+            transport: { runner: succeedingRunner },
+            sshConfigPath: join(scratch, 'ssh_config'),
+            yes: true,
+            auditLogPath: join(scratch, `audit-scrub-${index}.jsonl`),
+          },
+        );
+        const scrubbedPayload = spy.mock.calls.some(([arg]) =>
+          JSON.stringify(arg).includes(`"probe":"${name}"`),
+        );
+        expect({
+          op: name,
+          error: envelope.error?.message ?? null,
+          scrubbedPayload,
+          scrubCalls: spy.mock.calls.length,
+        }).toEqual({ op: name, error: null, scrubbedPayload: true, scrubCalls: 1 });
+        expect({ op: name, leaked: JSON.stringify(envelope).includes(FAKE_SECRET) }).toEqual({
+          op: name,
+          leaked: false,
+        });
+        expect({ op: name, scrubbed: envelope.scrubbed }).toEqual({ op: name, scrubbed: 1 });
+        checked.push(name);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    const contentOps = ops
+      .filter((op) => op.exposes === 'content')
+      .map((op) => `${op.group} ${op.name}`);
+    expect(contentOps.every((name) => checked.includes(name))).toBe(true);
+    expect(contentOps.length).toBeGreaterThan(0);
   });
 
   for (const op of ops) {

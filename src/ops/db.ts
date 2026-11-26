@@ -26,6 +26,37 @@ function dbConnectionFromCtx(ctx: OpContext): DbConnection {
   };
 }
 
+/** The target's connection fields `buildDbOpContext` resolves from targets.toml. */
+const DB_CONNECTION_ARGS = ['db_user', 'db_name', 'container', 'compose_file', 'service'];
+
+const PSQL_FIELD = /^(?:psql:\S*\s+)?(ERROR|DETAIL|HINT):\s+(.*)$/gm;
+
+/** psql's own `ERROR:`/`DETAIL:`/`HINT:` lines, first of each, as `error.data.sql_error`. No
+ *  `position`: psql's caret points into the wrapped statement (read-only transaction + json_agg),
+ *  so a column number would not match the SQL the caller wrote. */
+function psqlErrorData(commandStderr: string): Record<string, unknown> | undefined {
+  const fields = new Map<string, string>();
+  for (const match of commandStderr.matchAll(PSQL_FIELD)) {
+    const name = match[1]?.toLowerCase();
+    const text = match[2]?.trim();
+    if (name !== undefined && text !== undefined && !fields.has(name)) {
+      fields.set(name, text);
+    }
+  }
+  const message = fields.get('error');
+  if (message === undefined) {
+    return undefined;
+  }
+  const sqlError: Record<string, string> = { message };
+  for (const name of ['detail', 'hint']) {
+    const text = fields.get(name);
+    if (text !== undefined) {
+      sqlError[name] = text;
+    }
+  }
+  return { sql_error: sqlError };
+}
+
 /** `wrapAsJsonAgg` turns zero rows into SQL NULL, which psql -qAt prints as an empty string. */
 function parseJsonArray(parsed: unknown): unknown[] {
   if (parsed === null) {
@@ -44,6 +75,7 @@ const dbList: OpSpec<DbListResult> = {
   summary: 'List declared pg-target names from targets.toml (names only — never host/user/db).',
   args: [],
   mutating: false,
+  exposes: 'none',
   timeoutSec: DB_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: () => null,
@@ -69,8 +101,11 @@ const dbTables: OpSpec<DbTableEntry[]> = {
   summary: 'All user tables with total size in bytes (indexes + toast included).',
   args: [arg('target', 'positional', true, 'pg-target name declared in targets.toml.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: DB_TIMEOUT_SEC,
   output: 'native-json',
+  errorData: psqlErrorData,
+  hiddenArgs: DB_CONNECTION_ARGS,
   buildRemote: (ctx) =>
     buildPsqlCommand(dbConnectionFromCtx(ctx), wrapReadOnlyTxn(wrapAsJsonAgg(DB_TABLES_SQL))),
   shape: (parsed) =>
@@ -118,8 +153,11 @@ const dbActivity: OpSpec<DbActivityResult> = {
     'pg_stat_activity per backend (query_seconds, blocked_by) + backends_total vs max_connections.',
   args: [arg('target', 'positional', true, 'pg-target name declared in targets.toml.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: DB_TIMEOUT_SEC,
   output: 'native-json',
+  errorData: psqlErrorData,
+  hiddenArgs: DB_CONNECTION_ARGS,
   buildRemote: (ctx) =>
     buildPsqlCommand(dbConnectionFromCtx(ctx), wrapReadOnlyTxn(DB_ACTIVITY_SQL)),
   shape: (parsed) => {
@@ -167,8 +205,11 @@ const dbConnections: OpSpec<DbConnectionsResult> = {
   summary: 'Backend count by state vs max_connections.',
   args: [arg('target', 'positional', true, 'pg-target name declared in targets.toml.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: DB_TIMEOUT_SEC,
   output: 'native-json',
+  errorData: psqlErrorData,
+  hiddenArgs: DB_CONNECTION_ARGS,
   buildRemote: (ctx) =>
     buildPsqlCommand(dbConnectionFromCtx(ctx), wrapReadOnlyTxn(DB_CONNECTIONS_SQL)),
   shape: (parsed) => {
@@ -208,8 +249,11 @@ const dbSlow: OpSpec<DbSlowResult> = {
   summary: 'Top queries by mean exec time from pg_stat_statements — degrades cleanly when absent.',
   args: [arg('target', 'positional', true, 'pg-target name declared in targets.toml.')],
   mutating: false,
+  exposes: 'content',
   timeoutSec: DB_TIMEOUT_SEC,
   output: 'native-json',
+  errorData: psqlErrorData,
+  hiddenArgs: DB_CONNECTION_ARGS,
   buildRemote: (ctx) => buildDbSlowCommand(dbConnectionFromCtx(ctx)),
   shape: (parsed) => {
     const record = readRecord(parsed);
@@ -253,8 +297,11 @@ const dbSize: OpSpec<{ databases: DbSizeEntry[] }> = {
   summary: 'Every non-template database on the server, sized in bytes.',
   args: [arg('target', 'positional', true, 'pg-target name declared in targets.toml.')],
   mutating: false,
+  exposes: 'metadata',
   timeoutSec: DB_TIMEOUT_SEC,
   output: 'native-json',
+  errorData: psqlErrorData,
+  hiddenArgs: DB_CONNECTION_ARGS,
   buildRemote: (ctx) =>
     buildPsqlCommand(dbConnectionFromCtx(ctx), wrapReadOnlyTxn(wrapAsJsonAgg(DB_SIZE_SQL))),
   shape: (parsed) => ({
@@ -278,8 +325,11 @@ const dbQuery: OpSpec<unknown[]> = {
     arg('sql', 'positional', true, 'SELECT statement to run.'),
   ],
   mutating: false,
+  exposes: 'content',
   timeoutSec: DB_TIMEOUT_SEC,
   output: 'native-json',
+  errorData: psqlErrorData,
+  hiddenArgs: DB_CONNECTION_ARGS,
   buildRemote: (ctx) => {
     const sql = reqStr(ctx, 'sql');
     assertNoMultiStatementSql(sql);

@@ -10,6 +10,7 @@ import {
   reqStr,
 } from '../op-args.ts';
 import { shellJoin, shq } from '../quote.ts';
+import { isEnvFile, maskEnvContent, REVEAL_DENYLIST_PATTERNS } from '../scrub.ts';
 import { parseTomlFile } from '../toml-parse.ts';
 import { type AllowlistPolicy, type OpContext, OpError, type OpSpec } from '../types.ts';
 
@@ -106,20 +107,23 @@ export function defaultRevealAllowlistPath(): string {
   return join(homedir(), '.config', 'sshepherd', 'reveal-allowlist.toml');
 }
 
-/** Missing file yields an empty allowlist — every `--reveal` key refused until declared,
- *  same fail-closed rule as `loadPathAllowlist`. */
-export function loadRevealAllowlist(path: string = defaultRevealAllowlistPath()): RevealAllowlist {
+const REVEAL_ALLOWLIST_HINT =
+  'Fix the line named in reveal-allowlist.toml (SSHEPHERD_REVEAL_ALLOWLIST_PATH, else ~/.config/sshepherd/reveal-allowlist.toml), then run the command again.';
+
+function readRevealAllowlistFile(path: string): Record<string, unknown> {
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
   } catch {
     return {};
   }
-  const parsed = parseTomlFile(
-    text,
-    'reveal-allowlist.toml',
-    'Fix the line named in reveal-allowlist.toml (SSHEPHERD_REVEAL_ALLOWLIST_PATH, else ~/.config/sshepherd/reveal-allowlist.toml), then run the command again.',
-  );
+  return parseTomlFile(text, 'reveal-allowlist.toml', REVEAL_ALLOWLIST_HINT);
+}
+
+/** Missing file yields an empty allowlist — every `--reveal` key refused until declared,
+ *  same fail-closed rule as `loadPathAllowlist`. */
+export function loadRevealAllowlist(path: string = defaultRevealAllowlistPath()): RevealAllowlist {
+  const parsed = readRevealAllowlistFile(path);
   const allowlist: RevealAllowlist = {};
   for (const [alias, raw] of Object.entries(parsed)) {
     const record = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
@@ -129,21 +133,49 @@ export function loadRevealAllowlist(path: string = defaultRevealAllowlistPath())
   return allowlist;
 }
 
-/** Hardcoded, non-overridable — checked before the per-alias reveal-allowlist, so a key
- *  matching one of these patterns can never be revealed even if it was mistakenly added to
- *  reveal-allowlist.toml. Case-insensitive substring/suffix match against the key name only
- *  (never the value, which `files cat` never sees unmasked until this check passes). */
-export const REVEAL_DENYLIST_PATTERNS: RegExp[] = [
-  /PASSWORD/i,
-  /PASSWD/i,
-  /SECRET/i,
-  /TOKEN/i,
-  /PRIVATE[_-]?KEY/i,
-  /CREDENTIAL/i,
-  /API[_-]?KEY/i,
-  /_KEY$/i,
-  /_PASS$/i,
-];
+export { REVEAL_DENYLIST_PATTERNS };
+
+/** An alias's own extra scrub patterns, from `[<alias>.scrub] extra_patterns = ["regex", ...]`
+ *  in reveal-allowlist.toml — the per-alias file that already says what is secret for it. Every
+ *  match is masked in that alias's output. A pattern that does not compile is refused by index,
+ *  never echoed: a human may have typed a literal secret as the pattern. */
+export function loadScrubExtraPatterns(
+  alias: string,
+  path: string = defaultRevealAllowlistPath(),
+): RegExp[] {
+  const parsed = readRevealAllowlistFile(path);
+  const aliasTable =
+    typeof parsed[alias] === 'object' && parsed[alias] !== null ? parsed[alias] : {};
+  const scrubTable = (aliasTable as Record<string, unknown>).scrub;
+  const record =
+    typeof scrubTable === 'object' && scrubTable !== null
+      ? (scrubTable as Record<string, unknown>)
+      : {};
+  const sources = Array.isArray(record.extra_patterns) ? record.extra_patterns : [];
+  return sources
+    .filter((source): source is string => typeof source === 'string')
+    .map((source, index) => {
+      try {
+        return new RegExp(source, 'g');
+      } catch {
+        throw new OpError(
+          'CONFIG_PARSE_ERROR',
+          `reveal-allowlist.toml: [${alias}.scrub] extra_patterns[${index}] is not a valid regular expression`,
+          { hint: REVEAL_ALLOWLIST_HINT },
+        );
+      }
+    });
+}
+
+/** The comma-separated key list a `--reveal`-style arg carries, trimmed, empties dropped. */
+export function revealKeysOf(ctx: OpContext, argName: string): Set<string> {
+  return new Set(
+    optStr(ctx, argName, '')
+      .split(',')
+      .map((key) => key.trim())
+      .filter((key) => key.length > 0),
+  );
+}
 
 /** Local refusal, before ssh — every requested `--reveal` key must clear the hardcoded
  *  denylist first, then be declared on the alias's reveal-allowlist.toml entry. */
@@ -176,13 +208,7 @@ export function enforceAllowlist(policies: AllowlistPolicy[] | undefined, ctx: O
       assertPathAllowed(policy.scope, ctx, reqStr(ctx, policy.argName));
       continue;
     }
-    const keys = new Set(
-      optStr(ctx, policy.argName, '')
-        .split(',')
-        .map((key) => key.trim())
-        .filter((key) => key.length > 0),
-    );
-    assertRevealKeysAllowed(ctx, keys);
+    assertRevealKeysAllowed(ctx, revealKeysOf(ctx, policy.argName));
   }
 }
 
@@ -190,6 +216,7 @@ interface ConfigGetResult {
   found: boolean;
   truncated: boolean;
   size_bytes: number | null;
+  masked: boolean;
   content: string | null;
 }
 
@@ -201,6 +228,8 @@ const configGet: OpSpec<ConfigGetResult> = {
     arg('path', 'positional', true, 'Remote file path — must be declared in the alias allowlist.'),
   ],
   mutating: false,
+  exposes: 'content',
+  exposeStderr: false,
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'config', argName: 'path' }],
@@ -214,11 +243,11 @@ const configGet: OpSpec<ConfigGetResult> = {
     ].join('; ');
     return shellJoin(['sh', '-c', script]);
   },
-  shape: (parsed) => {
+  shape: (parsed, ctx) => {
     const text = parsed as string;
     const trimmed = text.trim();
     if (trimmed === '__NOT_FOUND__') {
-      return { found: false, truncated: false, size_bytes: null, content: null };
+      return { found: false, truncated: false, size_bytes: null, masked: false, content: null };
     }
     const tooLarge = /^__TOO_LARGE__:(\d+)/.exec(trimmed);
     if (tooLarge) {
@@ -227,14 +256,17 @@ const configGet: OpSpec<ConfigGetResult> = {
         found: true,
         truncated: true,
         size_bytes: size !== undefined ? Number.parseInt(size, 10) : null,
+        masked: false,
         content: null,
       };
     }
+    const shouldMask = isEnvFile(reqStr(ctx, 'path'));
     return {
       found: true,
       truncated: false,
       size_bytes: Buffer.byteLength(text, 'utf8'),
-      content: text,
+      masked: shouldMask,
+      content: shouldMask ? maskEnvContent(text, new Set()) : text,
     };
   },
 };
@@ -264,6 +296,7 @@ const configValidate: OpSpec<{ valid: boolean }> = {
     arg('path', 'positional', true, 'Remote file path — must be declared in the alias allowlist.'),
   ],
   mutating: false,
+  exposes: 'none',
   timeoutSec: DEFAULT_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'config', argName: 'path' }],
@@ -296,6 +329,7 @@ const configPut: OpSpec<{ written: boolean }> = {
     ),
   ],
   mutating: true,
+  exposes: 'none',
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'config', argName: 'path' }],
@@ -320,6 +354,7 @@ const configReload: OpSpec<{ reloaded: boolean }> = {
   summary: 'Reload a service after a config change (systemctl reload / nginx -s reload).',
   args: [arg('service', 'positional', true, 'Service name (e.g. nginx, sshd).')],
   mutating: true,
+  exposes: 'none',
   timeoutSec: DEFAULT_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: (ctx) => buildConfigReloadCommand(reqStr(ctx, 'service')),
