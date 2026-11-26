@@ -1,0 +1,8 @@
+DROP TABLE IF EXISTS canary_users;
+CREATE TABLE canary_users (
+  id serial PRIMARY KEY,
+  email text NOT NULL,
+  password text NOT NULL,
+  api_token text NOT NULL
+);
+INSERT INTO canary_users (email, password, api_token) VALUES ('ops@example.com', '__C__db', '__C__dt');

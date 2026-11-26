@@ -69,8 +69,13 @@ side never fires first.
 `-o BatchMode=yes` is mandatory on every invocation: a spawned child process can't answer
 an interactive prompt (password, host-key confirmation, passphrase), so BatchMode makes
 ssh fail fast instead of hanging forever. For the same reason sshepherd never passes `-t`
-(no pseudo-tty) and never sets `-o StrictHostKeyChecking=no` (that would silently accept
-an unknown or changed host key — the opposite of what a security tool should do).
+(no pseudo-tty). Every connection (ControlMaster open, command, tunnel) passes
+`-o StrictHostKeyChecking=yes`, which beats whatever the ssh config says: an unknown or changed
+host key fails the call, never `no` or `accept-new`. The one place a key is fetched is
+`hosts trust`, which connects once with `accept-new` into a throwaway known_hosts,
+`PreferredAuthentications=none` (nothing authenticates or runs on the unverified host) and
+`ControlPath=none`, then records the key in the alias's real `UserKnownHostsFile` only when
+`--fingerprint` matches it (`--yes`), replacing that host's older plain or hashed entries.
 
 ## Error classification (`classify` in `transport.ts`)
 
@@ -81,12 +86,14 @@ command's* exit code, passed straight through.
 |---|---|
 | `UNKNOWN_ALIAS` | `ssh -G <alias>` fails or returns nothing — checked before any connection |
 | `CONNECT_TIMEOUT` | exit 255 + stderr matches `connection timed out\|operation timed out` |
+| `HOST_KEY_CHANGED` | exit 255 + stderr matches `remote host identification has changed\|host key for … has changed` (tested first: that banner also ends in "Host key verification failed") |
+| `HOST_KEY_UNKNOWN` | exit 255 + stderr matches `host key verification failed\|no … host key is known for` |
 | `AUTH_FAILED` | exit 255 + stderr matches `permission denied\|too many authentication failures` |
-| `HOST_KEY_MISMATCH` | exit 255 + stderr matches `remote host identification has changed` |
 | `SSH_TRANSPORT_ERROR` | exit 255, none of the above — an unclassified transport failure |
 | `COMMAND_FAILED` | any other non-zero exit code — `error.remote_exit` carries it |
 | `COMMAND_TIMEOUT` | the local wall-clock timer fired (`timedOut: true`) |
 | `CONFIRMATION_REQUIRED` | a mutating op ran without `--yes` — `confirmGate` refuses before any ssh call at all, so this code never touches the classifier |
+| `PROFILE_DENIED` | the op needs a higher `SSHEPHERD_PROFILE` (or a target `max_profile` caps it) — `profileDenial` refuses before the confirm gate and before any ssh call |
 
 Classification reads `raw.transportStderr` **only** to pick the code — never to build the
 `ErrorInfo.message`. `ERROR_MESSAGES` in `transport.ts` is a fixed per-code string; the raw

@@ -73,6 +73,7 @@ const USER_ERROR_CODES: ReadonlySet<SshErrorCode> = new Set([
   'CONFIG_PARSE_ERROR',
   'UNKNOWN_ALIAS',
   'CONFIRMATION_REQUIRED',
+  'PROFILE_DENIED',
 ]);
 
 function exitCodeFor(error: ErrorInfo | null): number {

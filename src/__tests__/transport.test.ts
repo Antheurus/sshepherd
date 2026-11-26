@@ -52,15 +52,71 @@ describe('classify', () => {
     expect(classify(raw)?.code).toBe('CONNECT_TIMEOUT');
   });
 
-  test('exit 255 + host key change phrase -> HOST_KEY_MISMATCH', () => {
+  test('exit 255 + host key change banner -> HOST_KEY_CHANGED, not UNKNOWN or AUTH_FAILED', () => {
     const raw: RawResult = {
       code: 255,
       stdout: '',
-      transportStderr: 'REMOTE HOST IDENTIFICATION HAS CHANGED!',
+      transportStderr: [
+        '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@',
+        '@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @',
+        '@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@',
+        'IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!',
+        'Host key for [127.0.0.1]:8413 has changed and you have requested strict checking.',
+        'Host key verification failed.',
+      ].join('\n'),
       commandStderr: '',
       timedOut: false,
     };
-    expect(classify(raw)?.code).toBe('HOST_KEY_MISMATCH');
+    const info = classify(raw);
+    expect(info?.code).toBe('HOST_KEY_CHANGED');
+    expect(info?.next).toBe('sshepherd hosts trust <alias> --dry-run');
+    expect(JSON.stringify(info)).not.toContain('127.0.0.1');
+  });
+
+  test('exit 255 + no known key under strict checking -> HOST_KEY_UNKNOWN', () => {
+    const raw: RawResult = {
+      code: 255,
+      stdout: '',
+      transportStderr:
+        'No ED25519 host key is known for [127.0.0.1]:8413 and you have requested strict checking.\nHost key verification failed.',
+      commandStderr: '',
+      timedOut: false,
+    };
+    const info = classify(raw);
+    expect(info?.code).toBe('HOST_KEY_UNKNOWN');
+    expect(info?.retryable).toBe(false);
+    expect(JSON.stringify(info)).not.toContain('127.0.0.1');
+  });
+
+  test('every connection run opens passes StrictHostKeyChecking=yes, never no or accept-new', async () => {
+    const calls: string[][] = [];
+    const runner: SshRunner = async (args) => {
+      calls.push(args);
+      if (args.includes('-O')) {
+        return {
+          code: 255,
+          stdout: '',
+          stderr: 'Control socket connect: No such file',
+          timedOut: false,
+        };
+      }
+      return {
+        code: 0,
+        stdout: args[0] === '-G' ? 'hostname 10.0.0.9\n' : '',
+        stderr: '',
+        timedOut: false,
+      };
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-strict-'));
+    const sshConfigPath = join(dir, 'config');
+    writeFileSync(sshConfigPath, 'Host strict-host\n  HostName 10.0.0.9\n');
+    await run('strict-host', 'echo hi', 10, { runner, sshConfigPath });
+    const connecting = calls.filter((args) => !args.includes('-G') && !args.includes('-O'));
+    expect(connecting.length).toBe(2);
+    for (const args of connecting) {
+      expect(args.join(' ')).toContain('StrictHostKeyChecking=yes');
+      expect(args.join(' ')).not.toMatch(/StrictHostKeyChecking=(no|accept-new)/);
+    }
   });
 
   test('exit 255 + unrecognized phrase -> SSH_TRANSPORT_ERROR', () => {

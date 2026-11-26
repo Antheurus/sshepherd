@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { isProfile, PROFILES, type Profile } from './profiles.ts';
 import { didYouMean } from './suggest.ts';
 import { parseTomlFile } from './toml-parse.ts';
 import { type OpContext, OpError } from './types.ts';
@@ -20,6 +21,8 @@ export interface PgTarget {
   container: string | null;
   user: string;
   database: string;
+  /** Highest `SSHEPHERD_PROFILE` a db op on this target runs with; null = no cap. */
+  maxProfile: Profile | null;
 }
 
 /** Overridable via `SSHEPHERD_TARGETS_PATH` for tests — mirrors transport.ts's XDG_RUNTIME_DIR override. */
@@ -38,6 +41,18 @@ function targetsError(message: string): OpError {
   return new OpError('CONFIG_PARSE_ERROR', message, { hint: TARGETS_HINT });
 }
 
+function readMaxProfile(name: string, raw: unknown): Profile | null {
+  if (raw === undefined) {
+    return null;
+  }
+  if (typeof raw !== 'string' || !isProfile(raw)) {
+    throw targetsError(
+      `targets.toml: target '${name}' has max_profile ${JSON.stringify(raw)}; expected one of ${PROFILES.join(', ')}`,
+    );
+  }
+  return raw;
+}
+
 function readTarget(name: string, raw: unknown): PgTarget {
   if (typeof raw !== 'object' || raw === null) {
     throw targetsError(`targets.toml: target '${name}' is not a table`);
@@ -49,6 +64,7 @@ function readTarget(name: string, raw: unknown): PgTarget {
   const container = typeof record.container === 'string' ? record.container : null;
   const user = typeof record.user === 'string' ? record.user : '';
   const database = typeof record.database === 'string' ? record.database : '';
+  const maxProfile = readMaxProfile(name, record.max_profile);
 
   if (alias.length === 0) {
     throw targetsError(`targets.toml: target '${name}' is missing 'alias'`);
@@ -64,10 +80,10 @@ function readTarget(name: string, raw: unknown): PgTarget {
     );
   }
   if (hasCompose) {
-    return { alias, composeFile, service, container: null, user, database };
+    return { alias, composeFile, service, container: null, user, database, maxProfile };
   }
   if (container !== null) {
-    return { alias, composeFile: null, service: null, container, user, database };
+    return { alias, composeFile: null, service: null, container, user, database, maxProfile };
   }
   throw targetsError(
     `targets.toml: target '${name}' needs either {compose_file, service} or {container}`,
@@ -126,6 +142,7 @@ export function buildDbOpContext(
       container: target.container ?? '',
       db_user: target.user,
       db_name: target.database,
+      max_profile: target.maxProfile ?? '',
     },
   };
 }

@@ -1,5 +1,13 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.7 — Permission profiles, strict host keys and a leak gate
+
+- `SSHEPHERD_PROFILE=read|deploy|admin` limits what a session may run. `read` allows every read-only command and any `--dry-run`, `deploy` adds service, config, file, deploy and tunnel changes, `admin` adds `security harden` and `hosts trust`. Anything above the profile returns `PROFILE_DENIED` (exit 2) before connecting. Unset means `admin`, as before. Any other value is refused.
+- A db target in `targets.toml` can set `max_profile = "read"` so db commands on it never run above that profile.
+- Every connection now checks host keys strictly. A host whose key isn't in known_hosts returns `HOST_KEY_UNKNOWN`, and one whose key changed returns `HOST_KEY_CHANGED` (this replaces `HOST_KEY_MISMATCH`; update anything that matched the old name).
+- New `sshepherd hosts trust <alias> --dry-run` shows the fingerprint the host presents. After a human has confirmed it out of band, `hosts trust <alias> --fingerprint SHA256:... --yes` records it and replaces that host's old entry. A fingerprint that doesn't match is refused and nothing is written.
+- Internal: a canary test now plants a random secret in 19 places on the local test servers and checks that no command ever returns it.
+
 ## v0.4.0-rc.6 — Output limits, field selection and a readable audit log
 
 - No command prints more than 64 KiB by default (`--max-bytes <n>`, 8,192 to 2,097,152). A cut is marked `output_truncated: true`; errors are never cut. A container that logs megabytes now returns a readable slice instead of flooding the session, and the connection stays usable afterwards.

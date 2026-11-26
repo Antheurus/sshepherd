@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { OP_PROFILES, PROFILES } from '../profiles.ts';
 import { executeOp, listOps } from '../registry.ts';
 import * as scrubModule from '../scrub.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
@@ -29,6 +30,7 @@ const AUDITED_MUTATING_OPS = [
   'deploy rollback',
   'deploy run',
   'files upload',
+  'hosts trust',
   'security harden',
   'services restart',
   'services systemctl-reload',
@@ -289,5 +291,165 @@ describe('registry contract — every op in listOps()', () => {
       checked.push(name);
     }
     expect(checked.sort()).toEqual([...AUDITED_MUTATING_OPS].sort());
+  });
+});
+
+describe('permission profiles — every op declares one, SSHEPHERD_PROFILE gates before any runner call', () => {
+  const ops = listOps();
+  const nameOf = (op: OpSpec): string => `${op.group} ${op.name}`;
+
+  interface Gated {
+    envelope: Awaited<ReturnType<typeof executeOp>>;
+    runnerCalls: number;
+    localCalls: number;
+  }
+
+  async function underProfile(
+    op: OpSpec,
+    profile: string | undefined,
+    args: Record<string, string | boolean> = argsFor(op),
+  ): Promise<Gated> {
+    let runnerCalls = 0;
+    let localCalls = 0;
+    const countingRunner: SshRunner = async () => {
+      runnerCalls += 1;
+      return FAILING_OUTCOME;
+    };
+    const runLocal = op.runLocal;
+    const spied: OpSpec = runLocal
+      ? {
+          ...op,
+          runLocal: (ctx, path, transport) => {
+            localCalls += 1;
+            return runLocal(ctx, path, transport);
+          },
+        }
+      : op;
+    const saved = process.env.SSHEPHERD_PROFILE;
+    if (profile === undefined) {
+      delete process.env.SSHEPHERD_PROFILE;
+    } else {
+      process.env.SSHEPHERD_PROFILE = profile;
+    }
+    try {
+      const envelope = await executeOp(
+        spied,
+        { alias: ALIAS, args },
+        {
+          transport: { runner: countingRunner },
+          sshConfigPath: join(scratch, 'ssh_config'),
+          yes: true,
+          auditLogPath: join(scratch, 'audit-profile.jsonl'),
+        },
+      );
+      return { envelope, runnerCalls, localCalls };
+    } finally {
+      if (saved === undefined) {
+        delete process.env.SSHEPHERD_PROFILE;
+      } else {
+        process.env.SSHEPHERD_PROFILE = saved;
+      }
+    }
+  }
+
+  test('every registry op has exactly one profile, and the table names no op that is gone', () => {
+    const names = ops.map(nameOf);
+    for (const name of names) {
+      expect({ op: name, profile: PROFILES.includes(OP_PROFILES[name] as never) }).toEqual({
+        op: name,
+        profile: true,
+      });
+    }
+    expect(Object.keys(OP_PROFILES).sort()).toEqual([...names].sort());
+  });
+
+  test('every mutating op needs more than read; every read-only op needs exactly read', () => {
+    for (const op of ops) {
+      const expected = op.mutating ? ['deploy', 'admin'] : ['read'];
+      expect({ op: nameOf(op), ok: expected.includes(OP_PROFILES[nameOf(op)] ?? '') }).toEqual({
+        op: nameOf(op),
+        ok: true,
+      });
+    }
+  });
+
+  test('SSHEPHERD_PROFILE=read + every mutating op -> PROFILE_DENIED, runner spy 0 calls, runLocal 0 calls', async () => {
+    const mutating = ops.filter((op) => op.mutating);
+    expect(mutating.length).toBeGreaterThan(0);
+    for (const op of mutating) {
+      const { envelope, runnerCalls, localCalls } = await underProfile(op, 'read');
+      expect({
+        op: nameOf(op),
+        code: envelope.error?.code,
+        runnerCalls,
+        localCalls,
+        hintNamesProfile: envelope.error?.hint.includes('SSHEPHERD_PROFILE=') ?? false,
+      }).toEqual({
+        op: nameOf(op),
+        code: 'PROFILE_DENIED',
+        runnerCalls: 0,
+        localCalls: 0,
+        hintNamesProfile: true,
+      });
+    }
+  });
+
+  test('SSHEPHERD_PROFILE=deploy refuses the admin ops and lets every deploy op past the gate', async () => {
+    for (const op of ops.filter((entry) => entry.mutating)) {
+      const { envelope } = await underProfile(op, 'deploy');
+      const denied = envelope.error?.code === 'PROFILE_DENIED';
+      expect({ op: nameOf(op), denied }).toEqual({
+        op: nameOf(op),
+        denied: OP_PROFILES[nameOf(op)] === 'admin',
+      });
+    }
+  });
+
+  test('SSHEPHERD_PROFILE unset keeps the behaviour from before profiles: no op is denied', async () => {
+    for (const op of ops) {
+      const { envelope } = await underProfile(op, undefined);
+      expect({ op: nameOf(op), code: envelope.error?.code }).not.toEqual({
+        op: nameOf(op),
+        code: 'PROFILE_DENIED',
+      });
+    }
+  });
+
+  for (const bogus of ['root', 'ADMIN', '', 'read ']) {
+    test(`an unknown SSHEPHERD_PROFILE ${JSON.stringify(bogus)} is refused even for a read op, never read as admin`, async () => {
+      const op = ops.find((entry) => nameOf(entry) === 'hosts test') as OpSpec;
+      const { envelope, runnerCalls } = await underProfile(op, bogus);
+      expect(envelope.error?.code).toBe('PROFILE_DENIED');
+      expect(runnerCalls).toBe(0);
+    });
+  }
+
+  test('a --dry-run needs only read: deploy run --dry-run plans under SSHEPHERD_PROFILE=read', async () => {
+    const op = ops.find((entry) => nameOf(entry) === 'deploy run') as OpSpec;
+    const { envelope, runnerCalls } = await underProfile(op, 'read', {
+      ...argsFor(op),
+      'dry-run': true,
+    });
+    expect(envelope.error).toBeNull();
+    expect(runnerCalls).toBe(0);
+  });
+
+  test("a target's max_profile caps the caller: max_profile=read refuses a deploy op even with no SSHEPHERD_PROFILE", async () => {
+    const op = ops.find((entry) => nameOf(entry) === 'services restart') as OpSpec;
+    const { envelope, runnerCalls } = await underProfile(op, undefined, {
+      ...argsFor(op),
+      target: 'prod-db',
+      max_profile: 'read',
+    });
+    expect(envelope.error?.code).toBe('PROFILE_DENIED');
+    expect(envelope.error?.message).toContain(`target 'prod-db' has max_profile = "read"`);
+    expect(envelope.error?.hint).toContain('targets.toml');
+    expect(runnerCalls).toBe(0);
+  });
+
+  test('a max_profile above the caller never raises it', async () => {
+    const op = ops.find((entry) => nameOf(entry) === 'services restart') as OpSpec;
+    const { envelope } = await underProfile(op, 'read', { ...argsFor(op), max_profile: 'admin' });
+    expect(envelope.error?.code).toBe('PROFILE_DENIED');
   });
 });

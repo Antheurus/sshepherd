@@ -1,5 +1,5 @@
-import { mkdirSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describeError, errorInfo } from './errors.ts';
 import {
@@ -37,6 +37,9 @@ const LOCAL_TIMEOUT_BUFFER_MS = 2_000;
  *  looking active so it survives genuinely long, quiet remote commands. */
 const KEEPALIVE_INTERVAL_S = 15;
 const KEEPALIVE_COUNT_MAX = 4;
+/** On every connection sshepherd opens: a key known_hosts lacks or contradicts is refused, never
+ *  accepted on first use, whatever the user's ssh config says (`-o` beats the config file). */
+export const STRICT_HOST_KEY_ARGS = ['-o', 'StrictHostKeyChecking=yes'];
 
 /** What a single `ssh` invocation returns — captured stdout/stderr as one opaque stream. */
 export interface SpawnOutcome {
@@ -140,11 +143,15 @@ export function classify(raw: RawResult, ctx: ClassifyContext = {}): ErrorInfo |
     if (/connection timed out|operation timed out/i.test(text)) {
       return connectTimeoutInfo(ctx.elapsedMs);
     }
+    // The changed-key banner also ends in "Host key verification failed", so it is tested first.
+    if (/remote host identification has changed|host key for .* has changed/i.test(text)) {
+      return errorInfo('HOST_KEY_CHANGED');
+    }
+    if (/host key verification failed|no \S+ host key is known for/i.test(text)) {
+      return errorInfo('HOST_KEY_UNKNOWN');
+    }
     if (/permission denied|too many authentication failures/i.test(text)) {
       return errorInfo('AUTH_FAILED');
-    }
-    if (/remote host identification has changed/i.test(text)) {
-      return errorInfo('HOST_KEY_MISMATCH');
     }
     return errorInfo('SSH_TRANSPORT_ERROR');
   }
@@ -250,6 +257,7 @@ async function ensureMaster(alias: string, runner: SshRunner): Promise<MasterOut
   const openedAtMs = Date.now();
   const open = await runner(
     [
+      ...STRICT_HOST_KEY_ARGS,
       '-o',
       'BatchMode=yes',
       '-o',
@@ -319,6 +327,7 @@ export async function run(
   const startedAtMs = Date.now();
   const outcome = await deps.runner(
     [
+      ...STRICT_HOST_KEY_ARGS,
       '-o',
       'BatchMode=yes',
       '-o',
@@ -408,6 +417,116 @@ export async function closeAllMasters(
   return closed;
 }
 
+export interface ScannedHostKey {
+  /** The known_hosts name ssh itself wrote for the alias (`host`, or `[host]:port`) — local use
+   *  only, never returned in an envelope. */
+  name: string;
+  type: string;
+  /** Base64 public key blob. */
+  key: string;
+}
+
+export type HostKeyScan =
+  | { keys: ScannedHostKey[]; knownHostsFile: string; hashNames: boolean; error: null }
+  | { error: ErrorInfo };
+
+/** ssh's own expanded config for the alias: the first `UserKnownHostsFile` (where a trusted key
+ *  is recorded) and whether names there are hashed. */
+async function knownHostsConfig(
+  alias: string,
+  deps: TransportDeps,
+): Promise<{ knownHostsFile: string; hashNames: boolean } | null> {
+  const result = await deps.runner(['-G', alias], VALIDATE_TIMEOUT_MS);
+  const file = /^userknownhostsfile\s+(\S+)/im.exec(result.stdout)?.[1];
+  if (result.code !== 0 || file === undefined) {
+    return null;
+  }
+  const knownHostsFile = file.startsWith('~/') ? join(homedir(), file.slice(2)) : file;
+  return { knownHostsFile, hashNames: /^hashknownhosts\s+yes/im.test(result.stdout) };
+}
+
+/** The key the host presents, fetched the way ssh itself would see it (same `-F` config, so the
+ *  same HostName/Port/HostKeyAlias): one connection that may record the key only into a
+ *  throwaway known_hosts, offers no authentication method so nothing runs on the unverified host,
+ *  and bypasses any ControlMaster so a real key exchange happens. The caller decides whether the
+ *  key is trusted; the real known_hosts is never touched here. */
+export async function scanHostKeys(
+  alias: string,
+  deps: TransportDeps = { runner: defaultRunner },
+): Promise<HostKeyScan> {
+  const { error: unknownAlias } = await resolveAlias(alias, deps);
+  if (unknownAlias) {
+    return { error: unknownAlias };
+  }
+  const config = await knownHostsConfig(alias, deps);
+  if (config === null) {
+    return { error: errorInfo('SSH_TRANSPORT_ERROR') };
+  }
+  const scratch = mkdtempSync(join(tmpdir(), 'sshepherd-hostkey-'));
+  const scratchFile = join(scratch, 'known_hosts');
+  try {
+    const startedAtMs = Date.now();
+    const outcome = await deps.runner(
+      [
+        '-T',
+        '-o',
+        'BatchMode=yes',
+        '-o',
+        `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
+        '-o',
+        'LogLevel=ERROR',
+        '-o',
+        'ControlMaster=no',
+        '-o',
+        'ControlPath=none',
+        '-o',
+        'StrictHostKeyChecking=accept-new',
+        '-o',
+        `UserKnownHostsFile=${scratchFile}`,
+        '-o',
+        'GlobalKnownHostsFile=/dev/null',
+        '-o',
+        'HashKnownHosts=no',
+        '-o',
+        'UpdateHostKeys=no',
+        '-o',
+        'PreferredAuthentications=none',
+        alias,
+        'true',
+      ],
+      MASTER_OPEN_TIMEOUT_MS,
+    );
+    let text = '';
+    try {
+      text = readFileSync(scratchFile, 'utf8');
+    } catch {
+      // no file: ssh never got as far as the key exchange
+    }
+    const keys = text
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/))
+      .filter((fields): fields is [string, string, string] => fields.length >= 3)
+      .map(([name, type, key]) => ({ name, type, key }));
+    if (keys.length > 0) {
+      return { keys, ...config, error: null };
+    }
+    const elapsedMs = Date.now() - startedAtMs;
+    if (outcome.timedOut) {
+      return { error: connectTimeoutInfo(elapsedMs) };
+    }
+    const raw: RawResult = {
+      code: 255,
+      stdout: '',
+      transportStderr: outcome.stderr,
+      commandStderr: '',
+      timedOut: false,
+    };
+    return { error: classify(raw, { elapsedMs }) ?? errorInfo('SSH_TRANSPORT_ERROR') };
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 /** `-F <path>` when `SSHEPHERD_SSH_CONFIG_PATH` is set (the smoke fixture's own config), so a
  *  run never needs a stanza in the real `~/.ssh/config`; empty when unset. */
 export function sshConfigArgs(): string[] {
@@ -471,7 +590,7 @@ export async function readCapped(
   return { text: all.toString('utf8'), truncated };
 }
 
-async function defaultRunner(
+export async function defaultRunner(
   args: string[],
   timeoutMs: number,
   options: RunnerOptions = {},

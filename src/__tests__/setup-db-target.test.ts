@@ -44,6 +44,7 @@ describe('scaffold', () => {
       container: null,
       user: 'sshepherd_ro',
       database: 'lms',
+      maxProfile: null,
     };
     const targets = loadTargets(path);
     expect(targets.prod).toEqual(expectedTarget);
@@ -82,6 +83,7 @@ describe('scaffold', () => {
       container: 'staging_postgres_1',
       user: 'sshepherd_ro',
       database: 'app',
+      maxProfile: null,
     };
     const targets = loadTargets(path);
     expect(targets.staging).toEqual(expectedTarget);

@@ -12,7 +12,8 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   UNKNOWN_ALIAS: 'SSH alias is not defined in ssh config',
   CONNECT_TIMEOUT: 'Connection to the remote host timed out',
   AUTH_FAILED: 'SSH authentication failed for this alias',
-  HOST_KEY_MISMATCH: 'Remote host key does not match the known host entry',
+  HOST_KEY_CHANGED: 'Remote host key does not match the known_hosts entry for this alias',
+  HOST_KEY_UNKNOWN: 'known_hosts has no key for this alias and strict host key checking is on',
   SSH_TRANSPORT_ERROR: 'SSH transport failed before the command could run',
   COMMAND_FAILED: 'Remote command exited with a non-zero status',
   COMMAND_TIMEOUT: 'Remote command timed out',
@@ -25,6 +26,7 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   AUDIT_WRITE_FAILED: 'The op finished but its audit line could not be written',
   OUTPUT_TOO_LARGE:
     'The command printed more than sshepherd reads and its output could not be parsed',
+  PROFILE_DENIED: 'This op needs a higher SSHEPHERD_PROFILE than the caller holds',
   INTERNAL_ERROR: 'sshepherd failed while running the op',
 };
 
@@ -50,9 +52,15 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
     retryable: false,
     next: `sshepherd setup ssh-alias status ${ALIAS_PLACEHOLDER}`,
   },
-  HOST_KEY_MISMATCH: {
-    hint: 'The host key changed since it was recorded; a human must verify the change out of band before updating known_hosts.',
+  HOST_KEY_CHANGED: {
+    hint: 'The host presented a different key than known_hosts holds (a reinstalled server, or someone in the middle); a human confirms the new fingerprint out of band, then records it with hosts trust --fingerprint <SHA256:...> --yes.',
     retryable: false,
+    next: `sshepherd hosts trust ${ALIAS_PLACEHOLDER} --dry-run`,
+  },
+  HOST_KEY_UNKNOWN: {
+    hint: 'sshepherd never accepts an unknown host key on first use; show its fingerprint, have a human confirm it out of band, then record it with hosts trust --fingerprint <SHA256:...> --yes.',
+    retryable: false,
+    next: `sshepherd hosts trust ${ALIAS_PLACEHOLDER} --dry-run`,
   },
   SSH_TRANSPORT_ERROR: {
     hint: 'ssh failed before the command ran; the connection test shows whether the host is reachable at all.',
@@ -98,6 +106,10 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
   },
   OUTPUT_TOO_LARGE: {
     hint: 'The output passed the read ceiling before it was complete; ask for less (a smaller --tail, a WHERE or LIMIT in the query) and run again.',
+    retryable: false,
+  },
+  PROFILE_DENIED: {
+    hint: 'A human raises the profile (SSHEPHERD_PROFILE=read|deploy|admin, unset means admin) and a target max_profile in targets.toml; the agent never raises its own.',
     retryable: false,
   },
   INTERNAL_ERROR: {

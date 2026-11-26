@@ -39,6 +39,7 @@ describe('loadTargets', () => {
       container: null,
       user: 'sshepherd_ro',
       database: 'lms',
+      maxProfile: null,
     });
     expect(targets.staging).toEqual({
       alias: 'staging-1',
@@ -47,6 +48,7 @@ describe('loadTargets', () => {
       container: 'staging_postgres_1',
       user: 'sshepherd_ro',
       database: 'app',
+      maxProfile: null,
     });
   });
 
@@ -101,6 +103,21 @@ describe('buildDbOpContext', () => {
       container: '',
       db_user: 'sshepherd_ro',
       db_name: 'lms',
+      max_profile: '',
     });
+  });
+
+  test('a target max_profile is parsed and flattened as max_profile; an unknown value is refused', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-targets-test-'));
+    const path = join(dir, 'targets.toml');
+    const target = ['alias = "lms-server"', 'container = "pg"', 'user = "ro"', 'database = "lms"'];
+    writeFileSync(path, ['[prod]', ...target, 'max_profile = "read"', ''].join('\n'));
+    expect(loadTargets(path).prod?.maxProfile).toBe('read');
+    expect(buildDbOpContext('prod', {}, path).args.max_profile).toBe('read');
+
+    writeFileSync(path, ['[prod]', ...target, 'max_profile = "root"', ''].join('\n'));
+    expect(() => loadTargets(path)).toThrow(
+      /max_profile "root"; expected one of read, deploy, admin/,
+    );
   });
 });
