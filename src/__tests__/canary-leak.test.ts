@@ -168,6 +168,7 @@ function argValues(alias: string): Record<string, string[]> {
     stream: ['access', 'error'],
     path: CANARY_FILES,
     file: ['/opt/canary/docker-compose.yml'],
+    project_dir: ['/opt/canary'],
     target: [alias, pgConnectTarget(alias)],
     sql: ['SELECT * FROM canary_users', ...Object.values(DB_ECHO_PROBES).map((probe) => probe.sql)],
     recipe: ['canary-ok', 'canary-fail'],

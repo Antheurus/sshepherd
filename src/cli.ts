@@ -34,7 +34,15 @@ import { versionLine } from './version.ts';
  *  (`--yes r1` is a flag plus a positional), and `mapArgsToCtx` reads them as booleans.
  *  `ArgSpec` carries no type field, so this is the CLI's own small lookup — every other
  *  flag is a string value. */
-const BOOLEAN_FLAG_NAMES = new Set(['yes', 'dry-run', 'keep-session', 'pretty', 'help', 'all']);
+const BOOLEAN_FLAG_NAMES = new Set([
+  'yes',
+  'dry-run',
+  'keep-session',
+  'pretty',
+  'help',
+  'all',
+  'diagnose',
+]);
 
 const GROUPS = [...new Set(listOps().map((op) => op.group))];
 

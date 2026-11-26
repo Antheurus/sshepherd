@@ -13,6 +13,8 @@ export interface LogLine {
   ts: string | null;
   stream: 'stdout' | 'stderr';
   text: string;
+  /** The compose service a line came from (`logs compose` only). */
+  service?: string;
 }
 
 const STDERR_PRIORITY_THRESHOLD = 3;
@@ -44,4 +46,22 @@ export function shapeJournalEntry(entry: unknown): LogLine | null {
     !Number.isNaN(priorityNum) && priorityNum <= STDERR_PRIORITY_THRESHOLD ? 'stderr' : 'stdout';
 
   return { ts, stream, text: message };
+}
+
+/** `journalctl -o json` output as entries. A `grep -C` group separator (`--`) or any other line that
+ *  is not a JSON object is skipped, never an error: the filter around the journal may add them. */
+export function parseJournalLines(stdout: string): unknown[] {
+  const entries: unknown[] = [];
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('{')) {
+      continue;
+    }
+    try {
+      entries.push(JSON.parse(trimmed) as unknown);
+    } catch {
+      // a line cut by the read ceiling is not an entry
+    }
+  }
+  return entries;
 }

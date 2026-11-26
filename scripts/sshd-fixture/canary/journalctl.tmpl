@@ -1,4 +1,24 @@
 #!/bin/sh
 # Canary stand-in for journalctl (the fixtures run no systemd): every unit's journal is the planted
-# sshd lines, so `logs service` and `logs docker-daemon` read them.
-cat /opt/canary/journal.ndjson
+# sshd lines, so `logs service` and `logs docker-daemon` read them. Honours `--grep` (grep -E over
+# the JSON entry, `--grep x -n 0` being the support probe sshepherd runs) and `-n`; every other
+# option is accepted and ignored.
+pattern=''
+lines=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --grep=*) pattern="${1#--grep=}" ;;
+    --grep | -g) shift; pattern="$1" ;;
+    -n) shift; lines="$1" ;;
+  esac
+  shift
+done
+if [ "$lines" = 0 ]; then
+  exit 0
+fi
+if [ -n "$pattern" ]; then
+  grep -E -e "$pattern" /opt/canary/journal.ndjson | tail -n "${lines:-1000}"
+else
+  tail -n "${lines:-1000}" /opt/canary/journal.ndjson
+fi
+exit 0

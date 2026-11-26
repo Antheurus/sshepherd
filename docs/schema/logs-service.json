@@ -20,6 +20,31 @@
         "name": "tail",
         "kind": "flag",
         "required": false
+      },
+      {
+        "name": "grep",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "context",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "max-lines",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "since",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "until",
+        "kind": "flag",
+        "required": false
       }
     ]
   },

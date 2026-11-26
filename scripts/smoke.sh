@@ -329,8 +329,13 @@ run_matrix() {
 
   step "[$variant] check overview"
   run_cli check_overview check overview "$alias"
-  assert_json "[$variant] check overview: ok + nproc > 0 + dead_end_risk boolean" check_overview \
-    "d['ok'] is True and isinstance(d['data']['dead_end_risk'], bool) and d['data']['nproc'] > 0"
+  assert_json "[$variant] check overview: ok + nproc > 0 + dead_end_risk boolean + nothing degraded" check_overview \
+    "d['ok'] is True and isinstance(d['data']['dead_end_risk'], bool) and d['data']['nproc'] > 0 and d['data']['degraded'] == []"
+
+  step "[$variant] hosts test --diagnose"
+  run_cli hosts_diagnose hosts test "$alias" --diagnose
+  assert_json "[$variant] hosts test --diagnose: dns, tcp, banner, auth, echo, every one passing or skipped" hosts_diagnose \
+    "d['ok'] is True and d['data']['reachable'] is True and [s['stage'] for s in d['data']['stages']] == ['dns','tcp','banner','auth','echo'] and all(s['verdict'] in ('ok','skipped') for s in d['data']['stages'])"
 
   step "[$variant] services ps"
   run_cli services_ps services ps "$alias"
@@ -341,6 +346,11 @@ run_matrix() {
   run_cli logs_docker logs docker "$alias" "$PREFIX-app" --tail 5
   assert_json "[$variant] logs docker: LogsResult shape" logs_docker \
     "d['ok'] is True and 'lines' in d['data'] and 'next_since' in d['data']"
+
+  step "[$variant] logs docker merges stderr: a line a container wrote to stderr comes back"
+  run_cli logs_stderr logs docker "$alias" "$PREFIX-stderr-writer" --grep boom --since 60m
+  assert_json "[$variant] logs docker --grep boom --since 60m: the stderr line, not truncated, next_since set" logs_stderr \
+    "d['ok'] is True and d['data']['lines_returned'] == 1 and 'boom' in d['data']['lines'][0]['text'] and d['data']['truncated'] is False and d['data']['next_since'] is not None"
 
   step "[$variant] setup files-allowlist scaffold, then files ls"
   run_cli setup_files_allowlist setup files-allowlist scaffold "$alias" \
@@ -396,10 +406,10 @@ run_matrix() {
   assert_json "[$variant] deploy run --dry-run: plan only" deploy_dry_run \
     "d['ok'] is True and len(d['data']['steps']) == 1 and d['data']['steps'][0]['name'] == 'check-app'"
 
-  step "[$variant] output cap: a container that printed 5 MiB comes back under 64 KiB"
+  step "[$variant] output cap: a container that printed 5 MiB comes back under 64 KiB, newest lines kept"
   run_cli cap_logs_noisy logs docker "$alias" "$PREFIX-noisy" --tail 5000
-  assert_json "[$variant] logs docker of a 5 MiB container: output_truncated, at most 65536 bytes" cap_logs_noisy \
-    "d['ok'] is True and d['output_truncated'] is True and len(open('$OUT/cap_logs_noisy.json','rb').read()) <= 65536"
+  assert_json "[$variant] logs docker of a 5 MiB container: output_truncated, at most 65536 bytes, the last line is the newest" cap_logs_noisy \
+    "d['ok'] is True and d['output_truncated'] is True and len(open('$OUT/cap_logs_noisy.json','rb').read()) <= 65536 and d['data']['lines'][-1]['text'].endswith('NOISY-DONE')"
   run_cli cap_hosts_test_1 hosts test "$alias"
   run_cli cap_hosts_test_2 hosts test "$alias"
   assert_json "[$variant] two ordinary calls after a capped one both succeed" cap_hosts_test_2 \
