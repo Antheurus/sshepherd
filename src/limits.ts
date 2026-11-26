@@ -77,3 +77,24 @@ export const MAX_IDENTITY_GAP_CHARS = 8;
  *  an identifier at 63 bytes, and a multi-word type (`timestamp with time zone`) is far shorter, so
  *  64 holds every real one while a long line with no `: "` is never rescanned past it. */
 export const MAX_PSQL_TYPE_NAME_CHARS = 64;
+/** `--grep` pattern on a `logs *` op: 512 characters holds any real regular expression an agent
+ *  writes, while a pasted log line or a runaway generator cannot ride in as a "pattern". */
+export const MAX_GREP_PATTERN_CHARS = 512;
+/** `--context N` lines either side of a `--grep` match: 20 shows a stack trace's surroundings and
+ *  still fits `--max-lines` several times over. */
+export const MAX_LOG_CONTEXT_LINES = 20;
+/** `--max-lines` on a `logs *` op when absent: 500 lines of typical log output is about the 64 KiB
+ *  `DEFAULT_MAX_BYTES`, so the line bound and the byte bound bite at the same place. */
+export const DEFAULT_LOG_MAX_LINES = 500;
+/** Lines a `logs *` op scans for a `--grep` match when `--tail` is absent: 200,000 lines is tens of
+ *  MiB, read by a niced process inside `LOG_TIMEOUT_SEC`; past it the newest matches still win. */
+export const LOG_GREP_SCAN_LINES = 200_000;
+/** `nice -n` of every `check *` and `logs *` remote command: 10 yields to the host's real work
+ *  without starving the probe (19 can wait minutes on a busy box). `ionice -c3` goes with it. */
+export const HEAVY_NICE_LEVEL = 10;
+/** One network stage of `hosts test --diagnose` (dns, tcp, banner): 5 s is past any healthy
+ *  answer, so a stage that is still silent is the hang being looked for. */
+export const DIAGNOSE_STAGE_TIMEOUT_SEC = 5;
+/** The ssh login of `hosts test --diagnose` (auth + echo): `CONNECT_TIMEOUT_SEC` for the
+ *  connection plus the same again for key exchange and the echo. */
+export const DIAGNOSE_SSH_TIMEOUT_SEC = 20;

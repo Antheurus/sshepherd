@@ -162,20 +162,61 @@ describe('executeOp — byte cap, applied after the scrubber', () => {
     2_000,
   );
 
-  test('a read op that printed more than the cap returns output_truncated and at most 65,536 bytes', async () => {
+  test('a log read that printed more than the cap returns output_truncated and at most 65,536 bytes', async () => {
     const seen: RunnerOptions[] = [];
     const envelope = await drive(
       'logs',
       'docker',
       { container: 'web' },
-      { code: 143, stdout: bigLog, stderr: '', timedOut: false, stdoutTruncated: true },
+      { code: 0, stdout: bigLog, stderr: '', timedOut: false, stdoutTruncated: true },
       {},
       seen,
     );
     expect(envelope.ok).toBe(true);
     expect(envelope.output_truncated).toBe(true);
     expect(bytesOf(envelope)).toBeLessThanOrEqual(65_536);
+    expect(seen.at(-1)).toEqual({ stdoutCap: 'drain-tail' });
+  });
+
+  test('a read op whose head matters is killed at the cap and keeps its first bytes', async () => {
+    const seen: RunnerOptions[] = [];
+    await drive(
+      'check',
+      'ports',
+      {},
+      {
+        code: 143,
+        stdout: 'LISTEN 0 4096 0.0.0.0:80 0.0.0.0:*\n',
+        stderr: '',
+        timedOut: false,
+        stdoutTruncated: true,
+      },
+      {},
+      seen,
+    );
     expect(seen.at(-1)).toEqual({ stdoutCap: 'kill-head' });
+  });
+
+  test('a log stream cut at the transport ceiling keeps its newest lines, not its oldest, and drops the fragment at its start', async () => {
+    const seen: RunnerOptions[] = [];
+    const stream = [
+      'ldest line cut in half by the ceiling',
+      '2026-01-01T00:00:01Z middle',
+      '2026-01-01T00:00:02Z newest',
+    ].join('\n');
+    const envelope = await drive(
+      'logs',
+      'docker',
+      { container: 'web' },
+      { code: 0, stdout: stream, stderr: '', timedOut: false, stdoutTruncated: true },
+      {},
+      seen,
+    );
+    const data = envelope.data as { lines: { text: string }[]; next_since: string };
+    expect(seen.at(-1)).toEqual({ stdoutCap: 'drain-tail' });
+    expect(data.lines.map((line) => line.text)).toEqual(['middle', 'newest']);
+    expect(data.next_since).toBe('2026-01-01T00:00:02Z');
+    expect(envelope.output_truncated).toBe(true);
   });
 
   test('a mutating op is never killed at the cap: it drains and keeps the tail', async () => {
@@ -220,9 +261,9 @@ describe('executeOp — byte cap, applied after the scrubber', () => {
   test('a cut-short ndjson stream drops its unfinished last line instead of failing to parse', async () => {
     const lines = `${JSON.stringify({ MESSAGE: 'one', __REALTIME_TIMESTAMP: '1' })}\n{"MESSAGE":"cut mid-li`;
     const envelope = await drive(
-      'logs',
-      'service',
-      { unit: 'web' },
+      'services',
+      'compose-ps',
+      { file: '/srv/app/docker-compose.yml' },
       { code: 143, stdout: lines, stderr: '', timedOut: false, stdoutTruncated: true },
     );
     expect(envelope.error).toBeNull();

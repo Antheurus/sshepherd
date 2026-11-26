@@ -9,6 +9,8 @@
 #   postgres     - a real Postgres, seeded with a read-only role (postgres-init/01-fixture.sql).
 #   app          - a minimal long-running nginx standing in for a deployed app.
 #   noisy        - prints 5 MiB of log lines once, then idles: the output-cap check (`logs docker`).
+#   stderr-writer - writes one line to stderr and one to stdout, then idles: `logs docker` must
+#                  return both (the stderr-merge check).
 #
 # scripts/smoke.sh sets SSHEPHERD_SMOKE_KEYDIR (an ephemeral generated keypair), the container-name
 # prefix SSHEPHERD_SMOKE_CONTAINER_PREFIX and the two host ports (SSHEPHERD_SMOKE_DEBIAN_PORT 8413,
@@ -40,6 +42,13 @@ services:
     command:
       - "head -c 5242880 /dev/zero | tr '\\0' 'x' | fold -w 1000; echo NOISY-DONE; sleep 3600"
 
+  stderr-writer:
+    image: nginx:alpine
+    container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-stderr-writer
+    entrypoint: ['sh', '-c']
+    command:
+      - 'echo boom-on-stderr >&2; echo calm-on-stdout; sleep 3600'
+
   sshd-debian:
     build:
       context: .
@@ -56,6 +65,7 @@ services:
       - postgres
       - app
       - noisy
+      - stderr-writer
 
   sshd-alpine:
     build:
@@ -73,3 +83,4 @@ services:
       - postgres
       - app
       - noisy
+      - stderr-writer

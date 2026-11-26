@@ -155,6 +155,17 @@ export interface ExecuteDeps {
   limit?: number;
 }
 
+/** An op whose newest output matters (`logs *`, `files tail`) reads a too-long stream to its end and
+ *  keeps the last bytes, instead of stopping at the first ones. */
+function keepsTail(op: OpSpec): boolean {
+  return op.truncateKeeps === 'tail';
+}
+
+/** A stream cut from the front starts mid-line; that fragment is not a line of the output. */
+function dropPartialFirstLine(stdout: string): string {
+  return stdout.slice(stdout.indexOf('\n') + 1);
+}
+
 function parseByMode(mode: OutputMode, stdout: string, cutShort: boolean): unknown {
   if (mode === 'native-json') {
     return stdout.trim().length > 0 ? JSON.parse(stdout) : null;
@@ -424,7 +435,7 @@ async function runOp(
     effectiveTimeoutSec(op, deps),
     withConfigPath(deps),
     {
-      stdoutCap: op.mutating ? 'drain-tail' : 'kill-head',
+      stdoutCap: op.mutating || keepsTail(op) ? 'drain-tail' : 'kill-head',
       ...(op.maxStdoutBytes !== undefined ? { stdoutMaxBytes: op.maxStdoutBytes } : {}),
     },
   );
@@ -446,7 +457,12 @@ async function runOp(
   }
 
   try {
-    const parsed = parseByMode(op.output, result.raw.stdout, outputTruncated);
+    const tailCut = outputTruncated && keepsTail(op) && !op.mutating;
+    const parsed = parseByMode(
+      op.output,
+      tailCut ? dropPartialFirstLine(result.raw.stdout) : result.raw.stdout,
+      outputTruncated && !tailCut,
+    );
     const shaped = op.shape(parsed, ctx);
     if (shaped instanceof Premasked) {
       return {

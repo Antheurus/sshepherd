@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "sshepherd/logs-docker",
   "title": "sshepherd logs docker",
-  "description": "Tail a container log as {ts, stream, text} line objects + next_since.",
+  "description": "Tail a container log (stdout and stderr merged) as {ts, stream, text} line objects + next_since.",
   "x-sshepherd": {
     "group": "logs",
     "action": "docker",
@@ -22,7 +22,27 @@
         "required": false
       },
       {
+        "name": "grep",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "context",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "max-lines",
+        "kind": "flag",
+        "required": false
+      },
+      {
         "name": "since",
+        "kind": "flag",
+        "required": false
+      },
+      {
+        "name": "until",
         "kind": "flag",
         "required": false
       }

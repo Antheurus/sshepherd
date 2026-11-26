@@ -5,6 +5,7 @@ import { splitSections } from '../parsers/sections.ts';
 import { parseSs } from '../parsers/ss.ts';
 import { parseSshdDirectives } from '../parsers/sshd-directives.ts';
 import { shellJoin, shq } from '../quote.ts';
+import { niced } from '../remote-nice.ts';
 import type { OpSpec } from '../types.ts';
 
 // ---------------------------------------------------------------------------
@@ -154,7 +155,7 @@ const securityListeners: OpSpec<{ listening: SecurityListenerEntry[] }> = {
   exposes: 'metadata',
   timeoutSec: DEFAULT_TIMEOUT_SEC,
   output: 'raw',
-  buildRemote: () => shellJoin(['ss', '-H', '-tlnp']),
+  buildRemote: () => niced(shellJoin(['ss', '-H', '-tlnp'])),
   shape: (parsed) => ({
     listening: parseSs(parsed as string).map((entry) => ({
       proto: entry.proto,

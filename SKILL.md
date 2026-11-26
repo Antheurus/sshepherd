@@ -153,12 +153,13 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 11 registry-driven groups (58 ops) + 1 `setup` group (6 sub-groups, 12 actions)
+## Quick reference — 11 registry-driven groups (59 ops) + 1 `setup` group (6 sub-groups, 12 actions)
 
 ```bash
 # hosts
 sshepherd hosts list
 sshepherd hosts test web-01
+sshepherd hosts test web-01 --diagnose   # stages dns, tcp, banner, auth, echo, each with a verdict
 sshepherd hosts info web-01
 sshepherd hosts disconnect web-01   # or --all; connections self-close after 5 idle minutes
 sshepherd hosts trust web-01 --dry-run                          # the host key fingerprint it presents
@@ -175,6 +176,8 @@ sshepherd check kernel web-01
 
 # logs
 sshepherd logs docker web-01 myapp --tail 100
+sshepherd logs docker web-01 myapp --grep 'ERROR|boom' --since 60m --context 2 --max-lines 100   # stdout and stderr merged
+sshepherd logs compose web-01 /opt/myapp --grep timeout --tail 200
 sshepherd logs service web-01 nginx --tail 100
 sshepherd logs docker-daemon web-01 --tail 100
 sshepherd logs nginx web-01 error --tail 100

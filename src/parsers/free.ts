@@ -49,3 +49,8 @@ export function parseFree(stdout: string): FreeResult {
 
   return { mem, swap };
 }
+
+/** Whether `free -b` printed a memory row at all (an empty or foreign output has none). */
+export function hasMemRow(stdout: string): boolean {
+  return stdout.split('\n').some((line) => line.trim().startsWith('Mem:'));
+}

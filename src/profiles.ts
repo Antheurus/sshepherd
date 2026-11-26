@@ -31,6 +31,7 @@ export const OP_PROFILES: Record<string, Profile> = {
   'check oom-history': 'read',
   'check kernel': 'read',
   'logs docker': 'read',
+  'logs compose': 'read',
   'logs service': 'read',
   'logs docker-daemon': 'read',
   'logs nginx': 'read',

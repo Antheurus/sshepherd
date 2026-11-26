@@ -1,18 +1,20 @@
+import { MAX_TAIL_LINES } from '../limits.ts';
 import {
-  arg,
-  DEFAULT_LOG_TAIL,
-  LOG_TIMEOUT_SEC,
-  optStr,
-  optStrOrNull,
-  reqStr,
-} from '../op-args.ts';
+  grepCommand,
+  journalCommand,
+  type LogQuery,
+  lineLimit,
+  plainCommand,
+  readLogQuery,
+} from '../log-command.ts';
+import { arg, DEFAULT_LOG_TAIL, LOG_TIMEOUT_SEC, reqStr } from '../op-args.ts';
+import { parseComposeLogLines } from '../parsers/compose-log.ts';
 import { parseDockerLogLines } from '../parsers/docker-log.ts';
-import { type LogLine, shapeJournalEntry } from '../parsers/journal.ts';
+import { type LogLine, parseJournalLines, shapeJournalEntry } from '../parsers/journal.ts';
 import { buildLogsResult, capLines, type LogsResult, recountLines } from '../parsers/logs-shape.ts';
-import { shellJoin } from '../quote.ts';
 import { maskPemLines } from '../scrub.ts';
 import { didYouMeanOrAll } from '../suggest.ts';
-import { type OpContext, OpError, type OpSpec, Premasked } from '../types.ts';
+import { type OpContext, OpError, type OpSpec, Premasked, type RawResult } from '../types.ts';
 
 // ---------------------------------------------------------------------------
 // logs
@@ -37,59 +39,151 @@ function maskPemLogLines<T extends LogLine>(lines: T[]): { lines: T[]; masked: n
 /** What every `logs *` op shares past its own parsing: the PEM pass, the result shape, and the
  *  count of what the PEM pass masked. */
 function shapeLogs(source: string, raw: LogLine[], ctx: OpContext): Premasked<LogsResult> {
+  const query = readLogQuery(ctx);
   const { lines, masked } = maskPemLogLines(raw);
-  const limit = Number.parseInt(optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), 10);
-  return new Premasked(
-    buildLogsResult(source, lines, Number.isNaN(limit) ? DEFAULT_LOG_TAIL : limit),
-    masked,
-  );
+  return new Premasked(buildLogsResult(source, lines, lineLimit(query)), masked);
 }
 
-/** A capped log keeps its newest lines, and its counters follow what was kept. */
+/** A capped log keeps its newest lines, and its counters follow what was kept; `truncateKeeps`
+ *  also makes a stream past the transport read ceiling keep its newest bytes. */
 const LOG_CAPS = {
   truncateKeeps: 'tail',
   capLines,
   recount: recountLines,
 } as const satisfies Pick<OpSpec, 'truncateKeeps' | 'capLines' | 'recount'>;
 
-function buildLogsDocker(ctx: OpContext): string {
-  const container = reqStr(ctx, 'container');
-  const tail = optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL));
-  const since = optStrOrNull(ctx, 'since');
-  const parts = ['docker', 'logs', '--timestamps', '--tail', tail];
-  if (since !== null) {
-    parts.push('--since', since);
+const LOG_FILTER_ARGS = [
+  arg('tail', 'flag', false, `Lines to read from the source (default ${DEFAULT_LOG_TAIL}).`),
+  arg(
+    'grep',
+    'flag',
+    false,
+    'Only lines matching this extended regular expression (512 chars max).',
+  ),
+  arg('context', 'flag', false, 'With --grep: lines kept around each match (0-20).'),
+  arg('max-lines', 'flag', false, 'Most lines returned, newest kept (default 500).'),
+];
+const LOG_WINDOW_ARGS = [
+  arg('since', 'flag', false, 'Only lines newer than this timestamp or duration.'),
+  arg('until', 'flag', false, 'Only lines older than this timestamp or duration.'),
+];
+
+const FAILURE_TAIL_LINES = 5;
+const FAILURE_TAIL_LINE_CHARS = 512;
+
+/** A log reader that folds stderr into stdout leaves a failed command's own message there (`docker
+ *  logs` on a missing container); this hands its last lines back with the error. */
+function shapeLogsError(raw: RawResult): Record<string, unknown> | undefined {
+  if (raw.timedOut || (raw.code !== 1 && raw.code !== 2)) {
+    return undefined;
   }
-  parts.push(container);
-  return shellJoin(parts);
+  const lines = raw.stdout
+    .split('\n')
+    .map((line) => line.trimEnd().slice(0, FAILURE_TAIL_LINE_CHARS))
+    .filter((line) => line.length > 0);
+  return lines.length === 0 ? undefined : { output_tail: lines.slice(-FAILURE_TAIL_LINES) };
+}
+
+/** The remote command of a source with no pipeline of its own: filtered by `grep -E` when asked. */
+function filteredCommand(producer: string[], query: LogQuery, merge: boolean): string {
+  return query.grep === null
+    ? plainCommand(producer, merge)
+    : grepCommand(producer, query, merge, query.maxLines);
+}
+
+function buildLogsDocker(ctx: OpContext): string {
+  const query = readLogQuery(ctx);
+  const parts = ['docker', 'logs', '--timestamps', '--tail', String(query.scanLines)];
+  if (query.since !== null) {
+    parts.push('--since', query.since);
+  }
+  if (query.until !== null) {
+    parts.push('--until', query.until);
+  }
+  parts.push(reqStr(ctx, 'container'));
+  return filteredCommand(parts, query, true);
 }
 
 const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
   group: 'logs',
   name: 'docker',
-  summary: 'Tail a container log as {ts, stream, text} line objects + next_since.',
+  summary:
+    'Tail a container log (stdout and stderr merged) as {ts, stream, text} line objects + next_since.',
   args: [
     arg('container', 'positional', true, 'Container name or ID.'),
-    arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
-    arg('since', 'flag', false, 'Only lines newer than this timestamp/duration.'),
+    ...LOG_FILTER_ARGS,
+    ...LOG_WINDOW_ARGS,
   ],
   mutating: false,
   exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
   output: 'raw',
   buildRemote: buildLogsDocker,
+  shapeError: shapeLogsError,
   ...LOG_CAPS,
   shape: (parsed, ctx) =>
     shapeLogs(`docker:${reqStr(ctx, 'container')}`, parseDockerLogLines(parsed as string), ctx),
 };
 
-function buildJournalCommand(unit: string, tail: string): string {
-  return shellJoin(['journalctl', '-u', unit, '-n', tail, '-o', 'json', '--no-pager']);
+function buildLogsCompose(ctx: OpContext): string {
+  const query = readLogQuery(ctx);
+  const parts = [
+    'docker',
+    'compose',
+    '--project-directory',
+    reqStr(ctx, 'project_dir'),
+    'logs',
+    '--no-color',
+    '--timestamps',
+    '--tail',
+    String(query.scanLines),
+  ];
+  if (query.since !== null) {
+    parts.push('--since', query.since);
+  }
+  if (query.until !== null) {
+    parts.push('--until', query.until);
+  }
+  return query.grep === null
+    ? plainCommand(parts, true)
+    : grepCommand(parts, query, true, MAX_TAIL_LINES);
 }
 
-function shapeJournalLines(parsed: unknown): ReturnType<typeof shapeJournalEntry>[] {
-  const entries = parsed as unknown[];
-  return entries.map(shapeJournalEntry).filter((line) => line !== null);
+/** Compose prints one container after another, so the lines are put in time order before the
+ *  newest `limit` are kept. */
+function shapeComposeLogs(parsed: unknown, ctx: OpContext): Premasked<LogsResult> {
+  const query = readLogQuery(ctx);
+  const ordered = parseComposeLogLines(parsed as string)
+    .map((line, index) => ({ line, index }))
+    .sort((a, b) => (a.line.ts ?? '').localeCompare(b.line.ts ?? '') || a.index - b.index)
+    .map(({ line }) => line)
+    .slice(-query.maxLines);
+  return shapeLogs(`compose:${reqStr(ctx, 'project_dir')}`, ordered, ctx);
+}
+
+const logsCompose: OpSpec<ReturnType<typeof buildLogsResult>> = {
+  group: 'logs',
+  name: 'compose',
+  summary:
+    'Tail every service of a compose project (stdout and stderr merged) as {ts, stream, text, service} line objects + next_since.',
+  args: [
+    arg('project_dir', 'positional', true, 'Compose project directory on the remote.'),
+    arg('tail', 'flag', false, `Lines to read from each container (default ${DEFAULT_LOG_TAIL}).`),
+    ...LOG_FILTER_ARGS.slice(1),
+    ...LOG_WINDOW_ARGS,
+  ],
+  mutating: false,
+  exposes: 'content',
+  timeoutSec: LOG_TIMEOUT_SEC,
+  output: 'raw',
+  buildRemote: buildLogsCompose,
+  shapeError: shapeLogsError,
+  ...LOG_CAPS,
+  shape: shapeComposeLogs,
+};
+
+function shapeJournalLines(parsed: unknown): LogLine[] {
+  return (parsed as unknown[]).map(shapeJournalEntry).filter((line) => line !== null);
 }
 
 const logsService: OpSpec<ReturnType<typeof buildLogsResult>> = {
@@ -98,41 +192,31 @@ const logsService: OpSpec<ReturnType<typeof buildLogsResult>> = {
   summary: 'Tail a systemd unit journal as {ts, stream, text} line objects + next_since.',
   args: [
     arg('unit', 'positional', true, 'systemd unit name.'),
-    arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
+    ...LOG_FILTER_ARGS,
+    ...LOG_WINDOW_ARGS,
   ],
   mutating: false,
   exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
-  output: 'ndjson',
-  buildRemote: (ctx) =>
-    buildJournalCommand(reqStr(ctx, 'unit'), optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL))),
+  output: { parse: parseJournalLines },
+  buildRemote: (ctx) => journalCommand(reqStr(ctx, 'unit'), readLogQuery(ctx)),
   ...LOG_CAPS,
   shape: (parsed, ctx) =>
-    shapeLogs(
-      `service:${reqStr(ctx, 'unit')}`,
-      shapeJournalLines(parsed).filter((line): line is NonNullable<typeof line> => line !== null),
-      ctx,
-    ),
+    shapeLogs(`service:${reqStr(ctx, 'unit')}`, shapeJournalLines(parsed), ctx),
 };
 
 const logsDockerDaemon: OpSpec<ReturnType<typeof buildLogsResult>> = {
   group: 'logs',
   name: 'docker-daemon',
   summary: 'Tail the docker daemon journal (feeds the exit-137 differential).',
-  args: [arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`)],
+  args: [...LOG_FILTER_ARGS, ...LOG_WINDOW_ARGS],
   mutating: false,
   exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
-  output: 'ndjson',
-  buildRemote: (ctx) =>
-    buildJournalCommand('docker', optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL))),
+  output: { parse: parseJournalLines },
+  buildRemote: (ctx) => journalCommand('docker', readLogQuery(ctx)),
   ...LOG_CAPS,
-  shape: (parsed, ctx) =>
-    shapeLogs(
-      'docker-daemon',
-      shapeJournalLines(parsed).filter((line): line is NonNullable<typeof line> => line !== null),
-      ctx,
-    ),
+  shape: (parsed, ctx) => shapeLogs('docker-daemon', shapeJournalLines(parsed), ctx),
 };
 
 const NGINX_LOG_PATHS: Record<string, string> = {
@@ -144,10 +228,7 @@ const logsNginx: OpSpec<ReturnType<typeof buildLogsResult>> = {
   group: 'logs',
   name: 'nginx',
   summary: 'Tail the nginx error or access log.',
-  args: [
-    arg('stream', 'positional', true, '"error" or "access".'),
-    arg('tail', 'flag', false, `Number of lines (default ${DEFAULT_LOG_TAIL}).`),
-  ],
+  args: [arg('stream', 'positional', true, '"error" or "access".'), ...LOG_FILTER_ARGS],
   mutating: false,
   exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
@@ -162,7 +243,8 @@ const logsNginx: OpSpec<ReturnType<typeof buildLogsResult>> = {
         { did_you_mean: didYouMeanOrAll(stream, Object.keys(NGINX_LOG_PATHS)) },
       );
     }
-    return shellJoin(['tail', '-n', optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), path]);
+    const query = readLogQuery(ctx);
+    return filteredCommand(['tail', '-n', String(query.scanLines), path], query, false);
   },
   ...LOG_CAPS,
   shape: (parsed, ctx) =>
@@ -177,4 +259,10 @@ const logsNginx: OpSpec<ReturnType<typeof buildLogsResult>> = {
     ),
 };
 
-export const logsOps = [logsDocker, logsService, logsDockerDaemon, logsNginx] as OpSpec[];
+export const logsOps = [
+  logsDocker,
+  logsCompose,
+  logsService,
+  logsDockerDaemon,
+  logsNginx,
+] as OpSpec[];

@@ -1,6 +1,7 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { type DiagnoseStage, type DiagnoseStageName, diagnoseHost } from '../hosts-diagnose.ts';
 import { HOSTS_TEST_TIMEOUT_SEC } from '../limits.ts';
 import { arg, DEFAULT_TIMEOUT_SEC, optBool } from '../op-args.ts';
 import { parseOsRelease } from '../parsers/os-release.ts';
@@ -21,6 +22,10 @@ interface HostsListResult {
 
 interface HostsTestResult {
   reachable: boolean;
+  /** `--diagnose` only. */
+  stages?: DiagnoseStage[];
+  failed_at?: DiagnoseStageName | null;
+  likely_cause?: string | null;
 }
 
 interface HostInfoResult {
@@ -48,14 +53,24 @@ const hostsList: OpSpec<HostsListResult> = {
 const hostsTest: OpSpec<HostsTestResult> = {
   group: 'hosts',
   name: 'test',
-  summary: 'Confirm the alias connects (latency is the envelope duration_ms).',
-  args: [],
+  summary:
+    'Confirm the alias connects (latency is the envelope duration_ms); --diagnose places a failure at dns, tcp, banner, auth or echo.',
+  args: [
+    arg(
+      'diagnose',
+      'flag',
+      false,
+      'Probe each stage (dns, tcp, banner, auth, echo) with a verdict, instead of one echo.',
+    ),
+  ],
   mutating: false,
   exposes: 'none',
   timeoutSec: HOSTS_TEST_TIMEOUT_SEC,
   output: 'raw',
-  buildRemote: () => shellJoin(['echo', 'sshepherd-ok']),
+  buildRemote: (ctx) =>
+    optBool(ctx, 'diagnose', false) ? null : shellJoin(['echo', 'sshepherd-ok']),
   shape: (parsed) => ({ reachable: (parsed as string).trim() === 'sshepherd-ok' }),
+  runLocal: (ctx, _sshConfigPath, transport) => diagnoseHost(ctx.alias, transport),
 };
 
 function buildHostsInfoScript(): string {

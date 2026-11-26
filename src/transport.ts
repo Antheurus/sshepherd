@@ -206,7 +206,7 @@ function identityOf(sshG: string, alias: string): ConnectionIdentity {
  *  nothing in the config (followed through `Include`) can apply to it: no literal `Host` entry,
  *  no matching wildcard `Host` line, no `Match` block. A known alias's hostname, user and port are
  *  kept only as the scrubber's `identity`, never returned in an error or a result. */
-async function resolveAlias(
+export async function resolveAlias(
   alias: string,
   deps: TransportDeps,
 ): Promise<{ error: ErrorInfo | null; identity: ConnectionIdentity }> {

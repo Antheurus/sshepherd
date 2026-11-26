@@ -48,6 +48,7 @@ describe('registry — getOp/listOps', () => {
     ['check', 'oom-history'],
     ['check', 'kernel'],
     ['logs', 'docker'],
+    ['logs', 'compose'],
     ['logs', 'service'],
     ['logs', 'nginx'],
     ['logs', 'docker-daemon'],
@@ -173,15 +174,23 @@ describe('check overview — dead_end_risk verdict', () => {
     const stdout = [
       '__NPROC__',
       '4',
+      '__NPROC_RC__',
+      '0',
       '__FREE__',
       '              total        used        free      shared  buff/cache   available',
       'Mem:     8589934592  1234567890  3456789012   12345678   3987654321   6789012345',
       'Swap:    2147483648           0  2147483648',
+      '__FREE_RC__',
+      '0',
       '__DF__',
       'Filesystem     1B-blocks       Used   Available Capacity Mounted on',
       '/dev/sda1    21467271168 20500000000   967271168       95% /',
+      '__DF_RC__',
+      '0',
       '__UPTIME__',
       '14:32:05 up 10 days,  3:14,  2 users,  load average: 0.15, 0.22, 0.18',
+      '__UPTIME_RC__',
+      '0',
       '__PSI__',
       'some avg10=0.00 avg60=0.00 avg300=0.00 total=0',
       'full avg10=0.00 avg60=0.00 avg300=0.00 total=0',
@@ -208,15 +217,23 @@ describe('check overview — dead_end_risk verdict', () => {
     const stdout = [
       '__NPROC__',
       '4',
+      '__NPROC_RC__',
+      '0',
       '__FREE__',
       '              total        used        free      shared  buff/cache   available',
       'Mem:     8589934592  1234567890  3456789012   12345678   3987654321   6789012345',
       'Swap:    2147483648           0  2147483648',
+      '__FREE_RC__',
+      '0',
       '__DF__',
       'Filesystem     1B-blocks       Used   Available Capacity Mounted on',
       '/dev/sda1    21467271168 8589934592 11824550912       43% /',
+      '__DF_RC__',
+      '0',
       '__UPTIME__',
       '14:32:05 up 10 days,  3:14,  2 users,  load average: 0.15, 0.22, 0.18',
+      '__UPTIME_RC__',
+      '0',
       '__PSI__',
       'some avg10=0.00 avg60=0.00 avg300=0.00 total=0',
       'full avg10=0.00 avg60=0.00 avg300=0.00 total=0',
@@ -229,8 +246,79 @@ describe('check overview — dead_end_risk verdict', () => {
       { transport: { runner } },
     );
 
-    const data = envelope.data as { dead_end_risk: boolean };
+    const data = envelope.data as { dead_end_risk: boolean | null; degraded: string[] };
     expect(data.dead_end_risk).toBe(false);
+    expect(data.degraded).toEqual([]);
+  });
+
+  test('null with a full disk still names the disk as a risk signal', async () => {
+    const op = getOp('check', 'overview');
+    if (!op) {
+      throw new Error('check overview op missing');
+    }
+    const stdout = [
+      '__NPROC__',
+      '4',
+      '__NPROC_RC__',
+      '0',
+      '__FREE__',
+      '__FREE_RC__',
+      '127',
+      '__DF__',
+      'Filesystem     1B-blocks       Used   Available Capacity Mounted on',
+      '/dev/sda1    21467271168 20500000000   967271168       95% /',
+      '__DF_RC__',
+      '0',
+      '__UPTIME__',
+      '14:32:05 up 10 days,  3:14,  2 users,  load average: 0.15, 0.22, 0.18',
+      '__UPTIME_RC__',
+      '0',
+      '__PSI__',
+    ].join('\n');
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner: scriptedRunner(connectedRunOutcomes(stdout)) } },
+    );
+    const data = envelope.data as { dead_end_risk: boolean | null; risk_signals: string[] };
+    expect(data.dead_end_risk).toBeNull();
+    expect(data.risk_signals).toEqual(['disk']);
+  });
+
+  test('null, with the section named, when free is missing: unknown is not an all-clear', async () => {
+    const op = getOp('check', 'overview');
+    if (!op) {
+      throw new Error('check overview op missing');
+    }
+    const stdout = [
+      '__NPROC__',
+      '4',
+      '__NPROC_RC__',
+      '0',
+      '__FREE__',
+      '__FREE_RC__',
+      '127',
+      '__DF__',
+      'Filesystem     1B-blocks       Used   Available Capacity Mounted on',
+      '/dev/sda1    21467271168 8589934592 11824550912       43% /',
+      '__DF_RC__',
+      '0',
+      '__UPTIME__',
+      '14:32:05 up 10 days,  3:14,  2 users,  load average: 0.15, 0.22, 0.18',
+      '__UPTIME_RC__',
+      '0',
+      '__PSI__',
+    ].join('\n');
+    const runner = scriptedRunner(connectedRunOutcomes(stdout));
+    const envelope = await executeOp(
+      op,
+      { alias: 'lms-server', args: {} },
+      { transport: { runner } },
+    );
+    const data = envelope.data as { dead_end_risk: boolean | null; degraded: string[] };
+    expect(data.degraded).toEqual(['mem']);
+    expect(data.dead_end_risk).toBeNull();
+    expect((envelope.data as { risk_signals: string[] }).risk_signals).toEqual([]);
   });
 });
 

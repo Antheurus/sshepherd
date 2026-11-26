@@ -50,7 +50,7 @@ const NAME_ARGS = new Set([
   'recipe',
   'target',
 ]);
-const PATH_ARGS = new Set(['path', 'local_path', 'remote_path', 'file']);
+const PATH_ARGS = new Set(['path', 'local_path', 'remote_path', 'file', 'project_dir']);
 
 /**
  * A positional that starts with `-` would be read by ssh/docker/systemctl/ls as an option
