@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { errorInfo } from '../errors.ts';
 import { buildEnvelope } from '../output.ts';
 import { executeOp, getOp } from '../registry.ts';
 import {
@@ -36,10 +37,7 @@ describe('classify', () => {
       commandStderr: '',
       timedOut: false,
     };
-    expect(classify(raw)).toEqual({
-      code: 'AUTH_FAILED',
-      message: 'SSH authentication failed for this alias',
-    });
+    expect(classify(raw)).toEqual(errorInfo('AUTH_FAILED'));
   });
 
   test('exit 255 + connection timed out -> CONNECT_TIMEOUT', () => {
@@ -83,11 +81,7 @@ describe('classify', () => {
       commandStderr: 'systemctl: unit not found',
       timedOut: false,
     };
-    expect(classify(raw)).toEqual({
-      code: 'COMMAND_FAILED',
-      message: 'Remote command exited with a non-zero status',
-      remote_exit: 7,
-    });
+    expect(classify(raw)).toEqual(errorInfo('COMMAND_FAILED', 7));
   });
 
   test('timedOut -> COMMAND_TIMEOUT regardless of exit code', () => {
@@ -566,5 +560,44 @@ describe('executeOp — a timed-out command returns what it printed', () => {
     expect(envelope.error?.code).toBe('COMMAND_TIMEOUT');
     expect(envelope.error?.budget_sec).toBe(45);
     expect(envelope.data).toEqual({ partial_stdout: 'Filesystem\n' });
+  });
+});
+
+describe('run — an alias no ssh config declares is UNKNOWN_ALIAS even though ssh -G exits 0', () => {
+  function configWith(text: string): string {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-alias-test-'));
+    const path = join(dir, 'config');
+    writeFileSync(path, text);
+    return path;
+  }
+
+  test('-G echoing the name back as hostname + no Host stanza -> UNKNOWN_ALIAS with the nearest declared alias, one runner call', async () => {
+    let calls = 0;
+    const runner: SshRunner = async (args) => {
+      calls += 1;
+      return args.includes('-G')
+        ? { code: 0, stdout: 'host nonexist\nhostname nonexist\n', stderr: '', timedOut: false }
+        : { code: 0, stdout: '', stderr: '', timedOut: false };
+    };
+    const sshConfigPath = configWith('Host web-prod\n  HostName 10.0.0.9\nHost nonexistent\n');
+
+    const result = await run('nonexist', 'echo hi', 10, { runner, sshConfigPath });
+
+    expect(result.error?.code).toBe('UNKNOWN_ALIAS');
+    expect(result.error?.next).toBe('sshepherd hosts list');
+    expect(result.error?.did_you_mean).toEqual(['nonexistent']);
+    expect(calls).toBe(1);
+  });
+
+  test('an alias declared with no HostName (so -G echoes it) is still known', async () => {
+    const runner: SshRunner = async (args) =>
+      args.includes('-G')
+        ? { code: 0, stdout: 'hostname bare-alias\n', stderr: '', timedOut: false }
+        : { code: 0, stdout: 'ok', stderr: '', timedOut: false };
+    const sshConfigPath = configWith('Host bare-alias\n  User deploy\n');
+
+    const result = await run('bare-alias', 'echo hi', 10, { runner, sshConfigPath });
+
+    expect(result.error).toBeNull();
   });
 });

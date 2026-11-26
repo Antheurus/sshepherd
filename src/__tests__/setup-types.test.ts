@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { listOps } from '../registry.ts';
-import { buildSetupResult, type SetupErrorInfo } from '../setup-types.ts';
+import { buildSetupResult } from '../setup-types.ts';
 import { OpRunLocalError } from '../types.ts';
 
 describe('buildSetupResult', () => {
@@ -15,14 +15,18 @@ describe('buildSetupResult', () => {
   });
 
   test('ok is false and the error is echoed back when an error is supplied', () => {
-    const error: SetupErrorInfo = {
+    const error = {
       code: 'NOT_IMPLEMENTED',
       message: 'setup db-target scaffold is not implemented yet',
-    };
+    } as const;
     const result = buildSetupResult({ command: 'setup db-target scaffold', error });
 
     expect(result.ok).toBe(false);
-    expect(result.error).toEqual(error);
+    expect(result.error).toEqual({
+      ...error,
+      hint: 'This sub-group is not available yet.',
+      retryable: false,
+    });
     expect(result.data).toBeNull();
   });
 

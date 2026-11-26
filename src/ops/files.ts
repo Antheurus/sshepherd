@@ -10,7 +10,7 @@ import {
 import { parseDu } from '../parsers/du.ts';
 import { parseLs } from '../parsers/ls.ts';
 import { shellJoin, shq } from '../quote.ts';
-import type { OpSpec } from '../types.ts';
+import { OpError, type OpSpec } from '../types.ts';
 
 const DOWNLOAD_TIMEOUT_SEC = 30;
 const DOWNLOAD_MAX_BYTES = 10_485_760; // 10 MiB
@@ -30,7 +30,8 @@ const filesLs: OpSpec<ReturnType<typeof parseLs>> = {
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
-  buildRemote: (ctx) => shellJoin(['ls', '-la', '--time-style=long-iso', reqStr(ctx, 'path')]),
+  buildRemote: (ctx) =>
+    shellJoin(['ls', '-la', '--time-style=long-iso', '--', reqStr(ctx, 'path')]),
   shape: (parsed) => parseLs(parsed as string),
 };
 
@@ -148,7 +149,13 @@ const filesTail: OpSpec<FilesTailResult> = {
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
   buildRemote: (ctx) =>
-    shellJoin(['tail', '-n', optStr(ctx, 'n', String(DEFAULT_LOG_TAIL)), reqStr(ctx, 'path')]),
+    shellJoin([
+      'tail',
+      '-n',
+      optStr(ctx, 'n', String(DEFAULT_LOG_TAIL)),
+      '--',
+      reqStr(ctx, 'path'),
+    ]),
   shape: (parsed) => {
     const lines = (parsed as string)
       .split('\n')
@@ -179,7 +186,10 @@ function writeDownloadedFile(localPath: string, contentBase64: string): void {
     writeFileSync(localPath, Buffer.from(contentBase64, 'base64'));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    throw new Error(`files download: could not write local file '${localPath}': ${reason}`);
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `files download: could not write local file '${localPath}': ${reason}`,
+    );
   }
 }
 
@@ -253,7 +263,7 @@ const filesDiskUsage: OpSpec<FilesDiskUsageResult> = {
   timeoutSec: FILE_TIMEOUT_SEC,
   output: 'raw',
   allowlist: [{ kind: 'path', scope: 'files', argName: 'path' }],
-  buildRemote: (ctx) => shellJoin(['du', '-sb', reqStr(ctx, 'path')]),
+  buildRemote: (ctx) => shellJoin(['du', '-sb', '--', reqStr(ctx, 'path')]),
   shape: (parsed, ctx) => {
     const entries = parseDu(parsed as string);
     const first = entries[0];
@@ -302,7 +312,10 @@ const filesUpload: OpSpec<FilesUploadResult> = {
     try {
       contentBase64 = readFileSync(localPath).toString('base64');
     } catch {
-      throw new Error(`files upload: local file '${localPath}' not found or unreadable`);
+      throw new OpError(
+        'VALIDATION_ERROR',
+        `files upload: local file '${localPath}' not found or unreadable`,
+      );
     }
     return buildFilesUploadScript(remotePath, contentBase64);
   },

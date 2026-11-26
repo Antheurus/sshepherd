@@ -194,7 +194,7 @@ const servicesInspect: OpSpec<ServiceInspectDetail[]> = {
   mutating: false,
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'native-json',
-  buildRemote: (ctx) => shellJoin(['docker', 'inspect', reqStr(ctx, 'container')]),
+  buildRemote: (ctx) => shellJoin(['docker', 'inspect', '--', reqStr(ctx, 'container')]),
   shape: (parsed) => {
     if (!Array.isArray(parsed)) {
       return [];
@@ -299,7 +299,7 @@ const servicesRestart: OpSpec<{ container: string; restarted: boolean }> = {
   mutating: true,
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: 'raw',
-  buildRemote: (ctx) => shellJoin(['docker', 'restart', reqStr(ctx, 'container')]),
+  buildRemote: (ctx) => shellJoin(['docker', 'restart', '--', reqStr(ctx, 'container')]),
   shape: (_parsed, ctx) => ({ container: reqStr(ctx, 'container'), restarted: true }),
 };
 
@@ -316,7 +316,7 @@ function systemctlVerbOp(
     mutating: true,
     timeoutSec: SERVICES_TIMEOUT_SEC,
     output: 'raw',
-    buildRemote: (ctx) => shellJoin(['systemctl', verb, reqStr(ctx, 'unit')]),
+    buildRemote: (ctx) => shellJoin(['systemctl', verb, '--', reqStr(ctx, 'unit')]),
     shape: (_parsed, ctx) => ({ unit: reqStr(ctx, 'unit'), action: verb }),
   };
 }

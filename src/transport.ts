@@ -1,8 +1,11 @@
 import { mkdirSync, readdirSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { describeError, errorInfo } from './errors.ts';
 import { CONNECT_TIMEOUT_SEC, CONTROL_PERSIST_SEC, KILL_AFTER_SEC } from './limits.ts';
-import type { ErrorInfo, RawResult, SshErrorCode } from './types.ts';
+import { listHostAliases } from './parsers/ssh-config.ts';
+import { didYouMean } from './suggest.ts';
+import type { ErrorInfo, RawResult } from './types.ts';
 
 /** macOS caps a Unix-domain socket path at ~104 bytes (Linux at 108) — stay under 100. */
 const MAX_SOCKET_PATH_LENGTH = 100;
@@ -44,6 +47,8 @@ export type SshRunner = (args: string[], timeoutMs: number) => Promise<SpawnOutc
 
 export interface TransportDeps {
   runner: SshRunner;
+  /** ssh client config used to tell a declared alias from a bare hostname; defaults to `~/.ssh/config`. */
+  sshConfigPath?: string;
 }
 
 export interface TransportResult {
@@ -51,28 +56,7 @@ export interface TransportResult {
   error: ErrorInfo | null;
 }
 
-const ERROR_MESSAGES: Record<SshErrorCode, string> = {
-  UNKNOWN_ALIAS: 'SSH alias is not defined in ssh config',
-  CONNECT_TIMEOUT: 'Connection to the remote host timed out',
-  AUTH_FAILED: 'SSH authentication failed for this alias',
-  HOST_KEY_MISMATCH: 'Remote host key does not match the known host entry',
-  SSH_TRANSPORT_ERROR: 'SSH transport failed before the command could run',
-  COMMAND_FAILED: 'Remote command exited with a non-zero status',
-  COMMAND_TIMEOUT: 'Remote command timed out',
-  CONFIRMATION_REQUIRED: 'Mutating op refused: pass --yes (or confirm interactively) to proceed',
-  VALIDATION_ERROR: 'invalid arguments',
-  INVALID_ARGS: 'Invalid command-line arguments',
-};
-
-/** Exported for the registry's mutating-op confirm gate — a `CONFIRMATION_REQUIRED`
- *  refusal never touches ssh, but still wants the same static-message ErrorInfo shape. */
-export function errorInfo(code: SshErrorCode, remoteExit?: number): ErrorInfo {
-  const info: ErrorInfo = { code, message: ERROR_MESSAGES[code] };
-  if (remoteExit !== undefined) {
-    info.remote_exit = remoteExit;
-  }
-  return info;
-}
+export { errorInfo };
 
 export interface ClassifyContext {
   /** The `--timeout` budget the command ran under; lets a timeout error carry it. */
@@ -157,10 +141,24 @@ function socketPath(alias: string): string {
   return full;
 }
 
-/** Never parse `-G` output into a variable that escapes this function — presence only. */
-async function validateAlias(alias: string, runner: SshRunner): Promise<boolean> {
-  const result = await runner(['-G', alias], VALIDATE_TIMEOUT_MS);
-  return result.code === 0 && result.stdout.trim().length > 0;
+/** `ssh -G <anything>` exits 0 even for a name no config declares — it just echoes the name back
+ *  as the hostname. So an alias is unknown when `-G` fails, or when it resolved to itself AND no
+ *  `Host` stanza declares it. The hostname is compared and dropped, never kept or returned. */
+async function unknownAliasError(alias: string, deps: TransportDeps): Promise<ErrorInfo | null> {
+  const result = await deps.runner(['-G', alias], VALIDATE_TIMEOUT_MS);
+  const resolved = result.code === 0 && result.stdout.trim().length > 0;
+  const resolvedHost = /^hostname\s+(\S+)/im.exec(result.stdout)?.[1];
+  const echoed = resolvedHost !== undefined && resolvedHost.toLowerCase() === alias.toLowerCase();
+  if (resolved && !echoed) {
+    return null;
+  }
+  const declared = listHostAliases(deps.sshConfigPath ?? join(homedir(), '.ssh', 'config'));
+  if (resolved && declared.includes(alias)) {
+    return null;
+  }
+  return describeError('UNKNOWN_ALIAS', `ssh alias '${alias}' is not defined in ssh config`, {
+    did_you_mean: didYouMean(alias, declared),
+  });
 }
 
 type MasterOutcome = { sock: string; failure: null } | { sock: string; failure: TransportResult };
@@ -242,11 +240,11 @@ export async function run(
   timeoutSec: number,
   deps: TransportDeps = { runner: defaultRunner },
 ): Promise<TransportResult> {
-  const aliasOk = await validateAlias(alias, deps.runner);
-  if (!aliasOk) {
+  const unknownAlias = await unknownAliasError(alias, deps);
+  if (unknownAlias) {
     return {
       raw: { code: -1, stdout: '', transportStderr: '', commandStderr: '', timedOut: false },
-      error: errorInfo('UNKNOWN_ALIAS'),
+      error: unknownAlias,
     };
   }
 

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { errorInfo } from '../errors.ts';
 import { buildEnvelope, splitNdjson } from '../output.ts';
 
 describe('buildEnvelope', () => {
@@ -27,7 +28,7 @@ describe('buildEnvelope', () => {
       command: 'hosts test',
       startedAtMs: Date.now(),
       data: null,
-      error: { code: 'AUTH_FAILED', message: 'SSH authentication failed for this alias' },
+      error: errorInfo('AUTH_FAILED'),
     });
 
     expect(envelope.ok).toBe(false);

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { errorInfo } from '../errors.ts';
 import { STEP_FAILURE_MARKER } from '../recipes.ts';
 import { enforceAllowlist, executeOp, getOp, listOps } from '../registry.ts';
 import { buildDbOpContext } from '../targets.ts';
@@ -311,11 +312,7 @@ describe('services ps — merges docker inspect data into each entry', () => {
 
     expect(envelope.ok).toBe(false);
     expect(envelope.data).toBeNull();
-    expect(envelope.error).toEqual({
-      code: 'COMMAND_FAILED',
-      message: 'Remote command exited with a non-zero status',
-      remote_exit: 127,
-    });
+    expect(envelope.error).toEqual(errorInfo('COMMAND_FAILED', 127));
   });
 });
 
@@ -506,13 +503,14 @@ describe('files cat — env file masking', () => {
     process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = revealAllowlistPath;
     try {
       const runner = scriptedRunner(connectedRunOutcomes(ENV_CONTENT));
-      await expect(
-        executeOp(
-          op,
-          { alias: 'lms-server', args: { path: '/srv/app/.env', reveal: 'DB_PASSWORD' } },
-          { transport: { runner } },
-        ),
-      ).rejects.toThrow(/hard-denied secret pattern/);
+      const envelope = await executeOp(
+        op,
+        { alias: 'lms-server', args: { path: '/srv/app/.env', reveal: 'DB_PASSWORD' } },
+        { transport: { runner } },
+      );
+      expect(envelope.ok).toBe(false);
+      expect(envelope.error?.code).toBe('VALIDATION_ERROR');
+      expect(envelope.error?.message).toMatch(/hard-denied secret pattern/);
     } finally {
       delete process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
       delete process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH;
@@ -628,11 +626,7 @@ describe('db group — layered read-only enforcement', () => {
     ]);
     const envelope = await executeOp(op, ctx, { transport: { runner } });
     expect(envelope.ok).toBe(false);
-    expect(envelope.error).toEqual({
-      code: 'COMMAND_FAILED',
-      message: 'Remote command exited with a non-zero status',
-      remote_exit: 3,
-    });
+    expect(envelope.error).toEqual(errorInfo('COMMAND_FAILED', 3));
   });
 
   test('db activity returns numeric query_seconds/blocked_by and backends_total vs max_connections rollups', async () => {
@@ -805,11 +799,7 @@ describe('db group — layered read-only enforcement', () => {
     const envelope = await executeOp(op, ctx, { transport: { runner } });
 
     expect(envelope.ok).toBe(false);
-    expect(envelope.error).toEqual({
-      code: 'COMMAND_FAILED',
-      message: 'Remote command exited with a non-zero status',
-      remote_exit: 2,
-    });
+    expect(envelope.error).toEqual(errorInfo('COMMAND_FAILED', 2));
     const serialized = JSON.stringify(envelope);
     expect(serialized).not.toContain('SECRET_USER');
     expect(serialized).not.toContain('SECRET_DATABASE_NAME');
@@ -2188,7 +2178,7 @@ test('executeOp converts a thrown OpRunLocalError into a structured Envelope err
   expect(envelope.data).toBeNull();
 });
 
-test('executeOp re-throws a non-OpRunLocalError instead of swallowing it', async () => {
+test('executeOp turns a non-OpError throw into an INTERNAL_ERROR envelope that names the class, not the message', async () => {
   const throwingOp: OpSpec<null> = {
     group: 'test',
     name: 'throws-plain-error',
@@ -2204,9 +2194,11 @@ test('executeOp re-throws a non-OpRunLocalError instead of swallowing it', async
     },
   };
 
-  await expect(executeOp(throwingOp, { alias: '', args: {} }, {})).rejects.toThrow(
-    'a genuinely unexpected bug, not a validation failure',
-  );
+  const envelope = await executeOp(throwingOp, { alias: '', args: {} }, {});
+  expect(envelope.ok).toBe(false);
+  expect(envelope.error?.code).toBe('INTERNAL_ERROR');
+  expect(envelope.error?.message).toBe("'test throws-plain-error' failed inside sshepherd (Error)");
+  expect(envelope.error?.message).not.toContain('genuinely unexpected');
 });
 
 describe('tunnel open', () => {

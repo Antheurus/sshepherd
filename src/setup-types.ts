@@ -19,6 +19,20 @@ export interface SetupResult<T> {
 export interface SetupErrorInfo {
   code: SetupErrorCode;
   message: string;
+  hint: string;
+  retryable: boolean;
+  next?: string;
+  did_you_mean?: string[];
+}
+
+/** What a setup module hands `buildSetupResult`: code + message, plus guidance only where it
+ *  knows better than the per-code default. */
+export interface SetupErrorInput {
+  code: SetupErrorCode;
+  message: string;
+  hint?: string;
+  next?: string;
+  did_you_mean?: string[];
 }
 
 /**
@@ -65,12 +79,123 @@ export type SetupErrorCode =
 export interface BuildSetupResultInput<T> {
   command: string;
   data?: T | null;
-  error?: SetupErrorInfo | null;
+  error?: SetupErrorInput | null;
+}
+
+interface SetupGuidance {
+  hint: string;
+  retryable: boolean;
+  next?: string;
+}
+
+const SETUP_GUIDANCE: Record<SetupErrorCode, SetupGuidance> = {
+  NOT_IMPLEMENTED: { hint: 'This sub-group is not available yet.', retryable: false },
+  UNKNOWN_SUBGROUP: {
+    hint: 'Pick one of the names in did_you_mean.',
+    retryable: false,
+    next: 'sshepherd setup --help',
+  },
+  INVALID_ARGS: {
+    hint: 'Fix the argument the message names; --help on the sub-group lists the actions.',
+    retryable: false,
+    next: 'sshepherd setup --help',
+  },
+  CONFIRMATION_REQUIRED: {
+    hint: 'This writes local config; once a human has approved it, run the same command again with --yes.',
+    retryable: false,
+  },
+  ALIAS_EXISTS: {
+    hint: 'That alias is already registered; change it with setup ssh-alias update, or pass --overwrite to register.',
+    retryable: false,
+    next: 'sshepherd setup ssh-alias list',
+  },
+  ALIAS_NOT_FOUND: {
+    hint: 'No such alias is registered; the list shows the ones that are.',
+    retryable: false,
+    next: 'sshepherd setup ssh-alias list',
+  },
+  PARSE_MISMATCH: {
+    hint: 'The ssh config holds a stanza sshepherd cannot edit safely; fix that entry by hand.',
+    retryable: false,
+  },
+  KEYGEN_FAILED: {
+    hint: 'ssh-keygen did not produce a key; confirm it is installed and the key directory is writable, then run it again.',
+    retryable: true,
+  },
+  VALIDATION_ERROR: {
+    hint: 'Fix the value the message names, then run the command again.',
+    retryable: false,
+  },
+  TARGET_EXISTS: {
+    hint: 'A target with this name already exists; pick another name or edit targets.toml by hand.',
+    retryable: false,
+    next: 'sshepherd db list',
+  },
+  RECIPE_EXISTS: {
+    hint: 'A recipe with this name already exists; pick another name or edit that file by hand.',
+    retryable: false,
+  },
+  SSHPASS_NOT_FOUND: {
+    hint: 'install needs sshpass on this machine; install it, then run install again.',
+    retryable: false,
+  },
+  INSTALL_TIMED_OUT: {
+    hint: 'The one-shot form was not submitted in time; run install again.',
+    retryable: true,
+  },
+  INSTALL_FAILED: {
+    hint: 'The key was not installed; read the message, fix that cause, then run install again.',
+    retryable: false,
+  },
+  TAILSCALE_SSH_DETECTED: {
+    hint: 'Tailscale SSH never reads authorized_keys, so there is nothing to install; connect without a key.',
+    retryable: false,
+  },
+  INVALID_PRIVATE_KEY: {
+    hint: 'The pasted text is not a private key; paste the whole key, BEGIN and END lines included.',
+    retryable: false,
+  },
+  PASSPHRASE_PROTECTED_KEY_UNSUPPORTED: {
+    hint: 'install cannot supply a passphrase; paste a key without one, or use ssh-agent instead.',
+    retryable: false,
+  },
+};
+
+/** Exit 2 for a wrong command line, 1 for a run that failed, 0 for success — same split as the
+ *  op groups. */
+const SETUP_USER_ERROR_CODES: ReadonlySet<SetupErrorCode> = new Set([
+  'UNKNOWN_SUBGROUP',
+  'INVALID_ARGS',
+  'VALIDATION_ERROR',
+]);
+
+export function setupExitCode(result: SetupResult<unknown>): number {
+  if (result.error === null) {
+    return 0;
+  }
+  return SETUP_USER_ERROR_CODES.has(result.error.code) ? 2 : 1;
 }
 
 /** The only place a `SetupResult` is constructed — mirrors `buildEnvelope` in output.ts. */
 export function buildSetupResult<T>(input: BuildSetupResultInput<T>): SetupResult<T> {
-  const error = input.error ?? null;
+  const raw = input.error ?? null;
+  const guidance = raw === null ? null : SETUP_GUIDANCE[raw.code];
+  let error: SetupErrorInfo | null = null;
+  if (raw !== null && guidance !== null) {
+    error = {
+      code: raw.code,
+      message: raw.message,
+      hint: raw.hint ?? guidance.hint,
+      retryable: guidance.retryable,
+    };
+    const next = raw.next ?? guidance.next;
+    if (next !== undefined) {
+      error.next = next;
+    }
+    if (raw.did_you_mean !== undefined && raw.did_you_mean.length > 0) {
+      error.did_you_mean = raw.did_you_mean;
+    }
+  }
   return {
     ok: error === null,
     command: input.command,
@@ -93,6 +218,10 @@ export function printSetupResult(result: SetupResult<unknown>, pretty: boolean):
   const lines = [`ok: ${result.ok}`, `command: ${result.command}`, `ran_at: ${result.ran_at}`];
   if (result.error !== null) {
     lines.push('', 'error:', `  code: ${result.error.code}`, `  message: ${result.error.message}`);
+    lines.push(`  hint: ${result.error.hint}`, `  retryable: ${result.error.retryable}`);
+    if (result.error.next !== undefined) {
+      lines.push(`  next: ${result.error.next}`);
+    }
   }
   if (result.data !== null && result.data !== undefined) {
     lines.push('', 'data:', JSON.stringify(result.data, null, 2));

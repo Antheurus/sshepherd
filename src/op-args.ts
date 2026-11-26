@@ -1,5 +1,5 @@
 import type { PortMapping } from './parsers/docker-ports.ts';
-import type { ArgSpec, OpContext } from './types.ts';
+import { type ArgSpec, type OpContext, OpError } from './types.ts';
 
 export { DEFAULT_TIMEOUT_SEC, FILE_TIMEOUT_SEC, LOG_TIMEOUT_SEC } from './limits.ts';
 export const DEFAULT_LOG_TAIL = 200;
@@ -13,7 +13,7 @@ export const FILE_CAT_MAX_BYTES = 1_048_576; // 1 MiB
 export function reqStr(ctx: OpContext, key: string): string {
   const value = ctx.args[key];
   if (typeof value !== 'string' || value.length === 0) {
-    throw new Error(`missing required arg '${key}'`);
+    throw new OpError('INVALID_ARGS', `missing required arg '${key}'`);
   }
   return value;
 }
@@ -31,6 +31,71 @@ export function optStrOrNull(ctx: OpContext, key: string): string | null {
 export function optBool(ctx: OpContext, key: string, fallback: boolean): boolean {
   const value = ctx.args[key];
   return typeof value === 'boolean' ? value : fallback;
+}
+
+/** Names an ssh alias, container, unit, service, stream, tunnel id, recipe or pg-target. */
+const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.@:+~-]*$/;
+/** A local or remote file path: the shell quoting in `shellJoin` handles spaces, this only
+ *  keeps control characters, quotes and glob/redirect characters out. */
+const PATH_PATTERN = /^[A-Za-z0-9_./@:+=,~% -]+$/;
+
+/** Positional values that name something (as opposed to free text such as `sql`), by arg name. */
+const NAME_ARGS = new Set([
+  'alias',
+  'container',
+  'unit',
+  'service',
+  'stream',
+  'id',
+  'recipe',
+  'target',
+]);
+const PATH_ARGS = new Set(['path', 'local_path', 'remote_path', 'file']);
+
+/**
+ * A positional that starts with `-` would be read by ssh/docker/systemctl/ls as an option
+ * (`logs docker web -f`, `files cat host --x`), so a name or path argument is refused before
+ * any command is built or any ssh runner is called.
+ */
+export function assertPositional(name: string, value: string): void {
+  if (value.startsWith('-')) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `argument '${name}' must not start with '-' (got '${value}'): it would be read as an option`,
+      {
+        hint: PATH_ARGS.has(name)
+          ? `Pass the path itself; a relative path that starts with '-' needs ./ in front, as ./${value}.`
+          : `Pass the real ${name}; none of these names starts with '-'.`,
+      },
+    );
+  }
+  const pattern = NAME_ARGS.has(name) ? NAME_PATTERN : PATH_ARGS.has(name) ? PATH_PATTERN : null;
+  if (pattern !== null && !pattern.test(value)) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `argument '${name}' has characters outside the allowed set (got '${value}')`,
+      {
+        hint:
+          pattern === NAME_PATTERN
+            ? 'Use letters, digits and . _ - @ : + ~ only.'
+            : 'Use letters, digits, spaces and . _ - / @ : + = , ~ % only.',
+      },
+    );
+  }
+}
+
+/** Runs `assertPositional` over the op's alias and every positional the op declares. */
+export function assertOpPositionals(op: { args: ArgSpec[] }, ctx: OpContext): void {
+  if (ctx.alias.length > 0) {
+    assertPositional('alias', ctx.alias);
+  }
+  for (const spec of op.args) {
+    const value = ctx.args[spec.name];
+    const isNameOrPath = NAME_ARGS.has(spec.name) || PATH_ARGS.has(spec.name);
+    if (spec.kind === 'positional' && isNameOrPath && typeof value === 'string') {
+      assertPositional(spec.name, value);
+    }
+  }
 }
 
 export function arg(

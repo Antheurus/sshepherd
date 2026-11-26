@@ -88,6 +88,8 @@ exception noted below.
   to disk (see Gotchas #10 for the incident this closed).
 - Every mutating op writes an audit line (`~/.local/state/sshepherd/audit.jsonl`) —
   timestamp, alias, command, an arg hash (not raw args), and outcome — success or failure.
+  `SSHEPHERD_STATE_DIR` moves the directory, `SSHEPHERD_AUDIT_PATH` names the file; both are read on
+  every call.
 - `tunnel open`'s `--remote`/`--local` flags describe the forward target/exposed service as seen from
   the alias's own network (almost always `localhost:<port>`) — they are NOT the alias's own connection
   identity, so accepting them as free text doesn't weaken the zero-knowledge boundary; the response
@@ -354,9 +356,18 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `SSH_TRANSPORT_ERROR` | ssh failed before the remote command could run, unclassified |
 | `COMMAND_FAILED` | the remote command exited non-zero (`error.remote_exit` carries the code) |
 | `COMMAND_TIMEOUT` | the remote command exceeded its timeout (`error.budget_sec`, `error.elapsed_ms`; `data.partial_stdout` holds what it printed) |
-| `INVALID_ARGS` | a global flag was malformed or out of range (e.g. `--timeout 9999`) |
+| `INVALID_ARGS` | a flag or positional was malformed, missing or out of range (e.g. `--timeout 9999`, a container or path starting with `-`) — refused before any ssh call |
+| `PARSE_ERROR` | an unknown or malformed flag (`did_you_mean` lists the near flags) |
+| `UNKNOWN_SUBGROUP` | an unknown group, action or setup sub-group (`did_you_mean` lists the valid names) |
+| `VALIDATION_ERROR` | an argument or config value the op refuses locally: an unknown pg-target or recipe (`did_you_mean` lists near names), a path not on its allowlist, a non-SELECT query |
+| `INTERNAL_ERROR` | sshepherd failed while running the op (a bug or an unparseable reply from the host); the message names only the error class |
 | `CONFIRMATION_REQUIRED` | a mutating op ran without `--yes` — refused before any ssh call |
 
-Exit codes: `0` on `ok: true`; `1` when the envelope's `ok` is `false` (any code above);
-`2` on a usage error (unknown group/action, missing required argument) — no ssh connection
-is ever attempted for an exit-`2`.
+Every failure is a JSON envelope whose `error` carries `hint` (what to do), `retryable` (whether the
+same command can succeed on a re-run) and, when one exists, `next` (an exact command to run) and
+`did_you_mean` (close names). Usage errors print the envelope on stdout too, never bare stderr text.
+
+Exit codes: `0` on `ok: true`; `1` when the run failed (`COMMAND_FAILED`, a timeout, a transport
+or internal error); `2` when the command line or its config was wrong (`INVALID_ARGS`,
+`PARSE_ERROR`, `UNKNOWN_SUBGROUP`, `VALIDATION_ERROR`, `UNKNOWN_ALIAS`, `CONFIRMATION_REQUIRED`) —
+no ssh command is ever run for an exit-`2` other than the alias check behind `UNKNOWN_ALIAS`.

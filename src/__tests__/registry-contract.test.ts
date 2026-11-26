@@ -174,4 +174,44 @@ describe('registry contract — every op in listOps()', () => {
       expect(p.rows[0]?.outcome).toBe(p.name === 'tunnel close' ? 'ok' : 'error');
     }
   });
+
+  test('every mutating op writes exactly one error audit row in finally when shape or runLocal throws', async () => {
+    const succeedingRunner: SshRunner = async () => ({
+      code: 0,
+      stdout: '{}',
+      stderr: '',
+      timedOut: false,
+    });
+    const boom = (): never => {
+      throw new Error('boom from shape');
+    };
+    const checked: string[] = [];
+    for (const [index, op] of ops.filter((entry) => entry.mutating).entries()) {
+      const auditLogPath = join(scratch, `audit-throw-${index}.jsonl`);
+      const throwing: OpSpec = { ...op, shape: boom };
+      if (op.runLocal) {
+        throwing.runLocal = boom;
+      }
+      const envelope = await executeOp(
+        throwing,
+        { alias: ALIAS, args: argsFor(op) },
+        {
+          transport: { runner: succeedingRunner },
+          sshConfigPath: join(scratch, 'ssh_config'),
+          yes: true,
+          auditLogPath,
+        },
+      );
+      const name = `${op.group} ${op.name}`;
+      const rows = auditRows(auditLogPath);
+      expect({ op: name, rows: rows.map((row) => row.outcome) }).toEqual({
+        op: name,
+        rows: ['error'],
+      });
+      expect({ op: name, ok: envelope.ok }).toEqual({ op: name, ok: false });
+      expect(envelope.error?.hint.length).toBeGreaterThan(0);
+      checked.push(name);
+    }
+    expect(checked.sort()).toEqual([...AUDITED_MUTATING_OPS].sort());
+  });
 });

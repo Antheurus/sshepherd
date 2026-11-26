@@ -28,7 +28,10 @@ export type SshErrorCode =
   | 'COMMAND_TIMEOUT'
   | 'CONFIRMATION_REQUIRED'
   | 'VALIDATION_ERROR'
-  | 'INVALID_ARGS';
+  | 'INVALID_ARGS'
+  | 'PARSE_ERROR'
+  | 'UNKNOWN_SUBGROUP'
+  | 'INTERNAL_ERROR';
 
 /**
  * `message` is always a static human string looked up by `code`, never raw ssh
@@ -37,6 +40,14 @@ export type SshErrorCode =
 export interface ErrorInfo {
   code: SshErrorCode;
   message: string;
+  /** One sentence on what to do about this code — static per code unless the raiser knows better. */
+  hint: string;
+  /** Whether running the very same command again can plausibly succeed. */
+  retryable: boolean;
+  /** An exact, runnable command that moves the caller forward; absent when none is knowable. */
+  next?: string;
+  /** Close matches for a misspelt alias, group, action, flag, pg-target or recipe name. */
+  did_you_mean?: string[];
   remote_exit?: number;
   /** Timeout errors only: where the clock ran out — opening the connection or running the command. */
   phase?: 'connect' | 'command';
@@ -48,6 +59,30 @@ export interface ErrorInfo {
   elapsed_ms?: number;
 }
 
+/** Optional guidance a raiser attaches to an `OpError`; each field overrides the per-code default. */
+export interface ErrorExtras {
+  hint?: string;
+  next?: string;
+  did_you_mean?: string[];
+}
+
+/**
+ * A failure the caller can act on, raised anywhere on the way to an `Envelope` and turned
+ * into its `ErrorInfo` by `executeOp` or the CLI's top-level catch — `code`/`message` go in
+ * as written (a local validation message carries no ssh-stderr leak risk), `extras` refine
+ * the per-code guidance.
+ */
+export class OpError extends Error {
+  constructor(
+    public readonly code: SshErrorCode,
+    message: string,
+    public readonly extras: ErrorExtras = {},
+  ) {
+    super(message);
+    this.name = 'OpError';
+  }
+}
+
 /**
  * Thrown by an `OpSpec.runLocal` implementation that needs to fail with a structured,
  * agent-facing error instead of always succeeding — `executeOp` catches this specifically and
@@ -55,12 +90,9 @@ export interface ErrorInfo {
  * lookup `errorInfo()` uses for transport-originated errors, since a `runLocal` validation
  * message carries no ssh-stderr leak risk and is more useful to the caller when specific).
  */
-export class OpRunLocalError extends Error {
-  constructor(
-    public readonly code: SshErrorCode,
-    message: string,
-  ) {
-    super(message);
+export class OpRunLocalError extends OpError {
+  constructor(code: SshErrorCode, message: string, extras: ErrorExtras = {}) {
+    super(code, message, extras);
     this.name = 'OpRunLocalError';
   }
 }

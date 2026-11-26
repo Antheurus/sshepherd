@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { OpContext } from './types.ts';
+import { didYouMean } from './suggest.ts';
+import { type OpContext, OpError } from './types.ts';
 
 /**
  * A named Postgres access target — the `db` group's equivalent of an SSH alias (see
@@ -85,7 +86,11 @@ export function resolveTarget(name: string, path?: string): PgTarget {
   const targets = loadTargets(path);
   const target = targets[name];
   if (!target) {
-    throw new Error(`pg-target '${name}' is not declared in targets.toml`);
+    throw new OpError('VALIDATION_ERROR', `pg-target '${name}' is not declared in targets.toml`, {
+      hint: 'Use a declared target name, or add this one with setup db-target scaffold.',
+      next: 'sshepherd db list',
+      did_you_mean: didYouMean(name, Object.keys(targets)),
+    });
   }
   return target;
 }

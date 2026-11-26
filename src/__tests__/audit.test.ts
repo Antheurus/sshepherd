@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { auditMutating, confirmGate } from '../audit.ts';
+import { auditLogPath, auditMutating, confirmGate } from '../audit.ts';
 
 describe('confirmGate', () => {
   test('non-mutating ops always pass, regardless of --yes', () => {
@@ -76,5 +76,57 @@ describe('auditMutating', () => {
 
     const lines = readFileSync(logPath, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(2);
+  });
+});
+
+describe('auditLogPath — the log path is read at call time', () => {
+  const saved = {
+    dir: process.env.SSHEPHERD_STATE_DIR,
+    file: process.env.SSHEPHERD_AUDIT_PATH,
+  };
+
+  afterEach(() => {
+    for (const [key, value] of [
+      ['SSHEPHERD_STATE_DIR', saved.dir],
+      ['SSHEPHERD_AUDIT_PATH', saved.file],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
+  test('the test preload points the default path at a throwaway state dir, never the real log', () => {
+    delete process.env.SSHEPHERD_AUDIT_PATH;
+    const resolved = auditLogPath();
+    expect(resolved.startsWith(tmpdir())).toBe(true);
+    expect(resolved).not.toContain(join(homedir(), '.local'));
+  });
+
+  test('a default-path call with no deps writes into SSHEPHERD_STATE_DIR', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sshepherd-audit-state-'));
+    delete process.env.SSHEPHERD_AUDIT_PATH;
+    process.env.SSHEPHERD_STATE_DIR = dir;
+    try {
+      auditMutating({ alias: 'a', command: 'config put', argsSummary: {}, outcome: 'ok' });
+      expect(readFileSync(join(dir, 'audit.jsonl'), 'utf8')).toContain('"command":"config put"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('SSHEPHERD_AUDIT_PATH wins over the state dir and is re-read on every call', () => {
+    process.env.SSHEPHERD_AUDIT_PATH = '/tmp/one.jsonl';
+    expect(auditLogPath()).toBe('/tmp/one.jsonl');
+    process.env.SSHEPHERD_AUDIT_PATH = '/tmp/two.jsonl';
+    expect(auditLogPath()).toBe('/tmp/two.jsonl');
+  });
+
+  test('with neither variable set the default is the user state directory', () => {
+    delete process.env.SSHEPHERD_AUDIT_PATH;
+    delete process.env.SSHEPHERD_STATE_DIR;
+    expect(auditLogPath()).toBe(join(homedir(), '.local', 'state', 'sshepherd', 'audit.jsonl'));
   });
 });

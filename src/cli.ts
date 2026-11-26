@@ -1,14 +1,24 @@
 #!/usr/bin/env bun
 
 import { readFileSync } from 'node:fs';
+import { describeError } from './errors.ts';
 import { MAX_TIMEOUT_SEC } from './limits.ts';
-import { buildEnvelope, printError, printJson, printPretty } from './output.ts';
+import { buildEnvelope, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
 import { type ExecuteDeps, executeOp, getOp, listOps } from './registry.ts';
 import { runSetup } from './setup.ts';
+import { didYouMean, didYouMeanOrAll } from './suggest.ts';
 import { buildDbOpContext } from './targets.ts';
 import { runSupervisor } from './tunnel.ts';
-import type { ArgSpec, Envelope, OpContext, OpSpec } from './types.ts';
+import {
+  type ArgSpec,
+  type Envelope,
+  type ErrorInfo,
+  type OpContext,
+  OpError,
+  type OpSpec,
+  type SshErrorCode,
+} from './types.ts';
 
 const VERSION = '0.3.0';
 
@@ -43,7 +53,38 @@ const GLOBAL_FLAGS = [
   '--version, -v      print the sshepherd version',
 ];
 
-class UsageError extends Error {}
+/** Codes that mean the caller's command line (or config) was wrong, not that a run failed:
+ *  exit 2, against 1 for a run that failed and 0 for success. */
+const USER_ERROR_CODES: ReadonlySet<SshErrorCode> = new Set([
+  'INVALID_ARGS',
+  'PARSE_ERROR',
+  'UNKNOWN_SUBGROUP',
+  'VALIDATION_ERROR',
+  'UNKNOWN_ALIAS',
+  'CONFIRMATION_REQUIRED',
+]);
+
+function exitCodeFor(error: ErrorInfo | null): number {
+  if (error === null) {
+    return 0;
+  }
+  return USER_ERROR_CODES.has(error.code) ? 2 : 1;
+}
+
+function unknownGroupError(group: string): OpError {
+  return new OpError(
+    'UNKNOWN_SUBGROUP',
+    `unknown group "${group}". Groups: ${[...GROUPS, 'setup'].join(', ')}`,
+    { next: 'sshepherd --help', did_you_mean: didYouMeanOrAll(group, [...GROUPS, 'setup']) },
+  );
+}
+
+function usageError(message: string, next?: string): OpError {
+  return new OpError('INVALID_ARGS', message, next === undefined ? {} : { next });
+}
+
+/** Per-flag parse state for the flags every op accepts; anything else must be an op arg. */
+const GLOBAL_FLAG_NAMES = new Set(['yes', 'dry-run', 'timeout', 'pretty', 'help', 'from']);
 
 // -- argv parsing (mirrors anywrite's src/cli.ts parseFlags) --------------------------------
 // Exported so `setup.ts` reuses the same parsing instead of reinventing it for its own,
@@ -94,6 +135,25 @@ export function hasFlag(flags: FlagMap, name: string): boolean {
 
 // -- OpContext construction ------------------------------------------------------------------
 
+/** `buildOpContext` for `db`/`deploy`: a pg-target or recipe name that does not resolve
+ *  becomes a `VALIDATION_ERROR` with the nearest declared names, not a bare thrown Error. */
+function resolveContext(
+  group: string,
+  action: string,
+  op: OpSpec,
+  positionals: string[],
+  flags: FlagMap,
+): OpContext {
+  try {
+    return buildOpContext(group, action, op, positionals, flags);
+  } catch (err) {
+    if (err instanceof OpError || !(err instanceof Error)) {
+      throw err;
+    }
+    throw new OpError('VALIDATION_ERROR', err.message);
+  }
+}
+
 /** Maps CLI positionals/flags onto one `OpSpec`'s `ArgSpec[]`, in declared order — the
  *  same mapping the drift test's registry data drives the `--help` output from. */
 function mapArgsToCtx(
@@ -109,7 +169,10 @@ function mapArgsToCtx(
       posIndex++;
       if (value === undefined) {
         if (argSpec.required) {
-          throw new UsageError(`missing required positional argument '${argSpec.name}'`);
+          throw usageError(
+            `missing required positional argument '${argSpec.name}'`,
+            `sshepherd ${op.group} ${op.name} --help`,
+          );
         }
         continue;
       }
@@ -118,7 +181,10 @@ function mapArgsToCtx(
       const raw = getFlag(flags, argSpec.name);
       if (raw === undefined) {
         if (argSpec.required) {
-          throw new UsageError(`missing required flag --${argSpec.name}`);
+          throw usageError(
+            `missing required flag --${argSpec.name}`,
+            `sshepherd ${op.group} ${op.name} --help`,
+          );
         }
         continue;
       }
@@ -158,7 +224,7 @@ function buildOpContext(
     const args = mapArgsToCtx(op, positionals, flags);
     const targetName = args.target;
     if (typeof targetName !== 'string') {
-      throw new UsageError("missing required positional argument 'target'");
+      throw usageError("missing required positional argument 'target'", 'sshepherd db list');
     }
     return buildDbOpContext(targetName, args);
   }
@@ -166,15 +232,38 @@ function buildOpContext(
     const args = mapArgsToCtx(op, positionals, flags);
     const recipeName = args.recipe;
     if (typeof recipeName !== 'string') {
-      throw new UsageError("missing required positional argument 'recipe'");
+      throw usageError(
+        "missing required positional argument 'recipe'",
+        `sshepherd deploy ${action} --help`,
+      );
     }
     return buildDeployOpContext(recipeName, args);
   }
   const [alias, ...rest] = positionals;
   if (alias === undefined) {
-    throw new UsageError("missing required positional argument 'alias'");
+    throw usageError(
+      "missing required positional argument 'alias'",
+      group === 'tunnel' ? 'sshepherd tunnel --help' : 'sshepherd hosts list',
+    );
   }
   return { alias, args: mapArgsToCtx(op, rest, flags) };
+}
+
+/** A flag the op does not declare (and that is not global) is a typo or the wrong op — refuse
+ *  it instead of silently dropping it, so `--tial 50` never runs as a full-length tail. */
+function rejectUnknownFlags(op: OpSpec, flags: FlagMap): void {
+  const known = [
+    ...GLOBAL_FLAG_NAMES,
+    ...op.args.filter((spec) => spec.kind === 'flag').map((spec) => spec.name),
+  ];
+  for (const name of flags.keys()) {
+    if (!known.includes(name)) {
+      throw new OpError('PARSE_ERROR', `unknown flag --${name} for '${op.group} ${op.name}'`, {
+        next: `sshepherd ${op.group} ${op.name} --help`,
+        did_you_mean: didYouMean(name, known).map((flag) => `--${flag}`),
+      });
+    }
+  }
 }
 
 /** `config put`'s `content-base64` arg is meant to be produced by the CLI, not typed by
@@ -192,7 +281,7 @@ function applyConfigPutFromFlag(group: string, action: string, flags: FlagMap): 
   try {
     contentBase64 = readFileSync(fromPath).toString('base64');
   } catch {
-    throw new UsageError(`config put: local file '${fromPath}' not found or unreadable`);
+    throw usageError(`config put: local file '${fromPath}' not found or unreadable`);
   }
   flags.set('content-base64', [contentBase64]);
 }
@@ -235,7 +324,7 @@ function formatTopHelp(): string {
 function formatGroupHelp(group: string): string {
   const ops = listOps().filter((op) => op.group === group);
   if (ops.length === 0) {
-    throw new UsageError(`unknown group "${group}". Groups: ${GROUPS.join(', ')}`);
+    throw unknownGroupError(group);
   }
   const note = GROUP_FIRST_POSITIONAL_NOTE[group] ?? DEFAULT_FIRST_POSITIONAL_NOTE;
   const lines = [`sshepherd ${group} <action> [args] [flags]`, '', note, '', 'Actions:'];
@@ -275,11 +364,11 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
   if (first === 'tunnel' && rest[0] === '__supervise') {
     const [, id, durationSecRaw, command, ...commandArgs] = rest;
     if (id === undefined || durationSecRaw === undefined || command === undefined) {
-      throw new UsageError('tunnel __supervise: missing id/duration/command');
+      throw usageError('tunnel __supervise: missing id/duration/command');
     }
     const durationSec = Number(durationSecRaw);
     if (!Number.isFinite(durationSec) || durationSec <= 0) {
-      throw new UsageError('tunnel __supervise: duration must be a positive number');
+      throw usageError('tunnel __supervise: duration must be a positive number');
     }
     const exitCode = await runSupervisor({ command, args: commandArgs, durationSec });
     process.exitCode = exitCode;
@@ -293,7 +382,7 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
 
   const group = first;
   if (!GROUPS.includes(group)) {
-    throw new UsageError(`unknown group "${group}". Groups: ${GROUPS.join(', ')}`);
+    throw unknownGroupError(group);
   }
 
   const [actionOrHelp, ...tail] = rest;
@@ -305,8 +394,13 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
   const action = actionOrHelp;
   const op = getOp(group, action);
   if (!op) {
-    throw new UsageError(
-      `unknown action "${action}" for group "${group}".\n\n${formatGroupHelp(group)}`,
+    const actions = listOps()
+      .filter((candidate) => candidate.group === group)
+      .map((candidate) => candidate.name);
+    throw new OpError(
+      'UNKNOWN_SUBGROUP',
+      `unknown action "${action}" for group "${group}". Actions: ${actions.join(', ')}`,
+      { next: `sshepherd ${group} --help`, did_you_mean: didYouMeanOrAll(action, actions) },
     );
   }
 
@@ -316,8 +410,9 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
     return;
   }
 
+  rejectUnknownFlags(op, flags);
   applyConfigPutFromFlag(group, action, flags);
-  const ctx = buildOpContext(group, action, op, positionals, flags);
+  const ctx = resolveContext(group, action, op, positionals, flags);
   const timeout = parseTimeoutFlag(flags);
   if (timeout.problem !== undefined) {
     const envelope: Envelope<null> = buildEnvelope({
@@ -325,7 +420,9 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
       command: `${group} ${action}`,
       startedAtMs: Date.now(),
       data: null,
-      error: { code: 'INVALID_ARGS', message: timeout.problem },
+      error: describeError('INVALID_ARGS', timeout.problem, {
+        next: `sshepherd ${group} ${action} --help`,
+      }),
     });
     printJson(envelope);
     process.exitCode = 2;
@@ -339,19 +436,31 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
   } else {
     printJson(envelope);
   }
-  process.exitCode = envelope.ok ? 0 : 1;
+  process.exitCode = exitCodeFor(envelope.error);
 }
 
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
   try {
-    await run(process.argv.slice(2));
+    await run(argv);
   } catch (err) {
-    if (err instanceof Error) {
-      printError(err.message);
-      process.exitCode = 2;
-      return;
-    }
-    throw err;
+    const error =
+      err instanceof OpError
+        ? describeError(err.code, err.message, err.extras)
+        : describeError(
+            'INTERNAL_ERROR',
+            err instanceof Error ? err.message : 'sshepherd failed unexpectedly',
+          );
+    printJson(
+      buildEnvelope({
+        alias: '',
+        command: argv.slice(0, 2).join(' '),
+        startedAtMs: Date.now(),
+        data: null,
+        error,
+      }),
+    );
+    process.exitCode = exitCodeFor(error);
   }
 }
 

@@ -10,7 +10,8 @@ import { parseDockerLogLines } from '../parsers/docker-log.ts';
 import { shapeJournalEntry } from '../parsers/journal.ts';
 import { buildLogsResult } from '../parsers/logs-shape.ts';
 import { shellJoin } from '../quote.ts';
-import type { OpContext, OpSpec } from '../types.ts';
+import { didYouMeanOrAll } from '../suggest.ts';
+import { type OpContext, OpError, type OpSpec } from '../types.ts';
 
 // ---------------------------------------------------------------------------
 // logs
@@ -126,7 +127,11 @@ const logsNginx: OpSpec<ReturnType<typeof buildLogsResult>> = {
     const stream = reqStr(ctx, 'stream');
     const path = NGINX_LOG_PATHS[stream];
     if (path === undefined) {
-      throw new Error(`unknown nginx log stream '${stream}' — expected "error" or "access"`);
+      throw new OpError(
+        'VALIDATION_ERROR',
+        `unknown nginx log stream '${stream}' — expected "error" or "access"`,
+        { did_you_mean: didYouMeanOrAll(stream, Object.keys(NGINX_LOG_PATHS)) },
+      );
     }
     return shellJoin(['tail', '-n', optStr(ctx, 'tail', String(DEFAULT_LOG_TAIL)), path]);
   },

@@ -1,16 +1,17 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { auditMutating, confirmGate } from './audit.ts';
+import { type AuditOutcome, auditMutating, confirmGate } from './audit.ts';
+import { describeError, errorInfo, fillNext } from './errors.ts';
 import { MAX_PARTIAL_STDOUT_CHARS, MAX_TIMEOUT_SEC } from './limits.ts';
-import { optBool } from './op-args.ts';
+import { assertOpPositionals, optBool } from './op-args.ts';
 import { enforceAllowlist } from './ops/config.ts';
 import { buildEnvelope, splitNdjson } from './output.ts';
-import { errorInfo, run, type TransportDeps } from './transport.ts';
+import { run, type TransportDeps } from './transport.ts';
 import {
   type Envelope,
   type ErrorInfo,
   type OpContext,
-  OpRunLocalError,
+  OpError,
   type OpSpec,
   type OutputMode,
 } from './types.ts';
@@ -59,12 +60,29 @@ function auditFor(
   alias: string,
   command: string,
   ctx: OpContext,
-  outcome: 'ok' | 'error' | 'refused',
+  outcome: AuditOutcome,
 ): void {
   auditMutating(
     { alias, command, argsSummary: ctx.args, outcome },
     deps.auditLogPath ? { logPath: deps.auditLogPath } : undefined,
   );
+}
+
+/** Every `OpError` the op raises, on its way into an envelope. */
+function opErrorInfo(err: OpError): ErrorInfo {
+  return describeError(err.code, err.message, err.extras);
+}
+
+/** Anything else that escapes an op: the message is withheld (a JSON.parse error quotes the
+ *  remote output, which can carry file contents) — only the error class names what broke. */
+function internalErrorInfo(command: string, err: unknown): ErrorInfo {
+  const kind = err instanceof Error ? err.name : typeof err;
+  return describeError('INTERNAL_ERROR', `'${command}' failed inside sshepherd (${kind})`);
+}
+
+interface OpResult {
+  envelope: Envelope<unknown>;
+  outcome: AuditOutcome;
 }
 
 /**
@@ -74,9 +92,11 @@ function auditFor(
  * (the single execution path), parse per `output`, then `shape` into the final payload.
  * `deploy run --dry-run` executes nothing and mutates nothing, so it is exempt from the
  * gate/audit — every other mutating op requires `--yes` (or an interactive confirm the CLI
- * resolves into `deps.yes`) and always writes an audit line, success or failure. The CLI
- * (Phase 6) is the only intended caller in production; tests call this directly with a
- * scripted transport so no real ssh/network is ever touched.
+ * resolves into `deps.yes`) and always writes exactly one audit line in `finally`, whether
+ * the op succeeded, failed, was refused, or threw. Nothing escapes as an exception: a throw
+ * becomes an `INVALID_ARGS`/`VALIDATION_ERROR` envelope (the caller's input) or an
+ * `INTERNAL_ERROR` one (ours). The CLI is the only intended caller in production; tests call
+ * this directly with a scripted transport so no real ssh/network is ever touched.
  */
 export async function executeOp(
   op: OpSpec,
@@ -85,20 +105,52 @@ export async function executeOp(
 ): Promise<Envelope<unknown>> {
   const startedAtMs = Date.now();
   const command = `${op.group} ${op.name}`;
-  const isDryRun = optBool(ctx, 'dry-run', false);
-  const requiresConfirm = op.mutating && !isDryRun;
-
-  if (!confirmGate({ mutating: requiresConfirm, yes: deps.yes ?? false })) {
-    auditFor(deps, ctx.alias, command, ctx, 'refused');
-    return buildEnvelope({
+  const requiresConfirm = op.mutating && !optBool(ctx, 'dry-run', false);
+  let outcome: AuditOutcome = 'error';
+  let envelope: Envelope<unknown>;
+  try {
+    ({ envelope, outcome } = await runOp(op, ctx, deps, command, requiresConfirm, startedAtMs));
+  } catch (err) {
+    const error = err instanceof OpError ? opErrorInfo(err) : internalErrorInfo(command, err);
+    envelope = buildEnvelope({
       alias: ctx.alias,
       command,
       startedAtMs,
       data: null,
-      error: errorInfo('CONFIRMATION_REQUIRED'),
+      error: fillNext(error, ctx.alias),
     });
+  } finally {
+    if (requiresConfirm) {
+      auditFor(deps, ctx.alias, command, ctx, outcome);
+    }
+  }
+  return envelope;
+}
+
+async function runOp(
+  op: OpSpec,
+  ctx: OpContext,
+  deps: ExecuteDeps,
+  command: string,
+  requiresConfirm: boolean,
+  startedAtMs: number,
+): Promise<OpResult> {
+  const finish = (data: unknown, error: ErrorInfo | null, outcome: AuditOutcome): OpResult => ({
+    envelope: buildEnvelope({
+      alias: ctx.alias,
+      command,
+      startedAtMs,
+      data,
+      error: error === null ? null : fillNext(error, ctx.alias),
+    }),
+    outcome,
+  });
+
+  if (!confirmGate({ mutating: requiresConfirm, yes: deps.yes ?? false })) {
+    return finish(null, errorInfo('CONFIRMATION_REQUIRED'), 'refused');
   }
 
+  assertOpPositionals(op, ctx);
   enforceAllowlist(op.allowlist, ctx);
   const remoteCmd = op.buildRemote(ctx);
 
@@ -109,50 +161,37 @@ export async function executeOp(
       );
     }
     const sshConfigPath = deps.sshConfigPath ?? join(homedir(), '.ssh', 'config');
-    let data: unknown;
     try {
-      data = await op.runLocal(ctx, sshConfigPath, deps.transport);
+      const data = await op.runLocal(ctx, sshConfigPath, deps.transport);
+      return finish(data, null, 'ok');
     } catch (err) {
-      if (err instanceof OpRunLocalError) {
-        if (requiresConfirm) {
-          auditFor(deps, ctx.alias, command, ctx, 'error');
-        }
-        return buildEnvelope({
-          alias: ctx.alias,
-          command,
-          startedAtMs,
-          data: null,
-          error: { code: err.code, message: err.message },
-        });
+      if (err instanceof OpError) {
+        return finish(null, opErrorInfo(err), 'error');
       }
       throw err;
     }
-    const envelope = buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
-    if (requiresConfirm) {
-      auditFor(deps, ctx.alias, command, ctx, 'ok');
-    }
-    return envelope;
   }
 
-  const result = await run(ctx.alias, remoteCmd, effectiveTimeoutSec(op, deps), deps.transport);
+  const result = await run(
+    ctx.alias,
+    remoteCmd,
+    effectiveTimeoutSec(op, deps),
+    withConfigPath(deps),
+  );
   if (result.error) {
-    if (requiresConfirm) {
-      auditFor(deps, ctx.alias, command, ctx, 'error');
-    }
-    return buildEnvelope({
-      alias: ctx.alias,
-      command,
-      startedAtMs,
-      data:
-        op.shapeError?.(result.raw, ctx) ?? partialStdout(result.error, result.raw.stdout) ?? null,
-      error: result.error,
-    });
+    const data =
+      op.shapeError?.(result.raw, ctx) ?? partialStdout(result.error, result.raw.stdout) ?? null;
+    return finish(data, result.error, 'error');
   }
 
   const parsed = parseByMode(op.output, result.raw.stdout);
-  const data = op.shape(parsed, ctx);
-  if (requiresConfirm) {
-    auditFor(deps, ctx.alias, command, ctx, 'ok');
+  return finish(op.shape(parsed, ctx), null, 'ok');
+}
+
+/** The transport validates an alias against the same ssh config `hosts list` reads. */
+function withConfigPath(deps: ExecuteDeps): TransportDeps | undefined {
+  if (deps.sshConfigPath === undefined) {
+    return deps.transport;
   }
-  return buildEnvelope({ alias: ctx.alias, command, startedAtMs, data, error: null });
+  return deps.transport && { ...deps.transport, sshConfigPath: deps.sshConfigPath };
 }

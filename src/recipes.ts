@@ -1,8 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { shellJoin, shq } from './quote.ts';
-import type { OpContext } from './types.ts';
+import { didYouMean } from './suggest.ts';
+import { type OpContext, OpError } from './types.ts';
 
 /**
  * Typed deploy-recipe steps (Kamal-style declarative, research.md §"deploy recipes").
@@ -106,6 +107,31 @@ export function resolveRecipePath(name: string): string {
     return inRepo;
   }
   return join(homedir(), '.config', 'sshepherd', 'recipes', `${name}.toml`);
+}
+
+/** Recipe names that resolve today: `.sshepherd/deploy.<name>.toml` in the working directory
+ *  and `<name>.toml` in the user recipes directory — what a misspelt name is compared against. */
+function listRecipeNames(): string[] {
+  const names: string[] = [];
+  const sources: Array<{ dir: string; pattern: RegExp }> = [
+    { dir: join(process.cwd(), '.sshepherd'), pattern: /^deploy\.(.+)\.toml$/ },
+    { dir: join(homedir(), '.config', 'sshepherd', 'recipes'), pattern: /^(.+)\.toml$/ },
+  ];
+  for (const { dir, pattern } of sources) {
+    let files: string[] = [];
+    try {
+      files = readdirSync(dir);
+    } catch {
+      // a missing recipes directory just means no candidates from it
+    }
+    for (const file of files) {
+      const name = pattern.exec(file)?.[1];
+      if (name !== undefined) {
+        names.push(name);
+      }
+    }
+  }
+  return names;
 }
 
 interface RawStep {
@@ -450,7 +476,10 @@ export function loadRecipe(name: string, path?: string): Recipe {
   try {
     text = readFileSync(resolvedPath, 'utf8');
   } catch {
-    throw new Error(`recipe '${name}' not found`);
+    throw new OpError('VALIDATION_ERROR', `recipe '${name}' not found`, {
+      hint: 'Use a recipe name that exists, or create it with setup deploy-recipe scaffold.',
+      did_you_mean: didYouMean(name, listRecipeNames()),
+    });
   }
   const parsed = Bun.TOML.parse(text) as Record<string, unknown>;
   const recipeName = typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : name;

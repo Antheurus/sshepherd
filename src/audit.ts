@@ -16,7 +16,20 @@ export interface AuditDeps {
   logPath: string;
 }
 
-const DEFAULT_LOG_PATH = join(homedir(), '.local', 'state', 'sshepherd', 'audit.jsonl');
+/** Read on every call, never at import: a compiled binary must not freeze the build machine's
+ *  environment, and tests redirect it through `SSHEPHERD_STATE_DIR` (`SSHEPHERD_AUDIT_PATH`
+ *  names the file itself). */
+export function auditLogPath(): string {
+  const file = process.env.SSHEPHERD_AUDIT_PATH;
+  if (file && file.length > 0) {
+    return file;
+  }
+  const dir = process.env.SSHEPHERD_STATE_DIR;
+  if (dir && dir.length > 0) {
+    return join(dir, 'audit.jsonl');
+  }
+  return join(homedir(), '.local', 'state', 'sshepherd', 'audit.jsonl');
+}
 
 function hashArgs(argsSummary: Record<string, string | boolean>): string {
   const sortedKeys = Object.keys(argsSummary).sort();
@@ -27,7 +40,7 @@ function hashArgs(argsSummary: Record<string, string | boolean>): string {
 /** Appends one JSON line per mutating op to the audit log, creating a private 0700 dir if missing. */
 export function auditMutating(
   input: AuditEntryInput,
-  deps: AuditDeps = { logPath: DEFAULT_LOG_PATH },
+  deps: AuditDeps = { logPath: auditLogPath() },
 ): void {
   mkdirSync(dirname(deps.logPath), { recursive: true, mode: 0o700 });
   const entry = {

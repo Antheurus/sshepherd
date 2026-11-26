@@ -10,7 +10,7 @@ import {
   reqStr,
 } from '../op-args.ts';
 import { shellJoin, shq } from '../quote.ts';
-import type { AllowlistPolicy, OpContext, OpSpec } from '../types.ts';
+import { type AllowlistPolicy, type OpContext, OpError, type OpSpec } from '../types.ts';
 
 // ---------------------------------------------------------------------------
 // config
@@ -79,7 +79,13 @@ export function assertPathAllowed(scope: 'config' | 'files', ctx: OpContext, pat
   const allowlist = loadPathAllowlist(scope);
   const allowed = allowlist[ctx.alias] ?? [];
   if (!allowed.includes(path)) {
-    throw new Error(`${scope} path '${path}' is not on the allowlist for alias '${ctx.alias}'`);
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `${scope} path '${path}' is not on the allowlist for alias '${ctx.alias}'`,
+      {
+        hint: `A human declares allowed paths with setup ${scope}-allowlist scaffold; the agent never widens its own allowlist.`,
+      },
+    );
   }
 }
 
@@ -137,12 +143,14 @@ export function assertRevealKeysAllowed(ctx: OpContext, keys: Set<string>): void
   const allowedForAlias = new Set(allowlist[ctx.alias] ?? []);
   for (const key of keys) {
     if (REVEAL_DENYLIST_PATTERNS.some((pattern) => pattern.test(key))) {
-      throw new Error(
+      throw new OpError(
+        'VALIDATION_ERROR',
         `reveal key '${key}' matches a hard-denied secret pattern and can never be revealed`,
       );
     }
     if (!allowedForAlias.has(key)) {
-      throw new Error(
+      throw new OpError(
+        'VALIDATION_ERROR',
         `reveal key '${key}' is not on the reveal-allowlist for alias '${ctx.alias}'`,
       );
     }
@@ -235,7 +243,7 @@ function buildConfigValidateCommand(path: string): string {
   if (/(docker-)?compose\.ya?ml$/i.test(path)) {
     return shellJoin(['docker', 'compose', '-f', path, 'config', '-q']);
   }
-  throw new Error(`config validate: no known validator for path '${path}'`);
+  throw new OpError('VALIDATION_ERROR', `config validate: no known validator for path '${path}'`);
 }
 
 const configValidate: OpSpec<{ valid: boolean }> = {

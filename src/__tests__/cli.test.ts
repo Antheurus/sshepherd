@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import { parseArgv, run } from '../cli.ts';
 import type { SshRunner } from '../transport.ts';
 
@@ -111,4 +112,98 @@ describe('run — global --timeout', () => {
       expect(process.exitCode).toBe(2);
     });
   }
+});
+
+interface CliEnvelope {
+  ok: boolean;
+  error: {
+    code: string;
+    message: string;
+    hint: string;
+    retryable: boolean;
+    next?: string;
+    did_you_mean?: string[];
+  };
+}
+
+describe('usage failures are JSON envelopes with guidance and exit code 2', () => {
+  async function runBinary(
+    args: string[],
+  ): Promise<{ envelope: CliEnvelope; code: number; stderr: string }> {
+    const proc = Bun.spawn(['bun', join(import.meta.dir, '..', 'cli.ts'), ...args], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: { ...process.env, SSHEPHERD_TARGETS_PATH: '/nonexistent/targets.toml' },
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { envelope: JSON.parse(stdout), code, stderr };
+  }
+
+  test('unknown action -> UNKNOWN_SUBGROUP listing the group actions', async () => {
+    const { envelope, code } = await runBinary(['check', 'bogus']);
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.code).toBe('UNKNOWN_SUBGROUP');
+    expect(envelope.error.did_you_mean).toContain('disk');
+    expect(envelope.error.next).toBe('sshepherd check --help');
+    expect(envelope.error.retryable).toBe(false);
+    expect(code).toBe(2);
+  });
+
+  test('a misspelt group suggests the real one first', async () => {
+    const { envelope, code } = await runBinary(['chek', 'disk']);
+    expect(envelope.error.code).toBe('UNKNOWN_SUBGROUP');
+    expect(envelope.error.did_you_mean?.[0]).toBe('check');
+    expect(code).toBe(2);
+  });
+
+  test('an unknown flag -> PARSE_ERROR naming it, with the near flag', async () => {
+    const { envelope, code } = await runBinary(['logs', 'docker', 'web', '--tial', '5']);
+    expect(envelope.error.code).toBe('PARSE_ERROR');
+    expect(envelope.error.message).toContain('--tial');
+    expect(envelope.error.did_you_mean).toContain('--tail');
+    expect(code).toBe(2);
+  });
+
+  test('a missing required positional -> INVALID_ARGS pointing at --help', async () => {
+    const { envelope, code } = await runBinary(['logs', 'docker', 'web']);
+    expect(envelope.error.code).toBe('INVALID_ARGS');
+    expect(envelope.error.next).toBe('sshepherd logs docker --help');
+    expect(code).toBe(2);
+  });
+
+  test('an option-shaped container -> INVALID_ARGS before ssh', async () => {
+    const { envelope, code } = await runBinary(['logs', 'docker', 'web', '-f']);
+    expect(envelope.error.code).toBe('INVALID_ARGS');
+    expect(code).toBe(2);
+  });
+
+  test('an undeclared pg-target -> VALIDATION_ERROR, no stderr text', async () => {
+    const { envelope, code, stderr } = await runBinary(['db', 'tables', 'nope']);
+    expect(envelope.error.code).toBe('VALIDATION_ERROR');
+    expect(envelope.error.next).toBe('sshepherd db list');
+    expect(code).toBe(2);
+    expect(stderr).toBe('');
+  });
+
+  test('setup <sub-group> <action> --help prints help even though required args are missing', async () => {
+    const proc = Bun.spawn(
+      ['bun', join(import.meta.dir, '..', 'cli.ts'), 'setup', 'db-target', 'scaffold', '--help'],
+      { stdout: 'pipe', stderr: 'pipe' },
+    );
+    const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    expect(stdout).toContain('sshepherd setup db-target <action>');
+    expect(code).toBe(0);
+  });
+
+  test('an unknown setup sub-group carries did_you_mean and exits 2', async () => {
+    const { envelope, code } = await runBinary(['setup', 'ssh-alais']);
+    expect(envelope.error.code).toBe('UNKNOWN_SUBGROUP');
+    expect(envelope.error.did_you_mean?.[0]).toBe('ssh-alias');
+    expect(envelope.error.hint.length).toBeGreaterThan(0);
+    expect(code).toBe(2);
+  });
 });

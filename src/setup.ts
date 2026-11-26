@@ -5,7 +5,13 @@ import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
 import { scaffold as scaffoldFilesAllowlist } from './setup-files-allowlist.ts';
 import { scaffold as scaffoldRevealAllowlist } from './setup-reveal-allowlist.ts';
 import { install, keygen, list, register, remove, status, update } from './setup-ssh-alias.ts';
-import { buildSetupResult, printSetupResult, type SetupResult } from './setup-types.ts';
+import {
+  buildSetupResult,
+  printSetupResult,
+  type SetupResult,
+  setupExitCode,
+} from './setup-types.ts';
+import { didYouMeanOrAll } from './suggest.ts';
 
 /**
  * A `setup` sub-group's declared action names — data-driven the same way `registry.ts`
@@ -87,10 +93,14 @@ function printUnknownSubGroup(subGroupName: string): void {
     error: {
       code: 'UNKNOWN_SUBGROUP',
       message: `unknown setup sub-group "${subGroupName}". Sub-groups: ${SETUP_SUB_GROUPS.map((sub) => sub.name).join(', ')}`,
+      did_you_mean: didYouMeanOrAll(
+        subGroupName,
+        SETUP_SUB_GROUPS.map((sub) => sub.name),
+      ),
     },
   });
   printSetupResult(result, false);
-  process.exitCode = 1;
+  process.exitCode = setupExitCode(result);
 }
 
 function printUnknownAction(sub: SetupSubGroupSpec, action: string): void {
@@ -99,10 +109,12 @@ function printUnknownAction(sub: SetupSubGroupSpec, action: string): void {
     error: {
       code: 'UNKNOWN_SUBGROUP',
       message: `unknown action "${action}" for setup sub-group "${sub.name}". Actions: ${sub.actions.join(', ')}`,
+      next: `sshepherd setup ${sub.name} --help`,
+      did_you_mean: didYouMeanOrAll(action, sub.actions),
     },
   });
   printSetupResult(result, false);
-  process.exitCode = 1;
+  process.exitCode = setupExitCode(result);
 }
 
 /**
@@ -118,7 +130,7 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
   if (action === 'list') {
     const result = list();
     printSetupResult(result, pretty);
-    process.exitCode = result.ok ? 0 : 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -133,7 +145,7 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
       },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -188,7 +200,7 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
   }
 
   printSetupResult(result, pretty);
-  process.exitCode = result.ok ? 0 : 1;
+  process.exitCode = setupExitCode(result);
 }
 
 /**
@@ -212,7 +224,7 @@ function runDbTargetAction(argTail: string[]): void {
       },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -228,7 +240,7 @@ function runDbTargetAction(argTail: string[]): void {
       },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -243,7 +255,7 @@ function runDbTargetAction(argTail: string[]): void {
   });
 
   printSetupResult(result, pretty);
-  process.exitCode = result.ok ? 0 : 1;
+  process.exitCode = setupExitCode(result);
 }
 
 /**
@@ -267,7 +279,7 @@ function runConfigAllowlistAction(argTail: string[]): void {
       },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -278,7 +290,7 @@ function runConfigAllowlistAction(argTail: string[]): void {
       error: { code: 'INVALID_ARGS', message: `${command}: --paths is required` },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -290,7 +302,7 @@ function runConfigAllowlistAction(argTail: string[]): void {
   const result = scaffoldConfigAllowlist(alias, { paths, yes });
 
   printSetupResult(result, pretty);
-  process.exitCode = result.ok ? 0 : 1;
+  process.exitCode = setupExitCode(result);
 }
 
 /**
@@ -314,7 +326,7 @@ function runFilesAllowlistAction(argTail: string[]): void {
       },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -325,7 +337,7 @@ function runFilesAllowlistAction(argTail: string[]): void {
       error: { code: 'INVALID_ARGS', message: `${command}: --paths is required` },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -337,7 +349,7 @@ function runFilesAllowlistAction(argTail: string[]): void {
   const result = scaffoldFilesAllowlist(alias, { paths, yes });
 
   printSetupResult(result, pretty);
-  process.exitCode = result.ok ? 0 : 1;
+  process.exitCode = setupExitCode(result);
 }
 
 /**
@@ -361,7 +373,7 @@ function runRevealAllowlistAction(argTail: string[]): void {
       },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -372,7 +384,7 @@ function runRevealAllowlistAction(argTail: string[]): void {
       error: { code: 'INVALID_ARGS', message: `${command}: --keys is required` },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -384,7 +396,7 @@ function runRevealAllowlistAction(argTail: string[]): void {
   const result = scaffoldRevealAllowlist(alias, { keys, yes });
 
   printSetupResult(result, pretty);
-  process.exitCode = result.ok ? 0 : 1;
+  process.exitCode = setupExitCode(result);
 }
 
 /**
@@ -408,7 +420,7 @@ function runDeployRecipeAction(argTail: string[]): void {
       },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
@@ -420,14 +432,14 @@ function runDeployRecipeAction(argTail: string[]): void {
       error: { code: 'INVALID_ARGS', message: `${command}: --alias and --workdir are required` },
     });
     printSetupResult(result, pretty);
-    process.exitCode = 1;
+    process.exitCode = setupExitCode(result);
     return;
   }
 
   const result = scaffoldDeployRecipe(name, { alias, workdir, yes });
 
   printSetupResult(result, pretty);
-  process.exitCode = result.ok ? 0 : 1;
+  process.exitCode = setupExitCode(result);
 }
 
 /**
@@ -457,6 +469,11 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (!subGroup.actions.includes(actionOrHelp)) {
     printUnknownAction(subGroup, actionOrHelp);
+    return;
+  }
+
+  if (argTail.includes('--help') || argTail.includes('-h')) {
+    process.stdout.write(`${formatSetupSubGroupHelp(subGroup)}\n`);
     return;
   }
 

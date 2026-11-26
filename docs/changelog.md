@@ -1,5 +1,14 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.3 — Errors now tell you the next command
+
+- Every failure is now a JSON envelope with a `hint` (what to do), `retryable` (whether running it again can help) and, where one exists, `next` (an exact command to run) and `did_you_mean` (close names). This includes typos in the group, action, flag, pg-target or recipe name, which used to print bare text on stderr.
+- `hosts test <unknown alias>` now answers `UNKNOWN_ALIAS` with `next: sshepherd hosts list` instead of a generic transport error.
+- An unknown flag is refused with `PARSE_ERROR` instead of being silently ignored (`--tial 5` no longer runs a full-length tail). A container, unit, service or path that starts with `-` is refused with `INVALID_ARGS` before any ssh call, so it can never be read as an option.
+- Exit code `2` now means the command line or its config was wrong; `1` means the run itself failed.
+- `setup <sub-group> <action> --help` shows help even when required arguments are missing.
+- The audit log can be redirected with `SSHEPHERD_STATE_DIR` or `SSHEPHERD_AUDIT_PATH`, and the test suite no longer writes to your real audit log. Every mutating op still writes its audit line even if it fails halfway.
+
 ## v0.4.0-rc.2 — Faster repeated calls and clearer timeouts
 
 - Repeated calls to the same server now reuse one SSH connection for 5 idle minutes instead of reconnecting each time. `sshepherd hosts disconnect <alias>` (or `--all`) closes it on demand, for example after you change `~/.ssh/config`.

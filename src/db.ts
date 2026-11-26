@@ -1,5 +1,6 @@
 import { Parser } from 'node-sql-parser';
 import { shellJoin } from './quote.ts';
+import { OpError } from './types.ts';
 
 const parser = new Parser();
 
@@ -43,7 +44,10 @@ function readStatementType(statement: unknown): string | null {
  */
 export function assertNoMultiStatementSql(sql: string): void {
   if (sql.trim().includes(';')) {
-    throw new Error("db query rejects multi-statement SQL: a single SELECT statement, no ';'");
+    throw new OpError(
+      'VALIDATION_ERROR',
+      "db query rejects multi-statement SQL: a single SELECT statement, no ';'",
+    );
   }
 }
 
@@ -67,7 +71,8 @@ export function assertSelectOnly(sql: string): void {
   for (const statement of list) {
     const type = readStatementType(statement);
     if (type !== null && WRITE_STATEMENT_TYPES.has(type)) {
-      throw new Error(
+      throw new OpError(
+        'VALIDATION_ERROR',
         `db query: refusing statement type '${type}' — only SELECT is allowed (parser layer)`,
       );
     }
@@ -107,7 +112,10 @@ function execPrefix(conn: DbConnection): string[] {
   if (conn.container.length > 0) {
     return ['docker', 'exec', '-i', conn.container];
   }
-  throw new Error('db: connection needs either {compose_file, service} or {container}');
+  throw new OpError(
+    'VALIDATION_ERROR',
+    'db: connection needs either {compose_file, service} or {container}',
+  );
 }
 
 /**
