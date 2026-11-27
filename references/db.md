@@ -197,32 +197,69 @@ The session gets the bounded-read limits (`statement_timeout` = budget less 15 s
 300 s; `lock_timeout` 2 s), then `BEGIN`, the statements, and `COMMIT` — or `ROLLBACK` for
 `--dry-run`. `ON_ERROR_STOP` ends psql at the first failing statement and the server rolls the open
 transaction back. Statement output goes to `/dev/null` (`\o`), so a `SELECT` in the file returns
-only its row count. Refused outright, before any ssh call: transaction control (`BEGIN`, `COMMIT`,
-`SAVEPOINT`, ...), a psql meta-command (a buffer starting with a backslash), `SET`/`RESET` of the
-role or a timer, `set_config()`, `COPY ... PROGRAM`, and a `BEGIN ATOMIC` function body. DDL —
-`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `GRANT`, `REVOKE`, `COMMENT`, `DO`, `CALL`, `REINDEX`,
-`CLUSTER`, `REFRESH`, `SECURITY LABEL`, `IMPORT`, `LOAD`, `REASSIGN`, `SELECT ... INTO`, and an
-`EXPLAIN ANALYZE` around any of them — is `DDL_REFUSED` without `--allow-ddl`. These are lexical
-guards; the write role's grants are the boundary, as the read-only login is for reads. A dry run
-still advances sequences and can fire side effects outside the transaction. The real run needs
-`--yes` and the `deploy` profile. Its audit row carries `sql_sha256` and `tables` (names only);
-the scrubbed SQL text is written only to `<state dir>/sql/<sha256>.sql` (0600 in a 0700
-directory), kept 90 days and 200 MB in total, oldest first.
+only its row count.
+
+The server must end each statement exactly where the splitter did, so the session pins every
+setting the splitter's lexing depends on — `standard_conforming_strings = on`, `client_encoding =
+UTF8`, `backslash_quote = safe_encoding`, `escape_string_warning = on` — and sets the first two
+again in their own buffer before every statement (Postgres lexes a buffer whole before running
+it, so a setting changed out of sight, inside a function or `query_to_xml`, is back before the
+next statement is read). After the last statement it checks that the open transaction is still the
+one it began (its xid, held in a transaction-local setting); if a COMMIT or ROLLBACK ran that the
+splitter never saw, the call fails `COMMAND_FAILED` with `data.committed: null` and a message saying
+what ran may already be committed — never a quiet `committed: false`.
+
+Refused outright, before any ssh call: transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...),
+a psql meta-command (a buffer starting with a backslash), `SET`/`RESET` of the role or a timer, any
+change to `standard_conforming_strings`, `client_encoding` (`SET NAMES`), `backslash_quote` or
+`escape_string_warning` (`SET`, `SET SESSION|LOCAL`, `RESET`, and the `SET`/`RESET` clauses of
+`ALTER ROLE|USER|DATABASE|SYSTEM|FUNCTION ...` and `CREATE FUNCTION ...`), `set_config()`, `COPY ...
+PROGRAM`, and a `BEGIN ATOMIC` function body. Names are compared the way Postgres resolves them: a
+`"quoted"` name, a `U&"\0072ole"` escape and a `pg_catalog.` prefix are the same setting or
+function as the plain word. DDL — `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `GRANT`, `REVOKE`,
+`COMMENT`, `DO`, `CALL`, `REINDEX`, `CLUSTER`, `REFRESH`, `SECURITY LABEL`, `IMPORT`, `LOAD`,
+`REASSIGN`, `SELECT ... INTO`, and an `EXPLAIN ANALYZE` around any of them — is `DDL_REFUSED`
+without `--allow-ddl`.
+
+These are lexical guards; the write role's grants are the boundary, as the read-only login is for
+reads. Let through on purpose, because only the role can decide them: `pg_terminate_backend()`,
+`COPY ... TO '<file>'` (server-side files need `pg_write_server_files`), `lo_import()` /
+`lo_export()`, `dblink` calls, `LOCK`, `LISTEN` / `NOTIFY`, `SET search_path`, and a data-modifying
+`WITH ... DELETE|UPDATE|INSERT`. Give `write_role` only the grants the change needs.
+
+**`--dry-run` runs for real, then ROLLBACK — it is not a simulation.** Every statement executes:
+sequences advance, rows lock for the length of the call, triggers fire, and anything a function
+does outside the transaction (a `NOTIFY` is held, but `dblink` or a file write is not) stays done.
+Avoid it on a busy production database. It needs no `--yes`, but it needs the `deploy` profile
+like the real run, and both write an audit row carrying `sql_sha256` and `tables` (names only), the
+dry run's with `dry_run: true`; the scrubbed SQL text is written only to
+`<state dir>/sql/<sha256>.sql` (0600 in a 0700 directory), kept 90 days and 200 MB in total,
+oldest first.
 
 **`db backup`.** `pg_dump -Fc` as the target's `user`, written on the host into `backup_dir`
 (default `.sshepherd/backups` under the ssh login's home) as `sshepherd-<target>-<UTC>.dump`
-under a 077 umask, through a `.partial` file renamed only when the dump exited 0. Then the size,
+under a 077 umask, through its own `.<name>.<pid>.partial` file hard-linked to the dump name only
+when the dump exited 0 — `ln` refuses an existing name, so the second of two backups started in the
+same second fails with "already exists" and never touches the first dump. Then the size,
 sha256 and `pg_restore -l` count of `TABLE DATA` entries, then the prune: this target's dumps
 newest first, each kept while fewer than `--keep` (else `backup_keep`, else 7) are kept and the
 total stays within `backup_max_bytes` (default 5 GiB); the new dump is always kept, and no other
 file in the directory is ever deleted.
 
 **`db backup-verify`.** Gotcha B2: a restore is proven by real per-table counts, never by a hash
-or an exit code. It creates `sshepherd_verify_<random>` as the write role (`CREATEDB`),
+or an exit code. It creates `sshepherd_verify_<unix seconds>_<16 hex>` as the write role (`CREATEDB`),
 `pg_restore --no-owner --no-privileges` the newest dump (or `--dump <name>`) into it, counts every
-user table with `count(*)` in the source (as the read login) and in the copy, and drops the copy —
-an EXIT trap drops it on every path, and the op reads `pg_database` afterwards to report
-`throwaway_dropped`. `verified` is true only when the restore reported 0 errors and every table's
+user table with `count(*)` in the source (as the read login) and in the copy, and drops the copy,
+then reads `pg_database` to report `throwaway_dropped`. Dropping the copy does not depend on the
+caller staying alive: an EXIT trap drops it on every exit a signal allows; a blank heartbeat line
+each second during the restore makes the script notice a dead ssh session within seconds; a
+watchdog in its own session (`setsid`, else `nohup`) drops it once the script is gone for any
+reason, `kill -9` included, after ending the restore's own connection; and every `backup-verify`
+first drops this write role's throwaway databases older than 4510 s, about 75 minutes (the longest
+budget, 3600 s, plus the kill grace and 15 minutes for clock skew), so a leftover never outlives
+the next run. The restore's error text sits in a 0600 file next to the dump for the length of the
+call and is removed with the copy.
+`verified` is true only when the restore reported 0 errors and every table's
 counts match. The source is counted now, not at dump time, so a table written since the dump shows
 in `mismatched`; verify right after the backup. It changes nothing the caller keeps, so it needs no
 `--yes`, but it needs the `deploy` profile.

@@ -338,3 +338,14 @@ export const HTTP_BODY_SCRUB_MARGIN_BYTES = 16_384;
 /** curl `--max-time` of one recipe `http-probe` attempt: a health endpoint that has not answered in
  *  10 s is failing, and the step's `retries` and `interval` decide how long it keeps trying. */
 export const RECIPE_HTTP_PROBE_TIMEOUT_SEC = 10;
+
+/** Age at which a `sshepherd_verify_<epoch>_<hex>` database is a leftover the next
+ *  `db backup-verify` drops before it starts: the longest budget a verify can run
+ *  (`MAX_TIMEOUT_SEC` plus the `KILL_AFTER_SEC` grace) and 15 minutes for clock skew between this
+ *  machine (which stamps the name) and the database (which judges the age), so a verify still
+ *  running from another machine is never swept. Also the most seconds the remote watchdog waits
+ *  for its verify to end before dropping the throwaway. */
+export const DB_BACKUP_VERIFY_STALE_SEC = MAX_TIMEOUT_SEC + KILL_AFTER_SEC + 900;
+/** Attempts, 1 s apart, to drop a throwaway database: the restore's own connection takes a moment
+ *  to end after `pg_terminate_backend`, and DROP fails while it is still there. */
+export const DB_VERIFY_DROP_TRIES = 10;

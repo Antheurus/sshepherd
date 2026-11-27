@@ -28,6 +28,7 @@ import {
   describeTableSql,
   EXEC_DONE_MARKER,
   EXEC_ROWS_MARKER,
+  EXEC_TXN_ENDED_MARKER,
   limitRows,
   MIGRATION_TABLES,
   MIGRATIONS_DIR_MARKER,
@@ -1128,6 +1129,29 @@ interface DbExecResult {
   statements: DbExecStatement[];
 }
 
+/** `db exec`'s own errors before psql's timeouts: the transaction it opened was ended by something
+ *  in the file the splitter did not see, so the envelope cannot say what was committed. */
+function refineExecError(
+  commandStderr: string,
+  error: ErrorInfo,
+  ctx: OpContext,
+): ErrorInfo | undefined {
+  if (commandStderr.includes(EXEC_TXN_ENDED_MARKER)) {
+    return {
+      ...describeError(
+        'COMMAND_FAILED',
+        'db exec: the transaction db exec opened was ended inside the file (a COMMIT or ROLLBACK db exec did not see), so statements before it may already be committed, dry run or not',
+        {
+          hint: 'Check the touched tables by hand before running anything again, and report the file: its statements were split differently by Postgres than by db exec.',
+        },
+      ),
+      remote_exit: error.remote_exit,
+      phase: 'command' as const,
+    };
+  }
+  return refinePsqlTimeout(DB_EXEC_TIMEOUT_SEC)(commandStderr, error, ctx);
+}
+
 /** The `ROW_COUNT` echo of every statement that finished, and how the transaction ended. */
 function parseExecOutput(stdout: string): { rows: Map<number, number>; done: string | null } {
   const rows = new Map<number, number>();
@@ -1165,7 +1189,7 @@ const dbExec: OpSpec<DbExecResult> = {
       'dry-run',
       'flag',
       false,
-      'Run every statement, report the row counts, then ROLLBACK (sequences and side effects outside the transaction still happen).',
+      'Runs every statement for real, reports the row counts, then ROLLBACK: not a simulation (sequences advance, rows lock, triggers fire). Needs the deploy profile and writes an audit row.',
     ),
     arg(
       'allow-ddl',
@@ -1180,7 +1204,7 @@ const dbExec: OpSpec<DbExecResult> = {
   timeoutSec: DB_EXEC_TIMEOUT_SEC,
   output: { parse: parseExecOutput },
   errorData: psqlErrorData,
-  refineError: refinePsqlTimeout(DB_EXEC_TIMEOUT_SEC),
+  refineError: refineExecError,
   hiddenArgs: DB_WRITE_ARGS,
   buildRemote: (ctx) => {
     const conn = writeConnection(ctx, 'db exec');
@@ -1192,7 +1216,10 @@ const dbExec: OpSpec<DbExecResult> = {
       !optBool(ctx, 'dry-run', false),
     );
   },
-  shapeError: (raw) => ({ committed: false, statements_ok: parseExecOutput(raw.stdout).rows.size }),
+  shapeError: (raw) => ({
+    committed: raw.commandStderr.includes(EXEC_TXN_ENDED_MARKER) ? null : false,
+    statements_ok: parseExecOutput(raw.stdout).rows.size,
+  }),
   shape: (parsed, ctx) => {
     const { rows, done } = parsed as ReturnType<typeof parseExecOutput>;
     if (done === null) {
@@ -1422,7 +1449,7 @@ const dbBackupVerify: OpSpec<DbBackupVerifyResult> = {
       dir,
       prefix,
       dump,
-      throwaway: `sshepherd_verify_${randomBytes(8).toString('hex')}`,
+      throwaway: `sshepherd_verify_${Math.floor(Date.now() / 1_000)}_${randomBytes(8).toString('hex')}`,
       writeRole: writer.user,
       sessionSql: boundedSql(ctx, DB_BACKUP_VERIFY_TIMEOUT_SEC),
       maxTables: DB_BACKUP_VERIFY_MAX_TABLES,

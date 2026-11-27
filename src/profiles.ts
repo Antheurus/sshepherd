@@ -103,10 +103,19 @@ export function isProfile(value: string): value is Profile {
   return (PROFILES as readonly string[]).includes(value);
 }
 
+/** Ops whose `--dry-run` runs for real and then undoes it (`db exec`: the statements execute,
+ *  then ROLLBACK), so the dry run keeps the op's own profile and writes an audit row. */
+export const DRY_RUN_EXECUTES = new Set(['db exec']);
+
 /** A `--dry-run` executes and changes nothing, so it needs only `read` (the same exemption the
- *  confirm gate makes). An op missing from the table needs `admin`: a gap fails closed. */
+ *  confirm gate makes) unless the op is in `DRY_RUN_EXECUTES`. An op missing from the table needs
+ *  `admin`: a gap fails closed. */
 export function requiredProfile(op: OpSpec, ctx: OpContext): Profile {
-  if (op.mutating && optBool(ctx, 'dry-run', false)) {
+  if (
+    op.mutating &&
+    optBool(ctx, 'dry-run', false) &&
+    !DRY_RUN_EXECUTES.has(`${op.group} ${op.name}`)
+  ) {
     return 'read';
   }
   return OP_PROFILES[`${op.group} ${op.name}`] ?? 'admin';

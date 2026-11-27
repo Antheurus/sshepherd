@@ -30,7 +30,7 @@ import {
   serializeJson,
   splitNdjson,
 } from './output.ts';
-import { profileDenial } from './profiles.ts';
+import { DRY_RUN_EXECUTES, profileDenial } from './profiles.ts';
 import {
   type ConnectionIdentity,
   isEnvFile,
@@ -248,6 +248,7 @@ function auditFor(
       errorCode: envelope.error?.code,
       bytes: Buffer.byteLength(serializeJson(envelope)),
       ...(extra === undefined ? {} : { extra }),
+      ...(op.mutating && optBool(ctx, 'dry-run', false) ? { dryRun: true } : {}),
     },
     deps.auditLogPath ? { logPath: deps.auditLogPath } : undefined,
   );
@@ -354,8 +355,10 @@ export async function executeOp(
 ): Promise<Envelope<unknown>> {
   const startedAtMs = Date.now();
   const command = `${op.group} ${op.name}`;
-  const requiresConfirm = op.mutating && !optBool(ctx, 'dry-run', false);
-  const audited = requiresConfirm || (!op.mutating && op.exposes === 'content');
+  const dryRun = op.mutating && optBool(ctx, 'dry-run', false);
+  const requiresConfirm = op.mutating && !dryRun;
+  const auditedDryRun = dryRun && DRY_RUN_EXECUTES.has(command);
+  const audited = requiresConfirm || auditedDryRun || (!op.mutating && op.exposes === 'content');
   let outcome: AuditOutcome = 'error';
   let envelope: Envelope<unknown>;
   let commandStderr = '';
