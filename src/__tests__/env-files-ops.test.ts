@@ -551,10 +551,11 @@ describe('files grep / find — roots, patterns, and the shell', () => {
     }
   });
 
-  /** One file's block as the per-file grep script prints it: `path NUL lines NUL whole NUL markers
-   *  NUL`, `markers` being the whole file's PEM markers as `grep -no` prints them. */
-  const grepBlock = (path: string, lines: string[], whole = '', markers: string[] = []): string =>
-    `${path}\u0000${lines.join('\n')}\n\u0000${whole === '' ? '' : Buffer.from(whole).toString('base64')}\u0000${markers.join('\n')}\n\u0000`;
+  /** One file's block as the per-file grep script prints it: `path NUL lines NUL whole NUL
+   *  membership NUL`, `membership` being the whole file's PEM membership (`3-4 =9`: secret line
+   *  ranges, then the line count). */
+  const grepBlock = (path: string, lines: string[], whole = '', membership = '=1000'): string =>
+    `${path}\u0000${lines.join('\n')}\n\u0000${whole === '' ? '' : Buffer.from(whole).toString('base64')}\u0000${membership}\n\u0000`;
 
   test('grep lines from an env file are masked, a log line is not, and the cap says truncated', async () => {
     allow('/opt/myapp');
@@ -616,14 +617,8 @@ describe('files grep / find — roots, patterns, and the shell', () => {
       'files',
       'grep',
       { path: '/opt/x', pattern: '.' },
-      grepBlock('/opt/x/sub/backup.txt', pem, '', [
-        '2:-----BEGIN RSA PRIVATE KEY-----',
-        '4:-----END RSA PRIVATE KEY-----',
-      ]) +
-        grepBlock('/opt/x/app.env', ['4:FAKEINNERml==', '6:Z=2'], envText, [
-          '2:-----BEGIN OPENSSH PRIVATE KEY-----',
-          '5:-----END OPENSSH PRIVATE KEY-----"',
-        ]) +
+      grepBlock('/opt/x/sub/backup.txt', pem, '', '3-3 =4') +
+        grepBlock('/opt/x/app.env', ['4:FAKEINNERml==', '6:Z=2'], envText, '3-4 =6') +
         grepBlock('/opt/x/cut.env', ['9:FAKEPASTCUT=1'], 'A=1\n'),
     );
     const lines = (envelope.data as { lines: string[] }).lines;
@@ -669,7 +664,7 @@ describe('files head', () => {
   test('--n is a whole number in 1..MAX_HEAD_LINES; default 100; the remote reads with --', async () => {
     allow('/opt/app/.env');
     expect(remoteOf('files', 'head', { path: '/opt/app/.env' })).toContain(
-      "'head' '-n' '100' '--'",
+      "head -n '\\''100'\\'' -- \"$p\"",
     );
     for (const n of ['0', '-1', 'x', '1.5', String(MAX_HEAD_LINES + 1)]) {
       const { envelope, ssh } = await run('files', 'head', { path: '/opt/app/.env', n });
@@ -686,7 +681,7 @@ describe('files head', () => {
       'files',
       'head',
       { path: '/opt/app/.env', n: '2' },
-      'A=1\nPASSWORD=hunter2hunter2\n',
+      '=2\u0000A=1\nPASSWORD=hunter2hunter2\n',
     );
     expect(envelope.data).toEqual({
       lines: ['A=***MASKED***', 'PASSWORD=***MASKED***'],
@@ -716,16 +711,19 @@ describe('files head | tail | cat --lines A:B', () => {
   test('a plain file reads only lines A to B on the host; an env-shaped one from line 1, cut after masking', async () => {
     allow('/opt/app/app.log', '/opt/app/.env');
     const plainRemote = remoteOf('files', 'head', { path: '/opt/app/app.log', lines: '3:4' });
-    expect(plainRemote).toContain("sed -n '\\''3,4p;4q'\\'' -- \"$p\"");
-    expect(plainRemote).toContain('grep -InoE');
-    expect(remoteOf('files', 'tail', { path: '/opt/app/.env', lines: '3:4' })).toBe(
-      "'head' '-n' '4' '--' '/opt/app/.env'",
+    expect(plainRemote).toContain('head -n 4 -- "$p" | tail -n +3');
+    expect(plainRemote).toContain('LC_ALL=C awk -v cap=');
+    expect(remoteOf('files', 'tail', { path: '/opt/app/.env', lines: '3:4' })).toContain(
+      'e=4; case $t in',
+    );
+    expect(remoteOf('files', 'tail', { path: '/opt/app/.env', lines: '3:4' })).toContain(
+      'head -n "$e" -- "$p"',
     );
     const plain = await run(
       'files',
       'head',
       { path: '/opt/app/app.log', lines: '3:4' },
-      '\u0000three\nfour\n',
+      '=9\u0000three\nfour\n',
     );
     expect(plain.envelope.data).toEqual({ lines: ['three', 'four'], lines_returned: 2 });
     const unjudged = await run(
@@ -739,14 +737,14 @@ describe('files head | tail | cat --lines A:B', () => {
       'files',
       'tail',
       { path: '/opt/app/app.log', lines: '3:3' },
-      'MIIEowFAKEBODYbk\n\u00002:-----BEGIN RSA PRIVATE KEY-----\n4:-----END RSA PRIVATE KEY-----\n',
+      'MIIEowFAKEBODYbk\n\u00003-3 =4',
     );
     expect(inBlock.envelope.data).toEqual({ lines: ['***'], lines_returned: 1 });
     const env = await run(
       'files',
       'tail',
       { path: '/opt/app/.env', lines: '3:4' },
-      'A=1\nKEY="-----BEGIN\nFAKEBODYml==\nB=2\n',
+      'A=1\nKEY="-----BEGIN\nFAKEBODYml==\nB=2\n\u0000=4',
     );
     expect(env.envelope.data).toEqual({ lines: ['***', '***'], lines_returned: 2 });
     expect(JSON.stringify(env.envelope)).not.toContain('FAKEBODY');
@@ -758,7 +756,7 @@ describe('files head | tail | cat --lines A:B', () => {
       'files',
       'cat',
       { path: '/opt/app/.env', lines: '2:3' },
-      'A=1\nB=fake-two\nC=3\nD=4\n',
+      '=4\u0000A=1\nB=fake-two\nC=3\nD=4\n',
     );
     expect((env.envelope.data as { content: string }).content).toBe(
       'B=***MASKED***\nC=***MASKED***',
@@ -767,7 +765,7 @@ describe('files head | tail | cat --lines A:B', () => {
       'files',
       'cat',
       { path: '/opt/app/app.log', lines: '2:2' },
-      'one\ntwo\nthree\n',
+      '=3\u0000one\ntwo\nthree\n',
     );
     expect((plain.envelope.data as { content: string }).content).toBe('two');
   });

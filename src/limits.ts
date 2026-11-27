@@ -191,3 +191,9 @@ export const ENV_BLOCK_MIN_LINES = 3;
  *  bundle of a few dozen certificates and keys stays far under it, and past it every returned line
  *  of that file is masked rather than judged from a partial list. */
 export const MAX_PEM_MARKER_LINES = 256;
+
+/** Private-key line ranges the host's PEM membership pass reports for one file (`files head|tail|
+ *  grep`, `files cat --lines`): one range per key block, so a bundle of a few dozen keys stays far
+ *  under it while the answer stays under 6 KiB (`start-end ` each); past it every returned line of
+ *  that file is masked rather than judged from a partial list. */
+export const MAX_PEM_SECRET_RANGES = 256;
