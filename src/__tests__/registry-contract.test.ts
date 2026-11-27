@@ -31,6 +31,7 @@ const AUDITED_MUTATING_OPS = [
   'deploy run',
   'files upload',
   'hosts trust',
+  'http send',
   'security harden',
   'services restart',
   'services systemctl-reload',
@@ -96,6 +97,9 @@ const ARG_VALUES: Record<string, () => string> = {
   sql: () => 'SELECT 1',
   db_user: () => 'app',
   db_name: () => 'app',
+  url: () => 'http://127.0.0.1/',
+  method: () => 'POST',
+  until: () => 'port-open:22',
 };
 
 function argsFor(op: OpSpec): Record<string, string | boolean> {

@@ -8,8 +8,8 @@ description: >-
   "server gua kenapa", "servernya down", "disk penuh", "restart service", "liat log server", "deploy ke
   server", "ssh ke", "cek RAM server", "kenapa lemot servernya", "port apa aja yang kebuka". Keeps the
   agent zero-knowledge about credentials — no password, private key, or host/user/port ever reaches the
-  agent context or a tool response. Covers all 12 registry-driven command groups (hosts, check, logs,
-  services, files, env, config, db, deploy, security, tunnel, audit) via a single compiled
+  agent context or a tool response. Covers all 15 registry-driven command groups (hosts, check, logs,
+  services, files, env, config, db, deploy, security, tunnel, audit, http, wait, git) via a single compiled
   Bun/TypeScript CLI that shells out to the system ssh binary; the agent only ever passes an ssh alias, a pg-target name, or a recipe
   name. setup is a separate group that writes sshepherd own local config files; every setup action is
   agent-invocable except setup ssh-alias install, which opens a one-shot browser form only a human can
@@ -106,7 +106,7 @@ sshepherd <group> <action> [positionals...] [--flag value]
 ```
 
 ```bash
-sshepherd --help                # lists 12 registry groups + the setup group
+sshepherd --help                # lists 15 registry groups + the setup group
 sshepherd <group> --help        # lists that group's actions + args/flags
 sshepherd <group> <action> --help   # shows one action's args
 ```
@@ -154,7 +154,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 12 registry-driven groups (67 ops) + 1 `setup` group (6 sub-groups, 14 actions)
+## Quick reference — 15 registry-driven groups (73 ops) + 1 `setup` group (6 sub-groups, 14 actions)
 
 ```bash
 # hosts
@@ -256,6 +256,22 @@ sshepherd tunnel close t-a1b2c3d4 --yes
 
 # audit
 sshepherd audit tail --n 20 --op "deploy run" --alias web-01
+
+# http (curl runs ON the host; localhost URLs only; --auth value read there, never returned)
+sshepherd http get web-01 http://127.0.0.1:8080/health --auth env:API_KEY@container=myapp   # shorthand: http web-01 GET <url>
+sshepherd http get web-01 http://127.0.0.1:8080/me --auth env:API_KEY@file=/opt/myapp/.env --auth-header X-Api-Key
+sshepherd http send web-01 POST http://127.0.0.1:8080/jobs --json @job.json --yes   # PUT/PATCH/DELETE too; shorthand: http web-01 POST <url> --yes
+
+# wait (one ssh session polls every 2 s; --timeout 10-3600, default 600)
+sshepherd wait for web-01 --until healthy@container=myapp --timeout 120   # shorthand: wait web-01 --until ...
+sshepherd wait for web-01 --until 'log-contains:listening on@container=myapp' --since 2m
+sshepherd wait for web-01 --until port-open:5432
+sshepherd wait for web-01 --until url:http://127.0.0.1:8080/health:status=200
+
+# git (read-only; the path is an allowlisted repository root; remote URLs come back without credentials)
+sshepherd git head web-01 /opt/myapp
+sshepherd git log web-01 /opt/myapp --n 10
+sshepherd git diff-stat web-01 /opt/myapp
 
 # setup — agent-invocable; install's credential boundary is the one exception (see Gotchas #9)
 sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes

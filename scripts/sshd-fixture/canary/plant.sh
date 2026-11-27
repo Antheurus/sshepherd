@@ -8,7 +8,8 @@
 #                             canary), __U__/__H__/__P__ (the canary connection identity) replaced onto
 #                             both sshd fixtures; add <user> as a uid-0 login sharing root's key, open
 #                             a listener on the documentation-range peer, seed the canary_users table,
-#                             start the canary services
+#                             start the canary services, and make /opt/canary/repo a git repository
+#                             whose remote URL and commit subject carry the canary
 #   plant.sh clean            remove all of it again
 set -euo pipefail
 
@@ -41,6 +42,7 @@ SYSTEMCTL_STANDIN=/usr/bin/systemctl
 SYSTEMCTL_MARKER='Canary stand-in for systemctl'
 READY_LINE="canary app ready"
 READY_WAIT_SEC=30
+REPO=/opt/canary/repo
 
 render() {
   sed -e "s/__C__/$CANARY/g" -e "s/__D__/$DIGITS/g" -e "s/__U__/$IDENTITY_USER/g" \
@@ -91,22 +93,46 @@ plant() {
       docker exec "$container" chmod 755 "$SYSTEMCTL_STANDIN"
     fi
     add_user "$container"
+    docker exec "$container" sh -c '
+      mkdir -p "$1" && cd "$1" && git init -q && printf "canary repo\n" > README
+      git add README && git -c user.name=canary -c user.email=canary@example.invalid commit -qm "$2"
+      git remote add origin "$3"
+    ' sh "$REPO" "deploy: rotate token=${CANARY}gm" "https://deploy:${CANARY}gr@example.invalid/canary.git"
     docker exec "$container" /usr/sbin/sshd -o "ListenAddress=$PEER_LISTEN" -o "PidFile=$LISTENER_PIDFILE"
   done
   render seed.sql.tmpl | docker exec -i "$POSTGRES" psql -q -v ON_ERROR_STOP=1 -U postgres -d fixture >/dev/null
-  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" up -d --force-recreate canary canary-pg canary-dburl >/dev/null
+  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" up -d --force-recreate canary canary-pg canary-dburl canary-app canary-app-alpine >/dev/null
+  local ready=false
   for _ in $(seq 1 "$READY_WAIT_SEC"); do
     if docker logs "$CANARY_CONTAINER" 2>&1 | grep -q "$READY_LINE"; then
-      return 0
+      ready=true
+      break
     fi
     sleep 1
   done
-  echo "plant.sh: $CANARY_CONTAINER never printed '$READY_LINE'" >&2
-  exit 1
+  if [[ "$ready" != true ]]; then
+    echo "plant.sh: $CANARY_CONTAINER never printed '$READY_LINE'" >&2
+    exit 1
+  fi
+  # Each canary app answers on its sshd's own 127.0.0.1:80 (401 without the key) once nginx listens.
+  for container in "${SSHD[@]}"; do
+    local answered=false
+    for _ in $(seq 1 "$READY_WAIT_SEC"); do
+      if [[ "$(docker exec "$container" curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:80/ 2>/dev/null)" == 401 ]]; then
+        answered=true
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$answered" != true ]]; then
+      echo "plant.sh: no canary app answered on 127.0.0.1:80 inside $container" >&2
+      exit 1
+    fi
+  done
 }
 
 clean() {
-  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" rm -sf canary canary-pg canary-dburl >/dev/null
+  docker exec "${SSHD[0]}" docker compose -f "$COMPOSE_FILE" rm -sf canary canary-pg canary-dburl canary-app canary-app-alpine >/dev/null
   for container in "${SSHD[@]}"; do
     docker exec "$container" sh -c '
       if [ -f '"$LISTENER_PIDFILE"' ]; then kill "$(cat '"$LISTENER_PIDFILE"')" 2>/dev/null || true; fi

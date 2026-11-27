@@ -472,6 +472,32 @@ run_matrix() {
   assert_json "[$variant] files find through a symlink out of the root: refused, nothing read" files_find_escape \
     "d['ok'] is False and d['error']['code'] == 'VALIDATION_ERROR' and 'passwd' not in json.dumps(d['data'])"
 
+  step "[$variant] wait / git / http: one-session poll, credential-free git remotes, localhost-only http"
+  run_cli wait_for wait "$alias" --until "healthy@container=$PREFIX-app" --timeout 60
+  assert_json "[$variant] wait --until healthy@container: ok with attempts and elapsed_ms" wait_for \
+    "d['ok'] is True and d['data']['met'] is True and d['data']['attempts'] >= 1 and isinstance(d['data']['elapsed_ms'], int)"
+  run_cli_any wait_for_over wait "$alias" --until "healthy@container=$PREFIX-app" --timeout 4000
+  assert_json "[$variant] wait --timeout 4000: INVALID_ARGS (max 3600)" wait_for_over \
+    "d['ok'] is False and d['error']['code'] == 'INVALID_ARGS'"
+  run_cli git_head git head "$alias" /opt/myapp
+  assert_json "[$variant] git head /opt/myapp: subject, remote URL without its credential" git_head \
+    "d['ok'] is True and d['data']['subject'] == 'fixture: first deploy' and d['data']['remotes'] == [{'name': 'origin', 'url': 'https://example.invalid/team/myapp.git'}] and 'fake-git-token' not in json.dumps(d)"
+  run_cli git_log git log "$alias" /opt/myapp --n 5
+  assert_json "[$variant] git log /opt/myapp: the fixture commit" git_log \
+    "d['ok'] is True and [c['subject'] for c in d['data']['commits']] == ['fixture: first deploy'] and d['data']['truncated'] is False"
+  run_cli git_diff_stat git diff-stat "$alias" /opt/myapp
+  assert_json "[$variant] git diff-stat /opt/myapp: counts only, untracked env files counted" git_diff_stat \
+    "d['ok'] is True and d['data']['untracked'] >= 2 and 'fake-secret-value' not in json.dumps(d)"
+  run_cli_any http_get_remote http "$alias" GET http://203.0.113.9/
+  assert_json "[$variant] http GET on a non-localhost URL: INVALID_ARGS" http_get_remote \
+    "d['ok'] is False and d['error']['code'] == 'INVALID_ARGS' and d['command'] == 'http get'"
+  run_cli_any http_post_unconfirmed http "$alias" POST http://127.0.0.1:80/
+  assert_json "[$variant] http POST without --yes: CONFIRMATION_REQUIRED" http_post_unconfirmed \
+    "d['ok'] is False and d['error']['code'] == 'CONFIRMATION_REQUIRED' and d['command'] == 'http send'"
+  run_cli_any http_get_closed http "$alias" GET http://127.0.0.1:1/
+  assert_json "[$variant] http GET on a closed localhost port: curl ran on the host, COMMAND_FAILED names check ports" http_get_closed \
+    "d['ok'] is False and d['error']['code'] == 'COMMAND_FAILED' and 'check ports' in d['error']['next']"
+
   step "[$variant] security listeners"
   run_cli security_listeners security listeners "$alias"
   assert_json "[$variant] security listeners: sshd port 22 listed" security_listeners \

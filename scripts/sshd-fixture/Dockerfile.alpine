@@ -6,7 +6,7 @@
 
 FROM alpine:3.20
 
-RUN apk add --no-cache openssh-server coreutils iproute2 procps-ng ca-certificates postgresql16-client \
+RUN apk add --no-cache openssh-server coreutils iproute2 procps-ng ca-certificates postgresql16-client curl git \
   && ln -sf /bin/busybox /usr/bin/timeout \
   && ssh-keygen -A \
   && mkdir -p /root/.ssh \
@@ -25,13 +25,19 @@ COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 
 # Secret-shaped files for the masking checks in scripts/smoke.sh: env files and a plain script
-# that exports a secret, a log to search, and a symlink out of the allowlisted /opt/myapp. Every value is an obviously fake fixture string.
+# that exports a secret, a log to search, a symlink out of the allowlisted /opt/myapp, and /opt/myapp as a
+# git repository whose remote URL carries a credential (`git head` must return it without). Every value
+# is an obviously fake fixture string.
 RUN mkdir -p /opt/myapp \
   && printf 'DB_PASSWORD=fake-secret-value-1\nNODE_ENV=production\nexport API_KEY="fake-secret-value-1"\n' > /opt/myapp/prod.env \
   && printf '#!/bin/sh\nexport PORT=3000\nexport SESSION_SECRET=fake-secret-value-2\nexec /usr/local/bin/app\n' > /opt/myapp/start.sh \
   && printf 'APP_NAME=smoke\nDB_PASSWORD=fake-secret-value-3\nEMPTY_KEY=\nLOG_LEVEL=info\n' > /opt/myapp/.env \
   && printf '2026-11-27 INFO boot\n2026-11-27 ERROR upstream refused\n' > /opt/myapp/app.log \
-  && ln -s /etc /opt/myapp/escape
+  && ln -s /etc /opt/myapp/escape \
+  && git -C /opt/myapp init -q \
+  && git -C /opt/myapp add app.log start.sh \
+  && git -C /opt/myapp -c user.name=fixture -c user.email=fixture@example.invalid commit -qm 'fixture: first deploy' \
+  && git -C /opt/myapp remote add origin https://deploy:fake-git-token-1@example.invalid/team/myapp.git
 
 EXPOSE 22
 CMD ["/usr/sbin/sshd", "-D", "-e"]

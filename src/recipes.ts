@@ -324,6 +324,12 @@ function healthcheckScript(target: string, timeoutSec: number): string {
   );
 }
 
+/** The http-probe executor: prints the status code `urlRef` (shell text naming the URL) answers
+ *  with. `extraFlags` are inserted before the URL (`wait for --until url:` adds its limits). */
+export function httpStatusCommand(urlRef: string, extraFlags = ''): string {
+  return `curl -s -o /dev/null -w '%{http_code}'${extraFlags} ${urlRef}`;
+}
+
 function httpProbeScript(
   url: string,
   expectStatus: number,
@@ -333,7 +339,7 @@ function httpProbeScript(
   const u = shq(url);
   return (
     `i=0; while [ "$i" -lt ${retries} ]; do ` +
-    `code=$(curl -s -o /dev/null -w '%{http_code}' ${u} || echo 000); ` +
+    `code=$(${httpStatusCommand(u)} || echo 000); ` +
     `if [ "$code" = "${expectStatus}" ]; then exit 0; fi; ` +
     'i=$((i+1)); sleep ' +
     `${interval}; done; echo http-probe-failed >&2; exit 1`
