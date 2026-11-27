@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { auditMutating, confirmGate } from './audit.ts';
+import { auditSetupMutating as auditMutating, confirmGate } from './audit.ts';
 import { ADOPT_ENV_MAX_FILE_BYTES, ADOPT_ENV_MAX_HOSTS } from './limits.ts';
 import { executeOp, getOp } from './registry.ts';
 import {

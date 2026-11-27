@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { auditMutating, confirmGate } from './audit.ts';
+import { auditSetupMutating as auditMutating, confirmGate } from './audit.ts';
 import { resolveRecipePath } from './recipes.ts';
 import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';

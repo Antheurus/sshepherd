@@ -252,3 +252,16 @@ export const DOCTOR_HOSTS_PROBE_TIMEOUT_SEC = CONNECT_TIMEOUT_SEC + 5;
 /** Aliases `doctor hosts` probes in one run: 200 at `DOCTOR_HOSTS_CONCURRENCY` is at most about 6
  *  minutes against unreachable hosts; any beyond it are reported unchecked, never silently dropped. */
 export const DOCTOR_HOSTS_MAX_ALIASES = 200;
+
+/** `tunnel open`'s ssh asks the server for a reply after this many idle seconds: a frozen or
+ *  unplugged host otherwise stays a listed tunnel until its duration (up to a day) runs out. */
+export const TUNNEL_SERVER_ALIVE_INTERVAL_SEC = 10;
+/** Unanswered keepalives before the tunnel's ssh gives up and exits, so a dead host leaves
+ *  `tunnel list` within 30 s (10 s x 3); three rides out one dropped packet on a lossy link. */
+export const TUNNEL_SERVER_ALIVE_COUNT_MAX = 3;
+/** Bytes of ssh's stderr a tunnel supervisor keeps in its (unlinked) stderr file before the forward
+ *  is up; after the forward-ready line it keeps none. That file exists only for `tunnel open` to
+ *  classify a failure, and DEBUG1 otherwise adds a line per forwarded connection for up to a day.
+ *  4 KiB holds ssh's error lines and a short server banner; debug lines other than the ready line
+ *  are never kept. */
+export const TUNNEL_STDERR_MAX_BYTES = 4_096;

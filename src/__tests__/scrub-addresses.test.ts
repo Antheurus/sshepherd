@@ -7,6 +7,7 @@ import { executeOp, getOp } from '../registry.ts';
 import { type ConnectionIdentity, type ScrubOptions, scrub, scrubText } from '../scrub.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
 import type { Envelope } from '../types.ts';
+import { expectLinear, LINEARITY_TEST_TIMEOUT_MS } from './linearity.ts';
 
 const ALIAS = 'edge-box';
 const IDENTITY: ConnectionIdentity = {
@@ -342,34 +343,39 @@ describe('executeOp — the ssh -G identity never reaches the envelope', () => {
 });
 
 describe('linear on adversarial input', () => {
-  const KB400 = 400 * 1_024;
-  const cases: [string, string][] = [
-    ['dotted digit run 1.1.1...', '1.'.repeat(KB400 / 2)],
-    ['valid IPv4 run 203.0.113.7.203...', '203.0.113.7.'.repeat(KB400 / 12)],
-    ['colons ::::...', ':'.repeat(KB400)],
-    ['hex groups a:b:c:...', 'a:b:c:'.repeat(KB400 / 6)],
-    ['digit groups 0:1:2:...', '0:1:2:3:'.repeat(KB400 / 8)],
-    ['compressed fe80::fe80::...', 'fe80::'.repeat(KB400 / 6)],
-    ['hostname fragments', 'srv-01.example.'.repeat(KB400 / 15)],
-    ['hostname repeated whole', 'srv-01.example.net '.repeat(KB400 / 19)],
-    ['user contexts', 'for opsuser@ -l opsuser user= '.repeat(KB400 / 30)],
-    ['keyword then blanks', `for${' '.repeat(KB400)}x`],
-    ['port contexts', 'x:2222 -p 2222 port '.repeat(KB400 / 20)],
+  const KB50 = 50 * 1_024;
+  const repeat = (unit: string) => (chars: number) => unit.repeat(Math.floor(chars / unit.length));
+  const cases: [string, (chars: number) => string][] = [
+    ['dotted digit run 1.1.1...', repeat('1.')],
+    ['valid IPv4 run 203.0.113.7.203...', repeat('203.0.113.7.')],
+    ['colons ::::...', repeat(':')],
+    ['hex groups a:b:c:...', repeat('a:b:c:')],
+    ['digit groups 0:1:2:...', repeat('0:1:2:3:')],
+    ['compressed fe80::fe80::...', repeat('fe80::')],
+    ['hostname fragments', repeat('srv-01.example.')],
+    ['hostname repeated whole', repeat('srv-01.example.net ')],
+    ['user contexts', repeat('for opsuser@ -l opsuser user= ')],
+    ['keyword then blanks', (chars) => `for${' '.repeat(chars)}x`],
+    ['port contexts', repeat('x:2222 -p 2222 port ')],
   ];
-  for (const [name, input] of cases) {
-    test(`${name} (${Math.round(input.length / 1_024)} KB) < 500 ms`, () => {
-      const started = performance.now();
-      scrub(input, ON);
-      const elapsed = performance.now() - started;
-      expect(elapsed).toBeLessThan(500);
-    });
+  for (const [name, make] of cases) {
+    test(
+      `${name}: time grows linearly from 50 KB to 200 KB`,
+      () => {
+        expectLinear(make, KB50, (input) => scrub(input, ON));
+      },
+      LINEARITY_TEST_TIMEOUT_MS,
+    );
   }
 
-  test('F10: a 204 KB hyphenated line with identity and addresses on < 500 ms', () => {
-    const line = Array.from({ length: 21_000 }, (_, i) => `node-${i}`).join('-');
-    expect(line.length).toBeGreaterThan(204_000);
-    const started = performance.now();
-    scrub(line, ON);
-    expect(performance.now() - started).toBeLessThan(500);
-  });
+  test(
+    'F10: a hyphenated line with identity and addresses on grows linearly to 204 KB',
+    () => {
+      const hyphenated = (chars: number) =>
+        Array.from({ length: Math.ceil(chars / 9.7) }, (_, i) => `node-${i}`).join('-');
+      expect(hyphenated(51_000 * 4).length).toBeGreaterThan(204_000);
+      expectLinear(hyphenated, 51_000, (input) => scrub(input, ON));
+    },
+    LINEARITY_TEST_TIMEOUT_MS,
+  );
 });

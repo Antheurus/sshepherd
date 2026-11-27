@@ -161,6 +161,27 @@ export function auditMutating(
   );
 }
 
+const setupAuditFailures: AuditWriteError[] = [];
+
+/** `auditMutating` for a `setup` action, which reports through `buildSetupResult` rather than an
+ *  envelope: an unwritable log is held for that result's `AUDIT_UNWRITABLE` warning instead of
+ *  failing an action that already ran (the user chose run-and-warn over fail-closed). */
+export function auditSetupMutating(input: AuditEntryInput): void {
+  try {
+    auditMutating(input);
+  } catch (err) {
+    if (!(err instanceof AuditWriteError)) {
+      throw err;
+    }
+    setupAuditFailures.push(err);
+  }
+}
+
+/** The audit failures `auditSetupMutating` held since the last call, emptied as they are taken. */
+export function takeSetupAuditFailures(): AuditWriteError[] {
+  return setupAuditFailures.splice(0);
+}
+
 /** Pure gate: a mutating op needs `--yes` before it runs; the CLI wires the actual prompt. */
 export function confirmGate(input: { mutating: boolean; yes: boolean }): boolean {
   return !input.mutating || input.yes;

@@ -6,6 +6,7 @@ import { executeOp, getOp } from '../registry.ts';
 import { scrub, scrubText } from '../scrub.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
 import type { Envelope } from '../types.ts';
+import { expectLinear, LINEARITY_TEST_TIMEOUT_MS } from './linearity.ts';
 
 const ALIAS = 'leak-host';
 const PW = 'plantedFakePw77';
@@ -243,12 +244,16 @@ describe('audit05b — leak checks (each red test is a receipt finding)', () => 
     expect(scrubText('monkey: george').value).toBe('monkey: george');
   });
 
-  test('R6 PEM rules are quadratic in BEGIN-line count (F10 class, pre-existing): 188 KB under 500 ms', () => {
-    const text = `${'-----BEGIN RSA PRIVATE KEY-----\n'.repeat(6000)}-----END EC PRIVATE KEY-----\n`;
-    const started = performance.now();
-    scrubText(text);
-    expect(performance.now() - started).toBeLessThan(500);
-  });
+  test(
+    'R6 PEM rules are quadratic in BEGIN-line count (F10 class, pre-existing): linear from 1,500 to 6,000 BEGIN lines (188 KB)',
+    () => {
+      const begin = '-----BEGIN RSA PRIVATE KEY-----\n';
+      const pem = (chars: number) =>
+        `${begin.repeat(Math.round(chars / begin.length))}-----END EC PRIVATE KEY-----\n`;
+      expectLinear(pem, 1_500 * begin.length, (input) => scrubText(input));
+    },
+    LINEARITY_TEST_TIMEOUT_MS,
+  );
 
   test('R7 PHP / WordPress config forms leak (pre-existing, not from the fix)', () => {
     for (const text of [

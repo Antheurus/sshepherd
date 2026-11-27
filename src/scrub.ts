@@ -63,13 +63,15 @@ const BOOLEAN_WORDS = new Set([
   'none',
 ]);
 
+function bareWord(value: string): string {
+  return value
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .toLowerCase();
+}
+
 function isBooleanWord(value: string): boolean {
-  return BOOLEAN_WORDS.has(
-    value
-      .trim()
-      .replace(/^["']|["']$/g, '')
-      .toLowerCase(),
-  );
+  return BOOLEAN_WORDS.has(bareWord(value));
 }
 
 /** A name whose last segment ends in a joined `pass` or `passkey` (`bypass`, `compass`, `firstPass`,
@@ -80,15 +82,71 @@ function isJoinedPassKey(name: string): boolean {
   return last.endsWith('PASS') || last.endsWith('PASSKEY');
 }
 
-/** `isSecretKey`, plus a joined-`pass` name whose value is not a boolean word. */
+/** Values an `auth` setting holds when it names a mechanism or a switch, not a credential:
+ *  `SMTP_AUTH=login`, pg_hba `auth=md5`, `redis.auth=on`. */
+const AUTH_MECHANISM_WORDS = new Set([
+  'login',
+  'plain',
+  'md5',
+  'cram-md5',
+  'digest-md5',
+  'scram-sha-1',
+  'scram-sha-256',
+  'password',
+  'trust',
+  'peer',
+  'ident',
+  'reject',
+  'cert',
+  'ldap',
+  'radius',
+  'pam',
+  'gss',
+  'sspi',
+  'basic',
+  'bearer',
+  'digest',
+  'ntlm',
+  'negotiate',
+  'kerberos',
+  'gssapi',
+  'sasl',
+  'oauth',
+  'oauth2',
+  'xoauth2',
+  'tls',
+  'ssl',
+  'starttls',
+  'required',
+  'optional',
+  'anonymous',
+]);
+
+function isAuthMechanismWord(value: string): boolean {
+  return isBooleanWord(value) || AUTH_MECHANISM_WORDS.has(bareWord(value));
+}
+
+/** A name whose last segment is AUTH (docker's `"auth": "<base64 user:password>"`): a credential
+ *  unless its value is a mechanism or boolean word. */
+function isAuthKey(name: string): boolean {
+  return (name.toUpperCase().split(/[_.-]/).pop() ?? '') === 'AUTH';
+}
+
+/** `isSecretKey`, plus a joined-`pass` name whose value is not a boolean word, plus an AUTH name
+ *  whose value is not a mechanism word. */
 function isSecretPair(name: string, value: string): boolean {
-  return isSecretKey(name) || (isJoinedPassKey(name) && !isBooleanWord(value));
+  return (
+    isSecretKey(name) ||
+    (isJoinedPassKey(name) && !isBooleanWord(value)) ||
+    (isAuthKey(name) && !isAuthMechanismWord(value))
+  );
 }
 
 /** A key name whose value is a secret whatever it holds: the reveal denylist, a name containing a
  *  secret word, a name ending in DSN or having a `_`/`.`/`-` segment equal to PASS/DSN, a
  *  `_PWD`/`_PW` name, a camelCase `...Key`/`...Salt`, a last segment ending in a joined
- *  `<prefix>key` or equal to SALT or AUTH (docker's `"auth": "<base64 user:password>"`), or a KEY segment in a name of two or more segments. A bare
+ *  `<prefix>key` or equal to SALT, or a KEY segment in a name of two or more segments (an AUTH name is
+ *  `isAuthKey`'s, judged by its value). A bare
  *  `key`, `url`, `APP_URL` or `monkey` is not: a URL's credentials are masked by its shape, not its
  *  name. `PORT`, `NODE_ENV` and `DB_HOST` are not — a host is not a secret by default. */
 export function isSecretKey(name: string): boolean {
@@ -110,7 +168,6 @@ export function isSecretKey(name: string): boolean {
   return (
     JOINED_SECRET_KEY.test(last) ||
     last === 'SALT' ||
-    last === 'AUTH' ||
     segments.some((segment) => SECRET_NAME_SEGMENTS.has(segment)) ||
     (segments.length > 1 && segments.includes('KEY'))
   );
@@ -200,12 +257,84 @@ interface ShapeRule {
   replace: (match: string, ...groups: string[]) => string;
 }
 
-/** `operator does not exist: integer = text` (or `- text` for a prefix operator): psql names the
- *  operand types, which are catalog names. A computed value echoed through `::regoper` comes back as
- *  one token with no blank, since a name with one is refused as `invalid name syntax` first. */
-const PSQL_TYPE_NAME = String.raw`[A-Za-z_"][\w."]{0,${MAX_PSQL_TYPE_NAME_CHARS}}(?: [A-Za-z_][\w"]{0,${MAX_PSQL_TYPE_NAME_CHARS}}){0,3}(?:\[\])*`;
+/** The built-in type names `format_type` prints in `operator does not exist: integer = text`. */
+const PSQL_BUILTIN_TYPES = [
+  'smallint',
+  'integer',
+  'bigint',
+  'real',
+  'double precision',
+  'numeric',
+  'money',
+  'text',
+  'character varying',
+  'character',
+  '"char"',
+  'name',
+  'bytea',
+  'boolean',
+  'date',
+  'time without time zone',
+  'time with time zone',
+  'timestamp without time zone',
+  'timestamp with time zone',
+  'interval',
+  'uuid',
+  'json',
+  'jsonb',
+  'jsonpath',
+  'xml',
+  'inet',
+  'cidr',
+  'macaddr',
+  'macaddr8',
+  'bit',
+  'bit varying',
+  'point',
+  'line',
+  'lseg',
+  'box',
+  'path',
+  'polygon',
+  'circle',
+  'tsvector',
+  'tsquery',
+  'oid',
+  'xid',
+  'xid8',
+  'cid',
+  'tid',
+  'pg_lsn',
+  'regclass',
+  'regtype',
+  'regproc',
+  'regprocedure',
+  'regoper',
+  'regoperator',
+  'regnamespace',
+  'regrole',
+  'regconfig',
+  'int4range',
+  'int8range',
+  'numrange',
+  'tsrange',
+  'tstzrange',
+  'daterange',
+  'record',
+  'unknown',
+  'void',
+  'anyelement',
+  'anyarray',
+  'anynonarray',
+  'anyenum',
+  'anyrange',
+];
+/** `operator does not exist: integer = text` (or `- text` for a prefix operator) is kept only when
+ *  both operands are built-in type names and the operator is operator characters: a `::regoper`
+ *  value is echoed as written, and a double-quoted one (`"integer = x<hex>"`) can carry any data. */
+const PSQL_TYPE_NAME = String.raw`(?:${PSQL_BUILTIN_TYPES.join('|')})(?:\[\])*`;
 const OPERATOR_SIGNATURE = new RegExp(
-  String.raw`^(?:${PSQL_TYPE_NAME} )?(?:[A-Za-z_]\w*\.)?[-+*/<>=~!@#%^&|\`?]{1,63} ${PSQL_TYPE_NAME}$`,
+  String.raw`^(?:${PSQL_TYPE_NAME} )?(?:pg_catalog\.)?[-+*/<>=~!@#%^&|\`?]{1,63} ${PSQL_TYPE_NAME}$`,
 );
 
 /** A psql rule: `keep` says a quoted value stays (already masked, or the caller's own SQL text). */
@@ -400,8 +529,8 @@ const PSQL_DATA_ECHO_RULES: PsqlEchoRule[] = [
  *  pg_authid` comes back under `h`): Postgres SCRAM-SHA-256 and `md5` + 32 hex as a whole value,
  *  bcrypt `$2a$`/`$2b$`/`$2y$`, argon2, and crypt(3) `$1$`/`$5$`/`$6$` and yescrypt `$y$` (the
  *  `/etc/shadow` default on Debian 11+ and Ubuntu 22.04+, added beside the listed crypt forms).
- *  A `.` ends the token unless a token character follows it, so a verifier closing a sentence
- *  is still whole. */
+ *  A `.` ends the token unless a letter or digit follows it, so a verifier closing a sentence or
+ *  before an ellipsis, `.=` or `./` is still whole. */
 const PASSWORD_VERIFIER = new RegExp(
   [
     String.raw`SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+`,
@@ -411,7 +540,7 @@ const PASSWORD_VERIFIER = new RegExp(
     String.raw`\$[156]\$(?:rounds=\d+\$)?[./A-Za-z0-9]{0,16}\$[./A-Za-z0-9]{22,86}`,
     String.raw`\$y\$[./A-Za-z0-9]+\$[./A-Za-z0-9]{1,86}\$[./A-Za-z0-9]{43}`,
   ]
-    .map((shape) => String.raw`(?<![\w$])${shape}(?![\w$/+=]|\.[\w$./+=])`)
+    .map((shape) => String.raw`(?<![\w$])${shape}(?![\w$/+=]|\.\w)`)
     .join('|'),
   'g',
 );
@@ -491,6 +620,10 @@ const SHAPE_RULES: ShapeRule[] = [
   },
   {
     pattern: /\b(Set-Cookie[ \t]*:[ \t]*[^=;\s]+=)([^;\r\n]+)/gi,
+    replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
+  },
+  {
+    pattern: /\b(Set-Cookie[ \t]+["']?[^=;\s"':]+=)([^;\s"']+)/gi,
     replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
   },
   {
@@ -1006,13 +1139,29 @@ function protectRevealedLines(text: string, revealKeys: ReadonlySet<string>): [s
  *  `CMD=--password=v`, `x=api_key=v`) is still found. Each level of nesting rescans its own value,
  *  so the depth is capped at `MAX_NESTED_ASSIGNMENT_DEPTH`: an `a=b=c=...` chain stays linear. */
 function maskKeyedInline(text: string, revealKeys: ReadonlySet<string>): ScrubResult<string> {
-  const pattern = new RegExp(KEYED_INLINE.source, 'g');
-  const openValueEnds: number[] = [];
+  const spans = keyedInlineSecretSpans(text, revealKeys);
   let out = '';
   let pos = 0;
-  let count = 0;
+  for (const span of spans) {
+    out += `${text.slice(pos, span.start)}${maskedValue(span.value, MASK)}`;
+    pos = span.end;
+  }
+  return { value: `${out}${text.slice(pos)}`, count: spans.length };
+}
+
+interface ValueSpan {
+  start: number;
+  end: number;
+  value: string;
+}
+
+/** Where `maskKeyedInline` masks: the offsets of each secret pair's value in `text`. */
+function keyedInlineSecretSpans(text: string, revealKeys: ReadonlySet<string>): ValueSpan[] {
+  const pattern = new RegExp(KEYED_INLINE.source, 'g');
+  const openValueEnds: number[] = [];
+  const spans: ValueSpan[] = [];
   for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
-    const [whole, q = '', key = '', sep = '', value = ''] = match;
+    const [whole, , key = '', , value = ''] = match;
     const end = match.index + whole.length;
     while (openValueEnds.length > 0 && match.index >= (openValueEnds.at(-1) ?? 0)) {
       openValueEnds.pop();
@@ -1024,11 +1173,49 @@ function maskKeyedInline(text: string, revealKeys: ReadonlySet<string>): ScrubRe
       }
       continue;
     }
-    out += `${text.slice(pos, match.index)}${q}${key}${q}${sep}${maskedValue(value, MASK)}`;
-    pos = end;
-    count += 1;
+    spans.push({ start: end - value.length, end, value });
   }
-  return { value: `${out}${text.slice(pos)}`, count };
+  return spans;
+}
+
+const PERCENT_ESCAPE = /%([0-9A-Fa-f]{2})/g;
+
+/** `KEYED_INLINE` over the text with its `%XX` escapes decoded one level, so a pair inside a
+ *  percent-encoded URL (`redirect=https%3A%2F%2Fb.example.net%2F%3Ftoken%3D<v>`) is found too; each
+ *  value it finds is masked at its encoded offsets and the rest of the text is left as written. */
+function maskEncodedKeyedInline(
+  text: string,
+  revealKeys: ReadonlySet<string>,
+): ScrubResult<string> {
+  if (!/%3[Dd]/.test(text)) {
+    return { value: text, count: 0 };
+  }
+  let decoded = '';
+  const offsets: number[] = [];
+  let pos = 0;
+  const keep = (until: number): void => {
+    decoded += text.slice(pos, until);
+    for (let at = pos; at < until; at += 1) {
+      offsets.push(at);
+    }
+  };
+  for (const match of text.matchAll(PERCENT_ESCAPE)) {
+    keep(match.index);
+    decoded += String.fromCharCode(Number.parseInt(match[1] ?? '', 16));
+    offsets.push(match.index);
+    pos = match.index + match[0].length;
+  }
+  keep(text.length);
+  offsets.push(text.length);
+  const spans = keyedInlineSecretSpans(decoded, revealKeys);
+  let out = '';
+  let from = 0;
+  for (const span of spans) {
+    const start = offsets[span.start] ?? text.length;
+    out += `${text.slice(from, start)}${MASK}`;
+    from = offsets[span.end] ?? text.length;
+  }
+  return { value: `${out}${text.slice(from)}`, count: spans.length };
 }
 
 /** A base64 or base64url run (wrapped lines included, as `base64` prints them) long enough to hold
@@ -1179,6 +1366,9 @@ function scrubTextWith(
   const inline = maskKeyedInline(out, revealKeys);
   out = inline.value;
   count += inline.count;
+  const encoded = maskEncodedKeyedInline(out, revealKeys);
+  out = encoded.value;
+  count += encoded.count;
   for (const pattern of [KEYED_SUBSCRIPT, KEYED_CALL_ARG]) {
     out = out.replace(
       pattern,
@@ -1238,7 +1428,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Walks any shaped payload: every string goes through `scrubText`, and every string or number
  * under a secret key name (`{"password": 123}`, `{"tokens": ["x"]}`, `{"password_hash": {...}}`
  * from a `db query` row) is masked whole, at any depth; under a joined-`pass` name (`bypass`) only
- * a non-boolean value is. A string that is exactly the alias port under a port-holding key becomes
+ * a non-boolean value is, and under an AUTH name only a non-mechanism one. A string that is exactly the alias port under a port-holding key becomes
  * `<port>`. Object keys get only the rules no fixed field name can match (a `docker inspect` map
  * keyed by IP or by `2222/tcp`). One `<ip-N>` table spans the whole value, so the same
  * address carries the same token in `data` and `error`. Returns a copy; the input is never mutated.
@@ -1256,6 +1446,9 @@ export function scrub<T>(value: T, options: ScrubOptions = {}): ScrubResult<T> {
     const flag =
       typeof child === 'boolean' ||
       ((typeof child === 'string' || typeof child === 'number') && isBooleanWord(String(child)));
+    if (isAuthKey(key)) {
+      return !flag && !(typeof child === 'string' && isAuthMechanismWord(child));
+    }
     return isJoinedPassKey(key) && !flag;
   };
   const addresses = createAddressMasker(options);

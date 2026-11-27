@@ -102,7 +102,10 @@ const SETUP_FIELDS: Record<keyof SetupResult<unknown>, JsonSchema> = {
   ran_at: { type: 'string', format: 'date-time' },
   data: {},
   error: { anyOf: [{ type: 'null' }, { type: 'object', properties: SETUP_ERROR_FIELDS }] },
+  warnings: ENVELOPE_FIELDS.warnings,
 };
+
+const REQUIRED_SETUP_FIELDS = ['schema_version', 'ok', 'command', 'ran_at', 'data', 'error'];
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -228,7 +231,7 @@ export function buildSetupSchema(): JsonSchema {
     description:
       'What every `setup` action prints, instead of the op envelope. Additions are non-breaking within schema_version 1.',
     type: 'object',
-    required: Object.keys(SETUP_FIELDS),
+    required: REQUIRED_SETUP_FIELDS,
     properties: { ...SETUP_FIELDS },
     additionalProperties: true,
   };
