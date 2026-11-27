@@ -85,6 +85,12 @@ export const OP_PROFILES: Record<string, Profile> = {
   'tunnel list': 'read',
   'tunnel close': 'deploy',
   'audit tail': 'read',
+  'http get': 'read',
+  'http send': 'deploy',
+  'wait for': 'read',
+  'git head': 'read',
+  'git log': 'read',
+  'git diff-stat': 'read',
 };
 
 export function isProfile(value: string): value is Profile {

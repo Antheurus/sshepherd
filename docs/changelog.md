@@ -1,5 +1,14 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.11 — Probe local services, wait for a condition, read git state
+
+- New `sshepherd http get <alias> <url>` (or `http <alias> GET <url>`) calls a service on the server itself, from the server: only `127.0.0.1`, `::1` and `localhost` URLs are allowed. It returns the status, the time taken, the response header names (never their values) and the body, capped at 64 KiB with secrets masked.
+- `--auth env:KEY@container=NAME` or `--auth env:KEY@file=PATH` sends a key the server already holds, as `Authorization: Bearer ...` or under `--auth-header NAME`. The key is read on the server and never shown, logged or sent back. The container has to be listed in `targets.toml`, and the file has to be on the files allowlist.
+- `sshepherd http send <alias> POST|PUT|PATCH|DELETE <url> [--json @body.json] --yes` sends a change the same way. Without `--yes` it returns `CONFIRMATION_REQUIRED`.
+- New `sshepherd wait for <alias> --until <condition>` (or `wait <alias> --until ...`) waits for a container to become healthy, a log line, a listening port or a localhost URL status, checking every 2 seconds over one connection. It returns `attempts` and `elapsed_ms`. `--timeout` is 10 to 3600 seconds (default 600).
+- New `sshepherd git head|log|diff-stat <alias> <repo>` reads a repository on the server without changing it: branch, commit, dirty state, ahead/behind, recent commits, and changed-file counts. The repository root has to be on the files allowlist. Remote URLs come back with any embedded password or token removed.
+- Internal: the test servers now include a local web app, a container with a healthcheck and git repositories, and the leak test covers all three new commands.
+
 ## v0.4.0-rc.7 — Permission profiles, strict host keys and a leak gate
 
 - `SSHEPHERD_PROFILE=read|deploy|admin` limits what a session may run. `read` allows every read-only command and any `--dry-run`, `deploy` adds service, config, file, deploy and tunnel changes, `admin` adds `security harden` and `hosts trust`. Anything above the profile returns `PROFILE_DENIED` (exit 2) before connecting. Unset means `admin`, as before. Any other value is refused.

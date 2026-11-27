@@ -63,6 +63,9 @@ function fixtureNames(): { prefix: string; state: string } {
 const { prefix: PREFIX, state: STATE } = fixtureNames();
 const SMOKE_SSH_CONFIG = join(STATE, 'ssh_config');
 const CANARY_CONTAINER = `${PREFIX}-canary`;
+/** Holds API_KEY (the `http --auth` credential); the app answering on each sshd's 127.0.0.1:80. */
+const CANARY_APP = `${PREFIX}-canary-app`;
+const CANARY_REPO = '/opt/canary/repo';
 
 /** Placement tags, one per planted value (scripts/sshd-fixture/canary/*). */
 const PLACEMENTS: Record<string, string> = {
@@ -86,6 +89,8 @@ const PLACEMENTS: Record<string, string> = {
   db: 'db column password',
   dt: 'db column api_token',
   nj: 'compose env JAVA_OPTS nested -Dspring.datasource.password= (and its log line)',
+  hb: 'http get/send response body api_token',
+  gm: 'git commit subject token= (/opt/canary/repo)',
 };
 
 /** psql error texts that quote the value that failed (scrub.ts `PSQL_DATA_ECHO_RULES`), each one a
@@ -224,6 +229,31 @@ function explicitDrives(alias: string): Record<string, Record<string, string | b
     'files head': ranged,
     'files tail': ranged,
     'files cat': ranged,
+    'http get': [
+      { url: 'http://127.0.0.1:80/', auth: `env:API_KEY@container=${CANARY_APP}` },
+      { url: 'http://127.0.0.1:80/' },
+    ],
+    'http send': [
+      {
+        method: 'POST',
+        url: 'http://127.0.0.1:80/',
+        auth: `env:API_KEY@container=${CANARY_APP}`,
+        json: '{"probe":true}',
+      },
+    ],
+    'wait for': [
+      { until: `healthy@container=${PREFIX}-app`, timeout: '30' },
+      {
+        until: `log-contains:canary app ready@container=${CANARY_CONTAINER}`,
+        since: '1h',
+        timeout: '30',
+      },
+      { until: 'port-open:22', timeout: '30' },
+      { until: 'url:http://127.0.0.1:80/:status=401', timeout: '30' },
+    ],
+    'git head': [{ path: CANARY_REPO }],
+    'git log': [{ path: CANARY_REPO }],
+    'git diff-stat': [{ path: CANARY_REPO }],
     'db migrations': [
       ...(argValues(alias).target ?? []).map((target) => ({ target })),
       { target: alias, table: 'schema_migrations' },
@@ -381,14 +411,14 @@ function writeFixtureConfig(): void {
   const aliases = VARIANTS.map((variant) => `smoke-${variant}`);
   const targets = aliases
     .flatMap((alias) => [
-      `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\ncontainers = ["${CANARY_CONTAINER}"]\n`,
+      `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\ncontainers = ["${CANARY_CONTAINER}", "${CANARY_APP}"]\n`,
       `[${pgConnectTarget(alias)}]\nalias = "${alias}"\ncontainer = "${PREFIX}-canary-pg"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
       `[${envUrlTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\n`,
       `[${envViaTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\nenv_key = "DATABASE_URL"\npsql_container = "${PREFIX}-postgres"\n`,
     ])
     .join('\n');
   writeFileSync(join(scratch, 'targets.toml'), targets);
-  const paths = ['/opt/canary', ...CANARY_FILES].map((path) => `"${path}"`).join(', ');
+  const paths = ['/opt/canary', CANARY_REPO, ...CANARY_FILES].map((path) => `"${path}"`).join(', ');
   const allowlist = aliases.map((alias) => `[${alias}]\npaths = [${paths}]\n`).join('\n');
   writeFileSync(join(scratch, 'files-allowlist.toml'), allowlist);
   writeFileSync(join(scratch, 'config-allowlist.toml'), allowlist);
@@ -787,6 +817,64 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
         .map(([tag, where]) => `${tag} (${where})`);
       expect(unreached).toEqual([]);
     }, 300_000);
+  }
+
+  for (const variant of VARIANTS) {
+    test(`${variant}: http --auth: the canary key is in no remote process argv while the request runs, nor in what comes back`, async () => {
+      const alias = `smoke-${variant}`;
+      const op = listOps().find((entry) => entry.group === 'http' && entry.name === 'get');
+      if (op === undefined) {
+        throw new Error('no op http get');
+      }
+      const sampler = Bun.spawn(
+        [
+          'docker',
+          'exec',
+          `${PREFIX}-sshd-${variant}`,
+          'sh',
+          '-c',
+          'end=$(($(date +%s) + 12)); while [ "$(date +%s)" -lt "$end" ]; do ps -eo args; echo __SAMPLE__; done',
+        ],
+        { stdout: 'pipe', stderr: 'pipe' },
+      );
+      await Bun.sleep(500);
+      const auditLogPath = join(scratch, `audit-ps-${alias}.jsonl`);
+      const envelope = await executeOp(
+        op,
+        {
+          alias,
+          args: { url: 'http://127.0.0.1:80/slow', auth: `env:API_KEY@container=${CANARY_APP}` },
+        },
+        {
+          transport: { runner: recordingRunner, sshConfigPath: sshConfig },
+          sshConfigPath: sshConfig,
+          auditLogPath,
+        },
+      );
+      const samples = await new Response(sampler.stdout).text();
+      await sampler.exited;
+      const data = envelope.data as { status: number; body_bytes: number } | null;
+      const curlSamples = samples.split('\n').filter((line) => line.startsWith('curl '));
+      expect({
+        status: data?.status,
+        bytes: data?.body_bytes,
+        sampled: samples.split('__SAMPLE__').length > 10,
+        curlSeen: curlSamples.length > 0,
+        inArgv: samples.includes(canary),
+        inEnvelope: JSON.stringify(envelope).includes(canary),
+        inStderrTail: (envelope.error?.stderr_tail ?? '').includes(canary),
+        inAudit: readFileSync(auditLogPath, 'utf8').includes(canary),
+      }).toEqual({
+        status: 200,
+        bytes: 4096,
+        sampled: true,
+        curlSeen: true,
+        inArgv: false,
+        inEnvelope: false,
+        inStderrTail: false,
+        inAudit: false,
+      });
+    }, 60_000);
   }
 
   for (const variant of VARIANTS) {

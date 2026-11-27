@@ -8,7 +8,42 @@
 # `canary-dburl` is the `kind = "container-env"` pg-target: a psql-capable container whose
 # DATABASE_URL reaches the fixture postgres as the read-only role and carries the canary as its
 # password (trust auth ignores it), so a URL that leaked anywhere would show the canary.
+# `canary-app`/`canary-app-alpine` share each sshd's network namespace, so http://127.0.0.1:80/ on that
+# host reaches them: 200 only with `Authorization: Bearer` + API_KEY (the `--auth` value, read from the
+# container env and never returned), a Set-Cookie whose value must stay on the host, a JSON body with a
+# secret-shaped field, and /slow (4 KiB at 1 KiB/s) so a `ps` sampler sees the request running.
 name: __N__
+
+configs:
+  canary-app-conf:
+    content: |
+      server {
+        listen 127.0.0.1:80;
+        default_type application/json;
+        sendfile off;
+        location = / {
+          if ($$http_authorization != "Bearer __C__ak") { return 401 '{"error":"unauthorized"}'; }
+          add_header Set-Cookie "session_token=__C__sc" always;
+          return 200 '{"status":"ok","api_token":"__C__hb"}';
+        }
+        location = /slow {
+          if ($$http_authorization != "Bearer __C__ak") { return 401 '{"error":"unauthorized"}'; }
+          limit_rate 1024;
+          root /srv;
+          try_files /slow.txt =404;
+        }
+      }
+
+x-canary-app: &canary-app
+  image: nginx:alpine
+  environment:
+    API_KEY: __C__ak
+  configs:
+    - source: canary-app-conf
+      target: /etc/nginx/conf.d/default.conf
+  entrypoint: ['sh', '-c']
+  command:
+    - "mkdir -p /srv && head -c 4096 /dev/zero | tr '\\0' x > /srv/slow.txt && exec nginx -g 'daemon off;'"
 
 services:
   canary:
@@ -50,3 +85,13 @@ services:
     environment:
       DATABASE_URL: postgresql://sshepherd_ro:__C__du@postgres:5432/fixture?sslmode=disable&application_name=sshepherd-canary
     entrypoint: ['sleep', '3600']
+
+  canary-app:
+    <<: *canary-app
+    container_name: __X__-canary-app
+    network_mode: container:__X__-sshd-debian
+
+  canary-app-alpine:
+    <<: *canary-app
+    container_name: __X__-canary-app-alpine
+    network_mode: container:__X__-sshd-alpine

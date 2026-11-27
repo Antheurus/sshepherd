@@ -191,3 +191,47 @@ export const ENV_BLOCK_MIN_LINES = 3;
  *  bundle of a few dozen certificates and keys stays far under it, and past it every returned line
  *  of that file is masked rather than judged from a partial list. */
 export const MAX_PEM_MARKER_LINES = 256;
+
+/** `http get|send`: curl's `--max-time` for one request to a localhost service. A local service
+ *  that has not finished answering in 30 s is hung, not slow. */
+export const HTTP_REQUEST_TIMEOUT_SEC = 30;
+/** `http get|send`: curl's `--connect-timeout`. A localhost port answers its SYN in microseconds,
+ *  so 5 s only ever expires on a host too loaded to schedule the listener. */
+export const HTTP_CONNECT_TIMEOUT_SEC = 5;
+/** `http get|send`'s ssh budget: the request limit plus 10 s for the session, the credential
+ *  lookup and the reply. */
+export const HTTP_OP_TIMEOUT_SEC = HTTP_REQUEST_TIMEOUT_SEC + 10;
+/** Response body bytes `http get|send` returns (the rest is only counted): 64 KiB is a full JSON
+ *  page or health payload and leaves the envelope room under `CEILING_MAX_BYTES`. */
+export const HTTP_BODY_MAX_BYTES = 65_536;
+/** `http send --json` body: it travels base64 inside the remote command line (64 KiB is 87 KiB of
+ *  base64), under Linux's 128 KiB limit on one argument. */
+export const HTTP_REQUEST_BODY_MAX_BYTES = 65_536;
+/** `wait for --timeout` when absent: ten minutes covers an image build plus a slow healthcheck. */
+export const WAIT_DEFAULT_TIMEOUT_SEC = 600;
+/** `wait for --timeout` ceiling: the same hour every other op's budget stops at. */
+export const WAIT_MAX_TIMEOUT_SEC = MAX_TIMEOUT_SEC;
+/** `wait for --timeout` floor: the poll stops `WAIT_REPLY_GRACE_SEC` before the budget, so a
+ *  budget under 10 s would leave almost no polling time. */
+export const WAIT_MIN_TIMEOUT_SEC = 10;
+/** The `wait for` poll gives up this long before its ssh budget, so its own "not met" answer (with
+ *  attempts and elapsed) gets back instead of the session being cut. */
+export const WAIT_REPLY_GRACE_SEC = 5;
+/** Seconds between two `wait for` checks: a healthcheck or a log line is seen within 2 s, and one
+ *  `docker inspect` every 2 s is no load on the host. */
+export const WAIT_POLL_INTERVAL_SEC = 2;
+/** curl `--max-time` of one `wait for --until url:` probe: a probe longer than the poll interval
+ *  would stretch the interval itself. */
+export const WAIT_URL_PROBE_TIMEOUT_SEC = 5;
+/** `wait for --until log-contains:<re>`: the same ceiling as `MAX_FILES_GREP_PATTERN_CHARS`. */
+export const MAX_WAIT_PATTERN_CHARS = 256;
+/** `git log` commits when `--n` is absent: a screen of recent history answers "what is deployed". */
+export const GIT_LOG_DEFAULT_COMMITS = 20;
+/** `git log --n` ceiling: 200 one-line commits stay far under `DEFAULT_MAX_BYTES`. */
+export const GIT_LOG_MAX_COMMITS = 200;
+/** Changed files `git diff-stat` lists (the remote stops one past it to say `truncated`), the same
+ *  ceiling and reason as `MAX_FIND_RESULTS`. */
+export const GIT_DIFF_STAT_MAX_FILES = 500;
+/** `git head|log|diff-stat` ssh budget: `git status` on a large worktree with a cold cache can take
+ *  several seconds; 25 s matches `FILE_TIMEOUT_SEC`. */
+export const GIT_TIMEOUT_SEC = 25;

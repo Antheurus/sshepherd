@@ -56,7 +56,25 @@ const GROUP_FIRST_POSITIONAL_NOTE: Record<string, string> = {
   deploy: 'First positional: <recipe> — a deploy recipe name (see recipes.md).',
   tunnel:
     'First positional (open only): <alias>. `list` takes no positional; `close` takes <id> (from `tunnel open`) instead of an alias.',
+  http: 'First positional: <alias>. Shorthand: `http <alias> GET <url>` (= http get), `http <alias> POST <url> --yes` (= http send).',
+  wait: 'First positional: <alias>. Shorthand: `wait <alias> --until <condition>` (= wait for).',
 };
+/** Alias-first shorthands, used only when the token after the group is not one of its actions:
+ *  `http <alias> GET <url>` is `http get <alias> <url>`, any other method is `http send`, and
+ *  `wait <alias> --until ...` is `wait for <alias> --until ...`. */
+const ALIAS_FIRST_SHORTHAND: Record<
+  string,
+  (positionals: string[]) => { action: string; positionals: string[] }
+> = {
+  http: (positionals) => {
+    const [alias = '', method = '', ...more] = positionals;
+    return method.toUpperCase() === 'GET'
+      ? { action: 'get', positionals: [alias, ...more] }
+      : { action: 'send', positionals };
+  },
+  wait: (positionals) => ({ action: 'for', positionals }),
+};
+
 const DEFAULT_FIRST_POSITIONAL_NOTE =
   'First positional: <alias> — the ssh alias configured in ~/.ssh/config.';
 
@@ -489,7 +507,11 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
     return;
   }
 
-  const action = actionOrHelp;
+  const shorthand =
+    getOp(group, actionOrHelp) === undefined
+      ? ALIAS_FIRST_SHORTHAND[group]?.(parseArgv(rest).positionals)
+      : undefined;
+  const action = shorthand?.action ?? actionOrHelp;
   const op = getOp(group, action);
   if (!op) {
     const actions = listOps()
@@ -502,7 +524,9 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
     );
   }
 
-  const { positionals, flags } = parseArgv(tail);
+  const parsed = parseArgv(shorthand === undefined ? tail : rest);
+  const positionals = shorthand?.positionals ?? parsed.positionals;
+  const { flags } = parsed;
   if (hasFlag(flags, 'help')) {
     process.stdout.write(`${formatActionHelp(op)}\n`);
     return;

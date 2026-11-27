@@ -7,7 +7,8 @@
 #                  containers (another fixture's included) to `services ps`; assertions must never
 #                  depend on them.
 #   postgres     - a real Postgres, seeded with a read-only role (postgres-init/01-fixture.sql).
-#   app          - a minimal long-running nginx standing in for a deployed app.
+#   app          - a minimal long-running nginx standing in for a deployed app, with a healthcheck
+#                  (`wait for --until healthy@container=...`).
 #   noisy        - prints 5 MiB of log lines once, then idles: the output-cap check (`logs docker`).
 #   stderr-writer - writes one line to stderr and one to stdout, then idles: `logs docker` must
 #                  return both (the stderr-merge check).
@@ -34,6 +35,11 @@ services:
   app:
     image: nginx:alpine
     container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-app
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1/']
+      interval: 2s
+      timeout: 2s
+      retries: 3
 
   noisy:
     image: nginx:alpine
