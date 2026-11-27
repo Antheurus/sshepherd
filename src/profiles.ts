@@ -91,6 +91,9 @@ export const OP_PROFILES: Record<string, Profile> = {
   'git head': 'read',
   'git log': 'read',
   'git diff-stat': 'read',
+  'exec run': 'read',
+  'exec change': 'deploy',
+  'exec list': 'read',
 };
 
 export function isProfile(value: string): value is Profile {

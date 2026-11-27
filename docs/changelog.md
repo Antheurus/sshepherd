@@ -1,5 +1,13 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.12 — Run your own declared commands on a server, safely
+
+- New `sshepherd exec`: you write the commands an alias may run in `~/.config/sshepherd/exec/<alias>.toml` (chmod 600), each as an argv list with typed values (a fixed list, a number range, a path under a folder, a pattern, or a declared container). The agent can then run `sshepherd exec <alias> <name> --param key=value` and nothing else; free-text commands still do not exist.
+- A command marked `mutating = true` needs `--yes` and the `deploy` profile, and every run is written to the audit log. Read-only ones run under the `read` profile.
+- Values are refused before anything runs when they could change what the command does: a leading `-`, shell characters, line breaks, more than 16 values, more than 512 bytes, or a path that leaves its folder (also through a symbolic link, checked on the server).
+- The file itself is refused if others can read or write it, if it is a link, or if another user owns it.
+- `sshepherd exec list <alias>` shows what you declared. Output is masked like every other command. See `references/exec.md` for the format.
+
 ## v0.4.0-rc.19 — Add a server in one command
 
 - `sshepherd setup host add <alias> --host <ip> --user <user> --yes` now does the whole onboarding: it registers the alias, creates its key, checks the server's host key, opens the one-time browser form where you type the password, and confirms key login works. The result lists each step it took.

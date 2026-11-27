@@ -4,6 +4,7 @@ import { configOps } from './ops/config.ts';
 import { dbOps } from './ops/db.ts';
 import { deployOps } from './ops/deploy.ts';
 import { envOps } from './ops/env.ts';
+import { execOps } from './ops/exec.ts';
 import { filesOps } from './ops/files.ts';
 import { gitOps } from './ops/git.ts';
 import { hostsOps } from './ops/hosts.ts';
@@ -31,6 +32,7 @@ const REGISTRY: OpSpec[] = [
   ...httpOps,
   ...waitOps,
   ...gitOps,
+  ...execOps,
 ];
 
 export function getOp(group: string, name: string): OpSpec | undefined {

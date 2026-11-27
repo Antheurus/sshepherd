@@ -8,8 +8,8 @@ description: >-
   "server gua kenapa", "servernya down", "disk penuh", "restart service", "liat log server", "deploy ke
   server", "ssh ke", "cek RAM server", "kenapa lemot servernya", "port apa aja yang kebuka". Keeps the
   agent zero-knowledge about credentials — no password, private key, or host/user/port ever reaches the
-  agent context or a tool response. Covers all 15 registry-driven command groups (hosts, check, logs,
-  services, files, env, config, db, deploy, security, tunnel, audit, http, wait, git) via a single compiled
+  agent context or a tool response. Covers all 16 registry-driven command groups (hosts, check, logs,
+  services, files, env, config, db, deploy, security, tunnel, audit, http, wait, git, exec) via a single compiled
   Bun/TypeScript CLI that shells out to the system ssh binary; the agent only ever passes an ssh alias, a pg-target name, or a recipe
   name. setup is a separate group that writes sshepherd own local config files; every setup action is
   agent-invocable except setup ssh-alias install, which opens a one-shot browser form only a human can
@@ -157,7 +157,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 15 registry-driven groups (73 ops) + 1 `setup` group (7 sub-groups, 16 actions)
+## Quick reference — 16 registry-driven groups (76 ops) + 1 `setup` group (7 sub-groups, 16 actions)
 
 ```bash
 # hosts
@@ -276,6 +276,11 @@ sshepherd git head web-01 /opt/myapp
 sshepherd git log web-01 /opt/myapp --n 10
 sshepherd git diff-stat web-01 /opt/myapp
 
+# exec (only commands a human declared in ~/.config/sshepherd/exec/<alias>.toml, 0600; see references/exec.md)
+sshepherd exec list web-01                                                        # names, params, mutating
+sshepherd exec run web-01 app-artisan --param cmd=migrate:status                  # shorthand: exec web-01 app-artisan ...
+sshepherd exec change web-01 restart-worker --param c=worker --yes                # mutating = true: --yes, profile deploy
+
 # setup — agent-invocable; install's credential boundary is the one exception (see Gotchas #9)
 sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes
 sshepherd setup ssh-alias keygen myserver --yes
@@ -319,8 +324,9 @@ sshepherd setup ssh-alias adopt-env ./my-project --yes                 # SSH_* /
    the fingerprint `--dry-run` shows (`--all-types` records every key type the host presents once
    that fingerprint matched one of them).
 3. **No raw exec, ever.** There is no `sshepherd exec "<any command>"`. A genuinely novel
-   need is authored as a named, versioned recipe step (`references/recipes.md`) —
-   reviewable, not a free-text shell escape hatch. `plain ssh <alias>` remains the
+   need is a named, typed definition a human writes in `~/.config/sshepherd/exec/<alias>.toml`
+   (`exec run`/`exec change`, `references/exec.md`) or a recipe step (`references/recipes.md`) —
+   reviewable, never a free-text shell escape hatch. `plain ssh <alias>` remains the
    intentional human break-glass for one-off exploration.
 4. **`deploy rollback` refuses without a `[rollback]` block.** A recipe that doesn't
    declare one has no inferred rollback — sshepherd never guesses.

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Canary stand-in for php: `php artisan migrate:status` prints a migration table and the debug line a
+# misconfigured app leaks, so `exec run <alias> app-artisan` has a secret to scrub.
+echo "  Migration name ............................................ Batch / Status"
+echo "  2024_01_01_000000_create_users_table ....................... [1] Ran"
+echo "  2024_01_02_000000_create_jobs_table ........................ [1] Ran"
+echo "DB_PASSWORD=__C__pa"

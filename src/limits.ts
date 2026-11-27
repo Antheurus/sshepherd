@@ -265,3 +265,22 @@ export const TUNNEL_SERVER_ALIVE_COUNT_MAX = 3;
  *  4 KiB holds ssh's error lines and a short server banner; debug lines other than the ready line
  *  are never kept. */
 export const TUNNEL_STDERR_MAX_BYTES = 4_096;
+
+/** `exec run|change` budget when `--timeout` is absent: a declared one-shot command (an artisan
+ *  status, a cache clear, a queue restart) finishes in seconds; 120 s leaves room for a cold
+ *  container start without letting a hung command hold the session. `--timeout` raises it. */
+export const EXEC_TIMEOUT_SEC = 120;
+/** Params one `exec` call passes and one definition declares: a named command takes a handful of
+ *  typed values, and 16 bounds how much caller input one argv can carry (roadmap P3.2). */
+export const EXEC_MAX_PARAMS = 16;
+/** Bytes of one `exec --param` value: names, ids, paths and short patterns fit in 512, while a value
+ *  big enough to smuggle a payload does not (roadmap P3.2). */
+export const EXEC_MAX_PARAM_BYTES = 512;
+/** Elements of one definition's argv: a real command line is under 20 words; 64 refuses a
+ *  generated or pasted script dressed as argv. */
+export const EXEC_MAX_ARGV_ITEMS = 64;
+/** Size of one `exec/<alias>.toml`: 200 definitions of a few lines each are far under 256 KiB, and a
+ *  stray large file is refused instead of parsed on every call. */
+export const EXEC_MAX_DEF_FILE_BYTES = 262_144;
+/** Definitions one `exec/<alias>.toml` may hold: keeps `exec list` one readable page. */
+export const EXEC_MAX_DEFS = 200;

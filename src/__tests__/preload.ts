@@ -10,3 +10,4 @@ process.env.SSHEPHERD_STATE_DIR = isolated;
 process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = join(isolated, 'reveal-allowlist.toml');
 process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = join(isolated, 'files-allowlist.toml');
 process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = join(isolated, 'config-allowlist.toml');
+process.env.SSHEPHERD_EXEC_DIR = join(isolated, 'exec');

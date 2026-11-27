@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { OP_PROFILES, PROFILES } from '../profiles.ts';
@@ -18,6 +18,7 @@ const ENV_KEYS = [
   'SSHEPHERD_TARGETS_PATH',
   'SSHEPHERD_TUNNEL_STATE_DIR',
   'SSHEPHERD_RECIPE_PATH',
+  'SSHEPHERD_EXEC_DIR',
 ] as const;
 
 const FAILING_OUTCOME: SpawnOutcome = { code: 255, stdout: '', stderr: '', timedOut: false };
@@ -29,6 +30,7 @@ const AUDITED_MUTATING_OPS = [
   'deploy migrate',
   'deploy rollback',
   'deploy run',
+  'exec change',
   'files upload',
   'hosts trust',
   'http send',
@@ -69,6 +71,15 @@ beforeAll(() => {
   process.env.SSHEPHERD_TARGETS_PATH = join(scratch, 'targets.toml');
   process.env.SSHEPHERD_TUNNEL_STATE_DIR = join(scratch, 'tunnels');
   process.env.SSHEPHERD_RECIPE_PATH = DEMO_RECIPE_PATH;
+  mkdirSync(join(scratch, 'exec'), { mode: 0o700 });
+  writeFileSync(
+    join(scratch, 'exec', `${ALIAS}.toml`),
+    '[app]\nargv = ["uptime"]\nmutating = false\n',
+    {
+      mode: 0o600,
+    },
+  );
+  process.env.SSHEPHERD_EXEC_DIR = join(scratch, 'exec');
 });
 
 afterAll(() => {

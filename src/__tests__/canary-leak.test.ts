@@ -1,6 +1,14 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
@@ -91,6 +99,7 @@ const PLACEMENTS: Record<string, string> = {
   nj: 'compose env JAVA_OPTS nested -Dspring.datasource.password= (and its log line)',
   hb: 'http get/send response body api_token',
   gm: 'git commit subject token= (/opt/canary/repo)',
+  pa: 'php artisan stand-in debug line DB_PASSWORD= (exec run app-artisan)',
 };
 
 /** psql error texts that quote the value that failed (scrub.ts `PSQL_DATA_ECHO_RULES`), each one a
@@ -251,6 +260,16 @@ function explicitDrives(alias: string): Record<string, Record<string, string | b
       { until: 'port-open:22', timeout: '30' },
       { until: 'url:http://127.0.0.1:80/:status=401', timeout: '30' },
     ],
+    'exec run': [
+      { name: 'app-artisan', param: JSON.stringify(['cmd=migrate:status']) },
+      ...CANARY_FILES.filter((path) => path.startsWith('/opt/canary/')).map((path) => ({
+        name: 'canary-cat',
+        param: JSON.stringify([`file=${path}`]),
+      })),
+      { name: 'canary-env' },
+    ],
+    'exec change': [{ name: 'canary-show' }],
+    'exec list': [{}],
     'git head': [{ path: CANARY_REPO }],
     'git log': [{ path: CANARY_REPO }],
     'git diff-stat': [{ path: CANARY_REPO }],
@@ -334,6 +353,7 @@ const ENV_KEYS = [
   'SSHEPHERD_PROFILE',
   'SSHEPHERD_AUDIT_PATH',
   'SSHEPHERD_TUNNEL_STATE_DIR',
+  'SSHEPHERD_EXEC_DIR',
 ] as const;
 const savedEnv: Record<string, string | undefined> = {};
 
@@ -423,6 +443,10 @@ function writeFixtureConfig(): void {
   writeFileSync(join(scratch, 'files-allowlist.toml'), allowlist);
   writeFileSync(join(scratch, 'config-allowlist.toml'), allowlist);
   writeFileSync(join(scratch, 'reveal-allowlist.toml'), '');
+  mkdirSync(join(scratch, 'exec'), { mode: 0o700 });
+  for (const alias of aliases) {
+    writeFileSync(join(scratch, 'exec', `${alias}.toml`), execDefs(), { mode: 0o600 });
+  }
   for (const alias of aliases) {
     writeFileSync(
       join(scratch, `canary-ok.${alias}.toml`),
@@ -479,6 +503,37 @@ function writeFixtureConfig(): void {
       ].join('\n'),
     );
   }
+}
+
+/** The named-exec definitions both aliases declare: the artisan stand-in, a path param under
+ *  /opt/canary (each planted file through it), the canary container's whole environment, and a
+ *  mutating def that prints the planted files. */
+function execDefs(): string {
+  return [
+    '[app-artisan]',
+    'argv = ["php", "artisan", "{cmd}"]',
+    'mutating = false',
+    '[app-artisan.params.cmd]',
+    'type = "enum"',
+    'values = ["migrate:status"]',
+    '',
+    '[canary-cat]',
+    'argv = ["cat", "{file}"]',
+    'mutating = false',
+    '[canary-cat.params.file]',
+    'type = "path"',
+    'under = "/opt/canary"',
+    '',
+    '[canary-env]',
+    'argv = ["env"]',
+    'mutating = false',
+    `container = "${CANARY_CONTAINER}"`,
+    '',
+    '[canary-show]',
+    'argv = ["cat", "/opt/canary/.env", "/opt/canary/config.json", "/opt/canary/server.pem"]',
+    'mutating = true',
+    '',
+  ].join('\n');
 }
 
 /** Every required arg gets each of its values (a new op with an arg nobody named here fails, it
@@ -749,6 +804,7 @@ describe.skipIf(!FIXTURE_UP)('canary leak gate (smoke fixture)', () => {
     process.env.SSHEPHERD_REVEAL_ALLOWLIST_PATH = join(scratch, 'reveal-allowlist.toml');
     process.env.SSHEPHERD_AUDIT_PATH = join(scratch, 'audit-tail-source.jsonl');
     process.env.SSHEPHERD_TUNNEL_STATE_DIR = join(scratch, 'tunnels');
+    process.env.SSHEPHERD_EXEC_DIR = join(scratch, 'exec');
     delete process.env.SSHEPHERD_PROFILE;
     runPlant('plant', canary, digits, identity.user, identity.host, identity.port);
   }, 120_000);

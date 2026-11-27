@@ -11,6 +11,7 @@ import {
   MAX_TIMEOUT_SEC,
   MIN_MAX_BYTES,
 } from './limits.ts';
+import { execDefIsMutating } from './ops/exec.ts';
 import { buildEnvelope, parseFieldPaths, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
 import {
@@ -65,6 +66,7 @@ const GROUP_FIRST_POSITIONAL_NOTE: Record<string, string> = {
     'First positional (open only): <alias>. `list` takes no positional; `close` takes <id> (from `tunnel open`) instead of an alias.',
   http: 'First positional: <alias>. Shorthand: `http <alias> GET <url>` (= http get), `http <alias> POST <url> --yes` (= http send).',
   wait: 'First positional: <alias>. Shorthand: `wait <alias> --until <condition>` (= wait for).',
+  exec: 'First positional: <alias>. Shorthand: `exec <alias> <name> [--param k=v]...` (= exec run, or exec change when the definition says mutating = true).',
 };
 /** Alias-first shorthands, used only when the token after the group is not one of its actions:
  *  `http <alias> GET <url>` is `http get <alias> <url>`, any other method is `http send`, and
@@ -80,6 +82,10 @@ const ALIAS_FIRST_SHORTHAND: Record<
       : { action: 'send', positionals };
   },
   wait: (positionals) => ({ action: 'for', positionals }),
+  exec: (positionals) => {
+    const [alias = '', name = ''] = positionals;
+    return { action: execDefIsMutating(alias, name) ? 'change' : 'run', positionals };
+  },
 };
 
 const DEFAULT_FIRST_POSITIONAL_NOTE =
@@ -360,6 +366,15 @@ function applyConfigPutFromFlag(group: string, action: string, flags: FlagMap): 
   flags.set('content-base64', [contentBase64]);
 }
 
+/** `exec --param` repeats once per param, while an op arg holds one string: every value is packed
+ *  into one JSON list, which `exec` unpacks (a value keeps any character, so nothing is lost). */
+function applyExecParamFlags(group: string, flags: FlagMap): void {
+  const values = flags.get('param');
+  if (group === 'exec' && values !== undefined) {
+    flags.set('param', [JSON.stringify(values)]);
+  }
+}
+
 // -- help text, generated from the registry --------------------------------------------------
 
 function formatArgLine(argSpec: ArgSpec): string {
@@ -562,6 +577,7 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
 
   rejectUnknownFlags(op, flags);
   applyConfigPutFromFlag(group, action, flags);
+  applyExecParamFlags(group, flags);
   const ctx = resolveContext(group, action, op, positionals, flags);
   const global = parseGlobalOptions(flags);
   if (global.problem !== undefined) {

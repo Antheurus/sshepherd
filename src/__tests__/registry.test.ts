@@ -93,6 +93,8 @@ describe('registry — getOp/listOps', () => {
     ['git', 'head'],
     ['git', 'log'],
     ['git', 'diff-stat'],
+    ['exec', 'run'],
+    ['exec', 'list'],
   ];
 
   const MUTATING: Array<[string, string]> = [
@@ -112,6 +114,7 @@ describe('registry — getOp/listOps', () => {
     ['files', 'upload'],
     ['hosts', 'trust'],
     ['http', 'send'],
+    ['exec', 'change'],
   ];
 
   test('every read-only op declared through Phases 3-5 is registered and flagged mutating:false', () => {
