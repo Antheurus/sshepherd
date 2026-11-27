@@ -291,3 +291,32 @@ describe('a base64 blob that decodes to a secret is masked whole', () => {
     }
   });
 });
+
+describe('JSON escaped inside a string is still JSON', () => {
+  test('one escape level: {"msg":"{\\"password\\":\\"v\\"}"}', () => {
+    const text = `{"msg":"{\\"password\\":\\"${FAKE}\\"}"}`;
+    expect(masked(text)).toBe(`{"msg":"{\\"password\\":\\"${MASK}\\"}"}`);
+  });
+
+  test('two escape levels: "{\\\\\\"token\\\\\\":\\\\\\"v\\\\\\"}"', () => {
+    const text = `"{\\\\\\"token\\\\\\":\\\\\\"${FAKE}\\\\\\"}"`;
+    expect(masked(text)).toBe(`"{\\\\\\"token\\\\\\":\\\\\\"${MASK}\\\\\\"}"`);
+  });
+
+  test('an escaped unquoted value and a log line around it', () => {
+    const text = `level=info body="{\\"api_token\\":${FAKE},\\"user\\":\\"app-user\\"}" done`;
+    const out = masked(text);
+    expect(out).not.toContain(FAKE);
+    expect(out).toContain('\\"user\\":\\"app-user\\"');
+  });
+
+  test('a structured payload holding the escaped string is masked too', () => {
+    const { value } = scrub({ line: `{"msg":"{\\"password\\":\\"${FAKE}\\"}"}` });
+    expect(JSON.stringify(value)).not.toContain(FAKE);
+  });
+
+  test('escaped JSON without a secret key is left as written', () => {
+    const text = `{"msg":"{\\"region\\":\\"eu-west-1\\",\\"path\\":\\"a\\\\\\\\b\\"}"}`;
+    expect(masked(text)).toBe(text);
+  });
+});

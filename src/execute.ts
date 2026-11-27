@@ -54,8 +54,8 @@ import {
 
 /** `op.timeoutSec` is the per-op default; the CLI's global `--timeout` arrives as
  *  `deps.timeoutSec` and applies to every op, bounded by the shared ceiling. */
-function effectiveTimeoutSec(op: OpSpec, deps: ExecuteDeps): number {
-  return Math.min(deps.timeoutSec ?? op.timeoutSec, MAX_TIMEOUT_SEC);
+function effectiveTimeoutSec(op: OpSpec, ctx: OpContext, deps: ExecuteDeps): number {
+  return Math.min(deps.timeoutSec ?? op.timeoutSecFor?.(ctx) ?? op.timeoutSec, MAX_TIMEOUT_SEC);
 }
 
 /** A timed-out command's stdout so far is still the legitimate payload — return it so a "almost
@@ -478,7 +478,7 @@ async function runOp(
   const result = await run(
     ctx.alias,
     remoteCmd,
-    effectiveTimeoutSec(op, deps),
+    effectiveTimeoutSec(op, ctx, deps),
     withConfigPath(deps),
     {
       stdoutCap: op.mutating || keepsTail(op) ? 'drain-tail' : 'kill-head',

@@ -18,6 +18,7 @@ import {
   MAX_PSQL_TYPE_NAME_CHARS,
   MIN_BARE_HOSTNAME_CHARS,
   MIN_MASKED_USER_CHARS,
+  SCRUB_MAX_JSON_ESCAPE_LEVELS,
 } from './limits.ts';
 
 export const MASK = '***';
@@ -1219,6 +1220,71 @@ function maskEncodedKeyedInline(
   return { value: `${out}${text.slice(from)}`, count: spans.length };
 }
 
+/** One level of JSON string escaping undone (`\"` `\\` `\/` become one character; any other
+ *  escape is kept as written), with each decoded character's offset in `text` and a final entry
+ *  for its end. */
+function unescapeJsonOnce(text: string): { decoded: string; offsets: number[] } {
+  let decoded = '';
+  const offsets: number[] = [];
+  for (let at = 0; at < text.length; at += 1) {
+    const next = text[at + 1];
+    offsets.push(at);
+    if (text[at] === '\\' && (next === '"' || next === '\\' || next === '/')) {
+      decoded += next;
+      at += 1;
+    } else {
+      decoded += text[at];
+    }
+  }
+  offsets.push(text.length);
+  return { decoded, offsets };
+}
+
+/** `KEYED_INLINE` over the text with JSON string escaping undone one and then two levels, so a
+ *  pair inside a JSON document carried as a string (`{"msg":"{\"password\":\"<v>\"}"}`, and the
+ *  same again re-escaped) is found; each value is masked at its escaped offsets, keeping its escaped
+ *  quotes, and the rest of the text is left as written. */
+function maskEscapedKeyedInline(
+  text: string,
+  revealKeys: ReadonlySet<string>,
+): ScrubResult<string> {
+  const found: Array<{ start: number; end: number; open: string; close: string }> = [];
+  let current = text;
+  let toText: number[] | null = null;
+  for (let level = 0; level < SCRUB_MAX_JSON_ESCAPE_LEVELS && current.includes('\\"'); level += 1) {
+    const step = unescapeJsonOnce(current);
+    const outer = toText;
+    const map: number[] =
+      outer === null ? step.offsets : step.offsets.map((at) => outer[at] ?? text.length);
+    toText = map;
+    current = step.decoded;
+    for (const span of keyedInlineSecretSpans(current, revealKeys)) {
+      const start = map[span.start] ?? text.length;
+      const end = map[span.end] ?? text.length;
+      const quoted = span.value.length >= 2 && /^(["']).*\1$/s.test(span.value);
+      found.push({
+        start,
+        end,
+        open: quoted ? text.slice(start, map[span.start + 1] ?? start) : '',
+        close: quoted ? text.slice(map[span.end - 1] ?? end, end) : '',
+      });
+    }
+  }
+  found.sort((a, b) => a.start - b.start);
+  let out = '';
+  let from = 0;
+  let count = 0;
+  for (const span of found) {
+    if (span.start < from) {
+      continue;
+    }
+    out += `${text.slice(from, span.start)}${span.open}${MASK}${span.close}`;
+    from = span.end;
+    count += 1;
+  }
+  return { value: `${out}${text.slice(from)}`, count };
+}
+
 /** A base64 or base64url run (wrapped lines included, as `base64` prints them) long enough to hold
  *  a `KEY=value` line. */
 const BASE64_BLOB =
@@ -1370,6 +1436,9 @@ function scrubTextWith(
   const encoded = maskEncodedKeyedInline(out, revealKeys);
   out = encoded.value;
   count += encoded.count;
+  const escaped = maskEscapedKeyedInline(out, revealKeys);
+  out = escaped.value;
+  count += escaped.count;
   for (const pattern of [KEYED_SUBSCRIPT, KEYED_CALL_ARG]) {
     out = out.replace(
       pattern,

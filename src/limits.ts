@@ -338,3 +338,14 @@ export const HTTP_BODY_SCRUB_MARGIN_BYTES = 16_384;
 /** curl `--max-time` of one recipe `http-probe` attempt: a health endpoint that has not answered in
  *  10 s is failing, and the step's `retries` and `interval` decide how long it keeps trying. */
 export const RECIPE_HTTP_PROBE_TIMEOUT_SEC = 10;
+
+/** Levels of JSON string escaping the scrubber unwraps to find a secret pair (`{"msg":"{\"token\"
+ *  :\"v\"}"}` is one, a log line that re-encodes it is two): each level is one more full pass of
+ *  the keyed-inline rule, and nothing real nests a payload three deep. */
+export const SCRUB_MAX_JSON_ESCAPE_LEVELS = 2;
+/** Ceiling of a named-exec definition's own `timeout`: half an hour holds a slow one-off migration
+ *  or report; a per-call `--timeout` still overrides it up to `MAX_TIMEOUT_SEC`. */
+export const EXEC_DEF_MAX_TIMEOUT_SEC = 1_800;
+/** `path` params one exec definition may declare: each is held open on its own descriptor 3-9 for
+ *  the command (`sh` redirects single-digit descriptors only), so seven is the ceiling. */
+export const EXEC_MAX_PATH_PARAMS = 7;
