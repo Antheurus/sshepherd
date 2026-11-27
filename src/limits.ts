@@ -179,3 +179,19 @@ export const DIAGNOSE_MASTER_CHECK_TIMEOUT_SEC = 3;
 export const DB_MIGRATIONS_COMPARE_MAX = 10_000;
 /** `files head|tail|cat --lines A:B`: the widest range one call returns, the same as `MAX_HEAD_LINES`. */
 export const MAX_FILES_LINE_SPAN = 5_000;
+/** `setup ssh-alias adopt-env` reads a project's `.env` only up to this size: a real one is a few KiB,
+ *  and 1 MiB still fits a file carrying several PEM keys inline, while a stray multi-GB file is
+ *  refused instead of read into memory. */
+export const ADOPT_ENV_MAX_FILE_BYTES = 1_048_576;
+/** Host groups one `adopt-env` run adopts: each installs a key one after the other (up to about 45 s
+ *  of connect and install timeouts per host), so 32 hosts stay inside about 25 minutes. */
+export const ADOPT_ENV_MAX_HOSTS = 32;
+/** `doctor hosts` probes this many aliases at once: each probe is one credential-free key exchange,
+ *  and 8 at once finishes 15 aliases in two rounds without flooding the local ssh client. */
+export const DOCTOR_HOSTS_CONCURRENCY = 8;
+/** Local kill for one `doctor hosts` probe: ssh's own `CONNECT_TIMEOUT_SEC` plus 5 s for the key
+ *  exchange and the server's list of auth methods. */
+export const DOCTOR_HOSTS_PROBE_TIMEOUT_SEC = CONNECT_TIMEOUT_SEC + 5;
+/** Aliases `doctor hosts` probes in one run: 200 at `DOCTOR_HOSTS_CONCURRENCY` is at most about 6
+ *  minutes against unreachable hosts; any beyond it are reported unchecked, never silently dropped. */
+export const DOCTOR_HOSTS_MAX_ALIASES = 200;

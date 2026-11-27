@@ -53,5 +53,5 @@ export {
   loadRevealAllowlist,
   REVEAL_DENYLIST_PATTERNS,
 } from './ops/config.ts';
-export { runDoctor } from './ops/doctor.ts';
+export { runDoctor, runDoctorHosts } from './ops/doctor.ts';
 export { parseHumanBytes } from './parsers/bytes.ts';

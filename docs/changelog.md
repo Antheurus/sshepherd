@@ -1,5 +1,13 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.19 — Add a server in one command
+
+- `sshepherd setup host add <alias> --host <ip> --user <user> --yes` now does the whole onboarding: it registers the alias, creates its key, checks the server's host key, opens the one-time browser form where you type the password, and confirms key login works. The result lists each step it took.
+- If the server's host key is not known yet, it stops and shows the fingerprints. Compare one with your provider's console, then run the same command again with `--fingerprint SHA256:...`.
+- `sshepherd setup ssh-alias adopt-env <project-dir> --yes` reads the `SSH_*` settings in a project's `.env`, creates an alias per server and installs a key using the password or key already there. It only reports which aliases got a key, never any value from the file. After it, rotate those passwords.
+- `sshepherd doctor hosts` lists the aliases whose server still accepts password login, by name only, so you know which ones to harden.
+- Fixed: after a successful key install, the command no longer sits waiting until the form's timeout before exiting.
+
 ## v0.4.0-rc.7 — Permission profiles, strict host keys and a leak gate
 
 - `SSHEPHERD_PROFILE=read|deploy|admin` limits what a session may run. `read` allows every read-only command and any `--dry-run`, `deploy` adds service, config, file, deploy and tunnel changes, `admin` adds `security harden` and `hosts trust`. Anything above the profile returns `PROFILE_DENIED` (exit 2) before connecting. Unset means `admin`, as before. Any other value is refused.

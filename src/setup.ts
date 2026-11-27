@@ -4,6 +4,7 @@ import { scaffold as scaffoldConfigAllowlist } from './setup-config-allowlist.ts
 import { discover, roRole, scaffold } from './setup-db-target.ts';
 import { scaffold as scaffoldDeployRecipe } from './setup-deploy-recipe.ts';
 import { scaffold as scaffoldFilesAllowlist } from './setup-files-allowlist.ts';
+import { adoptEnv, hostAdd } from './setup-host.ts';
 import { scaffold as scaffoldRevealAllowlist } from './setup-reveal-allowlist.ts';
 import { install, keygen, list, register, remove, status, update } from './setup-ssh-alias.ts';
 import {
@@ -32,7 +33,13 @@ export const SETUP_SUB_GROUPS: SetupSubGroupSpec[] = [
   {
     name: 'ssh-alias',
     summary: 'Register, generate a keypair for, install a key on, or remove a ~/.ssh/config alias.',
-    actions: ['register', 'keygen', 'remove', 'install', 'list', 'status', 'update'],
+    actions: ['register', 'keygen', 'remove', 'install', 'list', 'status', 'update', 'adopt-env'],
+  },
+  {
+    name: 'host',
+    summary:
+      'Add a host in one command: register, keygen, trust its host key, the install form, then hosts test.',
+    actions: ['add'],
   },
   {
     name: 'db-target',
@@ -69,6 +76,8 @@ const SETUP_GLOBAL_FLAGS = ['pretty', 'yes'];
 const SETUP_ACTION_FLAGS: Record<string, string[]> = {
   'ssh-alias register': ['host', 'user', 'port', 'overwrite'],
   'ssh-alias update': ['host', 'user', 'port'],
+  'ssh-alias adopt-env': [],
+  'host add': ['host', 'user', 'port', 'fingerprint'],
   'db-target scaffold': ['alias', 'user', 'database', 'compose-file', 'service', 'container'],
   'db-target ro-role': ['print-sql', 'role', 'tables-only'],
   'db-target discover': [],
@@ -171,6 +180,23 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
   const pretty = hasFlag(flags, 'pretty');
   const yes = hasFlag(flags, 'yes');
 
+  if (action === 'adopt-env') {
+    const projectDir = positionals[0];
+    const result =
+      projectDir === undefined
+        ? buildSetupResult({
+            command,
+            error: {
+              code: 'INVALID_ARGS',
+              message: `${command}: missing required positional argument 'project-dir'`,
+            },
+          })
+        : await adoptEnv(projectDir, { yes });
+    printSetupResult(result, pretty);
+    process.exitCode = setupExitCode(result);
+    return;
+  }
+
   if (action === 'list') {
     const result = list();
     printSetupResult(result, pretty);
@@ -243,6 +269,42 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
     result = await remove(alias, { yes });
   }
 
+  printSetupResult(result, pretty);
+  process.exitCode = setupExitCode(result);
+}
+
+/** `setup host add <alias> [--host <h> --user <u>] [--port <n>] [--fingerprint <SHA256:...>] --yes`;
+ *  `--host`/`--user` may be left out once the alias is registered (a re-run after the host key). */
+async function runHostAction(argTail: string[]): Promise<void> {
+  const command = 'setup host add';
+  const { positionals, flags } = parseArgv(argTail);
+  const pretty = hasFlag(flags, 'pretty');
+  const alias = positionals[0];
+  const portRaw = getFlag(flags, 'port');
+  const port = portRaw === undefined ? undefined : Number(portRaw);
+  let result: SetupResult<unknown>;
+  if (alias === undefined) {
+    result = buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: missing required positional argument 'alias'`,
+      },
+    });
+  } else if (port !== undefined && !Number.isInteger(port)) {
+    result = buildSetupResult({
+      command,
+      error: { code: 'INVALID_ARGS', message: `${command}: --port must be an integer` },
+    });
+  } else {
+    result = await hostAdd(alias, {
+      host: getFlag(flags, 'host'),
+      user: getFlag(flags, 'user'),
+      port,
+      fingerprint: getFlag(flags, 'fingerprint'),
+      yes: hasFlag(flags, 'yes'),
+    });
+  }
   printSetupResult(result, pretty);
   process.exitCode = setupExitCode(result);
 }
@@ -603,6 +665,11 @@ export async function runSetup(tail: string[]): Promise<void> {
 
   if (subGroup.name === 'ssh-alias') {
     await runSshAliasAction(actionOrHelp, argTail);
+    return;
+  }
+
+  if (subGroup.name === 'host') {
+    await runHostAction(argTail);
     return;
   }
 

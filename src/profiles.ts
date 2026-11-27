@@ -112,6 +112,8 @@ export const SETUP_PROFILES: Record<string, Profile> = {
   'ssh-alias list': 'read',
   'ssh-alias status': 'read',
   'ssh-alias update': 'admin',
+  'ssh-alias adopt-env': 'admin',
+  'host add': 'admin',
   'db-target scaffold': 'admin',
   'db-target ro-role': 'read',
   'db-target discover': 'read',

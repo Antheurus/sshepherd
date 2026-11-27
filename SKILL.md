@@ -154,7 +154,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 12 registry-driven groups (67 ops) + 1 `setup` group (6 sub-groups, 14 actions)
+## Quick reference — 12 registry-driven groups (67 ops) + 1 `setup` group (7 sub-groups, 16 actions)
 
 ```bash
 # hosts
@@ -273,6 +273,10 @@ sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf
 sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app --yes
 sshepherd setup files-allowlist scaffold myserver --paths /opt/app/backup.sql,/opt/app/.env --yes
 sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --yes
+sshepherd setup host add myserver --host 1.2.3.4 --user deploy --yes   # register, keygen, host key, install form (a human types the password), hosts test -> data.steps[]
+sshepherd setup host add myserver --fingerprint SHA256:... --yes       # re-run after HOST_KEY_UNKNOWN, with a fingerprint a human confirmed from data.fingerprints
+sshepherd setup ssh-alias adopt-env ./my-project --yes                 # SSH_* / <PREFIX>_SSH_* groups in its .env -> [{alias, key_installed}]; no .env value is printed
+# doctor is local and off the registry: `sshepherd doctor hosts` lists aliases whose server still accepts password login, names only
 ```
 
 ## Gotchas

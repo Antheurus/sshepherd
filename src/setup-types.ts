@@ -61,6 +61,8 @@ export interface SetupErrorInput {
  * pasted key that does parse but is passphrase-protected, which install cannot supply
  * non-interactively.
  * `PROFILE_DENIED` is the op groups' code, for a setup action above the caller's `SSHEPHERD_PROFILE`.
+ * `HOST_KEY_UNKNOWN`/`HOST_KEY_CHANGED`/`HOST_KEY_FINGERPRINT_MISMATCH` are `setup host add`'s
+ * host-key step, the same codes `hosts test` and `hosts trust` return for that alias.
  */
 export type SetupErrorCode =
   | 'NOT_IMPLEMENTED'
@@ -82,7 +84,10 @@ export type SetupErrorCode =
   | 'INVALID_PRIVATE_KEY'
   | 'PASSPHRASE_PROTECTED_KEY_UNSUPPORTED'
   | 'PROFILE_DENIED'
-  | 'REMOTE_FAILED';
+  | 'REMOTE_FAILED'
+  | 'HOST_KEY_UNKNOWN'
+  | 'HOST_KEY_CHANGED'
+  | 'HOST_KEY_FINGERPRINT_MISMATCH';
 
 export interface BuildSetupResultInput<T> {
   command: string;
@@ -178,6 +183,18 @@ const SETUP_GUIDANCE: Record<SetupErrorCode, SetupGuidance> = {
   REMOTE_FAILED: {
     hint: 'The remote command did not run; the message names the transport code, fix that (sshepherd hosts test <alias>) and retry.',
     retryable: true,
+  },
+  HOST_KEY_UNKNOWN: {
+    hint: 'A human compares data.fingerprints with the provider console (or ssh-keygen -l on the host itself), then the same command runs again with --fingerprint <SHA256:...>.',
+    retryable: false,
+  },
+  HOST_KEY_CHANGED: {
+    hint: 'known_hosts holds a different key for this host; find out why before trusting anything, then pass the fingerprint a human confirmed with --fingerprint.',
+    retryable: false,
+  },
+  HOST_KEY_FINGERPRINT_MISMATCH: {
+    hint: 'The host presents no key with that fingerprint; compare again with the provider console and pass one the host presents.',
+    retryable: false,
   },
 };
 
