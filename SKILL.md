@@ -269,8 +269,8 @@ sshepherd setup ssh-alias status myserver
 sshepherd setup ssh-alias update myserver --host 5.6.7.8 --port 2222 --yes
 sshepherd setup ssh-alias remove myserver --yes
 sshepherd setup db-target scaffold prod --alias myserver --user app --database appdb --container app_db --yes
-sshepherd setup db-target ro-role prod --print-sql
-sshepherd setup db-target ro-role prod --print-sql --tables-only   # SELECT on tables only, no pg_read_all_data (pg_authid)
+sshepherd setup db-target ro-role prod --print-sql              # default: SELECT on the app tables only, no pg_authid
+sshepherd setup db-target ro-role prod --print-sql --all-data   # pg_read_all_data: reads pg_authid; a function-wrapped rolpassword read is not masked
 sshepherd setup db-target discover myserver
 sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf,/opt/app/.env --yes
 sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app --yes
@@ -416,7 +416,7 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `CONNECT_TIMEOUT` | couldn't reach the host within the connect timeout |
 | `AUTH_FAILED` | SSH authentication failed for this alias |
 | `HOST_KEY_CHANGED` | the host presented a different key than `known_hosts` holds for the alias (a reinstalled server, or someone in the middle); from `hosts trust`, `known_hosts` holds a key the host no longer presents and none it presents matches `--fingerprint` — find out why before trusting anything; `next` is `hosts trust <alias> --dry-run` |
-| `HOST_KEY_FINGERPRINT_MISMATCH` | `hosts trust --fingerprint` named no key the host presents, and `known_hosts` holds no key the host stopped presenting (nothing trusted yet, or a presented key already trusted): a mistyped or wrong fingerprint, not a changed key; compare with the provider console or `ssh-keygen -l` on the host; exit `2` |
+| `HOST_KEY_FINGERPRINT_MISMATCH` | `hosts trust --fingerprint` named no key the host presents, while `known_hosts` trusts no key for the host yet or already trusts one it presents (a stale key beside it does not change that): a mistyped or wrong fingerprint, not a changed key; compare with the provider console or `ssh-keygen -l` on the host; exit `2` |
 | `KNOWN_HOSTS_UNWRITABLE` | `hosts trust` cannot record the key: the alias's `known_hosts` (or its directory) is not writable, is `/dev/null` or not a regular file, or the write did not read back; nothing was recorded; exit `2` |
 | `HOST_KEY_UNKNOWN` | `known_hosts` has no key for the alias; sshepherd never accepts one on first use — confirm it with `hosts trust` |
 | `SSH_TRANSPORT_ERROR` | ssh failed before the remote command could run, unclassified |

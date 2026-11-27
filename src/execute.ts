@@ -56,11 +56,12 @@ function effectiveTimeoutSec(op: OpSpec, deps: ExecuteDeps): number {
   return Math.min(deps.timeoutSec ?? op.timeoutSec, MAX_TIMEOUT_SEC);
 }
 
-/** A timed-out command's stdout so far is still the legitimate payload — return it
- *  (capped) so a "almost done" step is visible instead of lost. An op reading an env-shaped
- *  allowlisted path gets the same whole-file masking its `shape` would have applied, and every op
- *  gets the line-array key-body pass `logs *` runs on its lines (a cut window can hold key body
- *  lines with neither marker), both before the cap so a cut can never leave a quoted value unclosed. */
+/** A timed-out command's stdout so far is still the legitimate payload — return it so a "almost
+ *  done" step is visible instead of lost. An op reading an env-shaped allowlisted path gets the
+ *  same whole-file masking its `shape` would have applied, and every op gets the line-array
+ *  key-body pass `logs *` runs on its lines. It is capped by `capPartialStdout` only after the
+ *  envelope is scrubbed, so a cut can never leave a quoted value unclosed or an env block too
+ *  short for the env-block pass. */
 function partialStdout(
   op: OpSpec,
   ctx: OpContext,
@@ -75,7 +76,23 @@ function partialStdout(
   const text =
     typeof path === 'string' && isEnvFile(path) ? maskEnvContent(stdout, new Set()) : stdout;
   const lines = maskPemBodyChunks(maskPemLines(text.split('\n'))).join('\n');
-  return { partial_stdout: lines.slice(0, MAX_PARTIAL_STDOUT_CHARS) };
+  return { partial_stdout: lines };
+}
+
+/** Cuts a scrubbed envelope's `data.partial_stdout` to `MAX_PARTIAL_STDOUT_CHARS`. */
+function capPartialStdout(envelope: Envelope<unknown>): Envelope<unknown> {
+  const data = envelope.data;
+  if (typeof data !== 'object' || data === null || !('partial_stdout' in data)) {
+    return envelope;
+  }
+  const stdout = data.partial_stdout;
+  if (typeof stdout !== 'string' || stdout.length <= MAX_PARTIAL_STDOUT_CHARS) {
+    return envelope;
+  }
+  return {
+    ...envelope,
+    data: { ...data, partial_stdout: stdout.slice(0, MAX_PARTIAL_STDOUT_CHARS) },
+  };
 }
 
 /** `error.stderr_tail` is the last 20 lines of a failed command's stderr, then at most its last
@@ -361,7 +378,7 @@ export async function executeOp(
       error: fillNext(error, ctx.alias),
     });
   }
-  envelope = scrubEnvelope(op, ctx, envelope, commandStderr, scrubOptions);
+  envelope = capPartialStdout(scrubEnvelope(op, ctx, envelope, commandStderr, scrubOptions));
   envelope = { ...envelope, scrubbed: envelope.scrubbed + premasked };
   envelope = shapeOutput(op, envelope, deps, cutAtTransport);
   if (!audited) {

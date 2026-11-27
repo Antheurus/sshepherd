@@ -96,6 +96,7 @@ const deployRollback: OpSpec<{ output: string }> = {
   exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   truncateKeeps: 'tail',
+  maskEnvBlocks: true,
   output: 'raw',
   buildRemote: (ctx) => buildRollbackCommand(loadRecipeFromCtx(ctx)),
   shape: (parsed) => ({ output: (parsed as string).trim() }),
@@ -135,6 +136,7 @@ const deployMigrate: OpSpec<{ output: string }> = {
   exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   truncateKeeps: 'tail',
+  maskEnvBlocks: true,
   output: 'raw',
   buildRemote: (ctx) => {
     const recipe = loadRecipeFromCtx(ctx);

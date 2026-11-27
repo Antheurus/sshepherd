@@ -1,4 +1,4 @@
-import { auditMutating, confirmGate } from './audit.ts';
+import { auditSetupMutating as auditMutating, confirmGate } from './audit.ts';
 import {
   DB_LOCK_TIMEOUT_SEC,
   DB_RO_ROLE_TEMP_FILE_LIMIT_MB,

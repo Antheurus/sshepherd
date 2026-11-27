@@ -1,8 +1,22 @@
 import { randomUUID } from 'node:crypto';
-import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { CONNECT_TIMEOUT_SEC, TUNNEL_OPEN_WAIT_SEC } from './limits.ts';
+import {
+  CONNECT_TIMEOUT_SEC,
+  TUNNEL_OPEN_WAIT_SEC,
+  TUNNEL_SERVER_ALIVE_COUNT_MAX,
+  TUNNEL_SERVER_ALIVE_INTERVAL_SEC,
+  TUNNEL_STDERR_MAX_BYTES,
+} from './limits.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
 import { writeTextSecure } from './setup-file-io.ts';
 import { classify, errorInfo, STRICT_HOST_KEY_ARGS, sshConfigArgs } from './transport.ts';
@@ -115,14 +129,19 @@ export function buildSshArgs(params: OpenTunnelParams, localPort: number | null)
 }
 
 /** Strict host keys; ssh exits when a forward cannot be set up rather than idling without it; a
- *  bounded connect; and `DEBUG1` so its stderr says when the forward itself is up — the line
- *  `awaitForward` waits for, which `VERBOSE` never prints. */
+ *  bounded connect; keepalives, so ssh exits (and `tunnel list` drops it) once a frozen or
+ *  unplugged host stops answering; and `DEBUG1` so its stderr says when the forward itself is up —
+ *  the line `awaitForward` waits for, which `VERBOSE` never prints. */
 const TUNNEL_SSH_ARGS = [
   ...STRICT_HOST_KEY_ARGS,
   '-o',
   'ExitOnForwardFailure=yes',
   '-o',
   `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
+  '-o',
+  `ServerAliveInterval=${TUNNEL_SERVER_ALIVE_INTERVAL_SEC}`,
+  '-o',
+  `ServerAliveCountMax=${TUNNEL_SERVER_ALIVE_COUNT_MAX}`,
   '-o',
   'LogLevel=DEBUG1',
 ];
@@ -202,14 +221,51 @@ export interface RunSupervisorParams {
  *  child) if the timer fires first. */
 export async function runSupervisor(params: RunSupervisorParams): Promise<number> {
   const proc = Bun.spawn([params.command, ...params.args], {
-    stdio: ['ignore', 'ignore', 'inherit'],
+    stdio: ['ignore', 'ignore', 'pipe'],
   });
   const timer = setTimeout(() => {
     proc.kill('SIGKILL');
   }, params.durationSec * 1000);
+  const relayed = relayUntilForwardReady(proc.stderr);
   const exitCode = await proc.exited;
   clearTimeout(timer);
+  await relayed;
   return exitCode;
+}
+
+/** Copies the child's stderr to this process's fd 2 (the tunnel's stderr file) until the
+ *  forward-ready line, then keeps reading so the child never blocks but writes nothing more: DEBUG1
+ *  prints a line per forwarded connection. Before that line, debug lines are dropped and the rest
+ *  is kept up to `TUNNEL_STDERR_MAX_BYTES` — what `awaitForward` classifies a failure from. */
+async function relayUntilForwardReady(stderr: ReadableStream<Uint8Array>): Promise<void> {
+  const decoder = new TextDecoder();
+  let pending = '';
+  let kept = 0;
+  let ready = false;
+  for await (const chunk of stderr) {
+    if (ready) {
+      continue;
+    }
+    pending += decoder.decode(chunk, { stream: true });
+    const lines = pending.split('\n');
+    pending = lines.pop() ?? '';
+    if (pending.length > TUNNEL_STDERR_MAX_BYTES) {
+      pending = '';
+    }
+    for (const line of lines) {
+      if (FORWARD_READY_LINE.test(line)) {
+        writeSync(2, `${line}\n`);
+        ready = true;
+        break;
+      }
+      const text = `${line}\n`;
+      const bytes = Buffer.byteLength(text);
+      if (!line.startsWith('debug') && kept + bytes <= TUNNEL_STDERR_MAX_BYTES) {
+        writeSync(2, text);
+        kept += bytes;
+      }
+    }
+  }
 }
 
 export interface SpawnSupervisorResult {

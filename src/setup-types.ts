@@ -1,4 +1,7 @@
+import { takeSetupAuditFailures } from './audit.ts';
+import { auditUnwritableWarning } from './errors.ts';
 import { scrubLocalOutput } from './scrub.ts';
+import type { EnvelopeWarning } from './types.ts';
 
 /**
  * Dedicated return shape for the `setup` command group — deliberately NOT `Envelope<T>`
@@ -14,6 +17,8 @@ export interface SetupResult<T> {
   ran_at: string;
   data: T | null;
   error: SetupErrorInfo | null;
+  /** Present only when the action's audit line could not be written; the result still stands. */
+  warnings?: EnvelopeWarning[];
 }
 
 /**
@@ -218,7 +223,7 @@ export function buildSetupResult<T>(input: BuildSetupResultInput<T>): SetupResul
       error.did_you_mean = raw.did_you_mean;
     }
   }
-  return {
+  const result: SetupResult<T> = {
     schema_version: 1,
     ok: error === null,
     command: input.command,
@@ -226,6 +231,13 @@ export function buildSetupResult<T>(input: BuildSetupResultInput<T>): SetupResul
     data: input.data ?? null,
     error,
   };
+  const auditFailures = takeSetupAuditFailures();
+  if (auditFailures.length > 0) {
+    result.warnings = auditFailures.map((failure) =>
+      auditUnwritableWarning(failure.role, failure.errno),
+    );
+  }
+  return result;
 }
 
 /**

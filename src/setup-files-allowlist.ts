@@ -1,4 +1,4 @@
-import { auditMutating, confirmGate } from './audit.ts';
+import { auditSetupMutating as auditMutating, confirmGate } from './audit.ts';
 import { defaultFilesAllowlistPath, loadFilesAllowlist } from './registry.ts';
 import {
   appendBlock,

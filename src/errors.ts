@@ -21,7 +21,7 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   HOST_KEY_CHANGED: 'Remote host key does not match the known_hosts entry for this alias',
   HOST_KEY_UNKNOWN: 'known_hosts has no key for this alias and strict host key checking is on',
   HOST_KEY_FINGERPRINT_MISMATCH:
-    'The host presents no key with the fingerprint that was confirmed, and known_hosts holds no other key for it',
+    'The host presents no key with the fingerprint that was confirmed, and known_hosts trusts no key for it yet or already trusts one it presents',
   KNOWN_HOSTS_UNWRITABLE: "The alias's known_hosts file cannot record a trusted key",
   SSH_TRANSPORT_ERROR: 'SSH transport failed before the command could run',
   COMMAND_FAILED: 'Remote command exited with a non-zero status',
@@ -72,7 +72,7 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
     next: `sshepherd hosts trust ${ALIAS_PLACEHOLDER} --dry-run`,
   },
   HOST_KEY_FINGERPRINT_MISMATCH: {
-    hint: 'known_hosts holds no key the host stopped presenting, so this is a fingerprint that does not match rather than a changed key: compare with the fingerprint from the provider console (or ssh-keygen -l on the host itself) and pass the one the host presents.',
+    hint: 'known_hosts trusts no key for this host yet, or already trusts one it presents (a stale key beside it does not change that), so this is a fingerprint that does not match rather than a changed key: compare with the fingerprint from the provider console (or ssh-keygen -l on the host itself) and pass the one the host presents.',
     retryable: false,
     next: `sshepherd hosts trust ${ALIAS_PLACEHOLDER} --dry-run`,
   },

@@ -166,8 +166,8 @@ describe('validateOpenParams', () => {
   });
 });
 
-/** Strict host keys, exit when a forward fails, a bounded connect, and the DEBUG1 stderr line the
- *  open waits for. */
+/** Strict host keys, exit when a forward fails, a bounded connect, keepalives, and the DEBUG1
+ *  stderr line the open waits for. */
 const TUNNEL_ARGS = [
   '-o',
   'StrictHostKeyChecking=yes',
@@ -175,6 +175,10 @@ const TUNNEL_ARGS = [
   'ExitOnForwardFailure=yes',
   '-o',
   'ConnectTimeout=10',
+  '-o',
+  'ServerAliveInterval=10',
+  '-o',
+  'ServerAliveCountMax=3',
   '-o',
   'LogLevel=DEBUG1',
 ];

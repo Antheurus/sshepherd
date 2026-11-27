@@ -191,3 +191,15 @@ export const ENV_BLOCK_MIN_LINES = 3;
  *  bundle of a few dozen certificates and keys stays far under it, and past it every returned line
  *  of that file is masked rather than judged from a partial list. */
 export const MAX_PEM_MARKER_LINES = 256;
+/** `tunnel open`'s ssh asks the server for a reply after this many idle seconds: a frozen or
+ *  unplugged host otherwise stays a listed tunnel until its duration (up to a day) runs out. */
+export const TUNNEL_SERVER_ALIVE_INTERVAL_SEC = 10;
+/** Unanswered keepalives before the tunnel's ssh gives up and exits, so a dead host leaves
+ *  `tunnel list` within 30 s (10 s x 3); three rides out one dropped packet on a lossy link. */
+export const TUNNEL_SERVER_ALIVE_COUNT_MAX = 3;
+/** Bytes of ssh's stderr a tunnel supervisor keeps in its (unlinked) stderr file before the forward
+ *  is up; after the forward-ready line it keeps none. That file exists only for `tunnel open` to
+ *  classify a failure, and DEBUG1 otherwise adds a line per forwarded connection for up to a day.
+ *  4 KiB holds ssh's error lines and a short server banner; debug lines other than the ready line
+ *  are never kept. */
+export const TUNNEL_STDERR_MAX_BYTES = 4_096;

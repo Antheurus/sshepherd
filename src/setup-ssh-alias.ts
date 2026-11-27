@@ -1,7 +1,7 @@
 import { existsSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { auditMutating, confirmGate } from './audit.ts';
+import { auditSetupMutating as auditMutating, confirmGate } from './audit.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
 import {
   appendBlock,
