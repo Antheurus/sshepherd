@@ -154,9 +154,10 @@ function shortOptionIn(item: string, letters: string): boolean {
   return /^-[A-Za-z]/.test(item) && [...item.slice(1)].some((char) => letters.includes(char));
 }
 
-/** A GNU sed script runs a command when it holds the `e` command or an `s///e` flag. Read
+/** A GNU sed script runs a command when it holds the `e` command or an `s///e` flag; with
+ *  `fileCommands` a script that reads or writes a file (`r` `R` `w` `W`, `s///w`) counts too. Read
  *  command by command so a `;` inside an `s` expression is not mistaken for a separator. */
-function sedScriptRunsCode(script: string): boolean {
+function sedScriptRunsCode(script: string, fileCommands = false): boolean {
   let at = 0;
   const skipDelimited = (delimiter: string): void => {
     while (at < script.length && script[at] !== delimiter) {
@@ -181,7 +182,7 @@ function sedScriptRunsCode(script: string): boolean {
       skipDelimited(char === '\\' ? (script[at - 1] ?? '') : '/');
       continue;
     }
-    if (char === 'e') {
+    if (char === 'e' || (fileCommands && 'rRwW'.includes(char))) {
       return true;
     }
     at += 1;
@@ -191,7 +192,7 @@ function sedScriptRunsCode(script: string): boolean {
       skipDelimited(delimiter);
       skipDelimited(delimiter);
       const flags = /^[A-Za-z0-9]*/.exec(script.slice(at))?.[0] ?? '';
-      if (char === 's' && flags.includes('e')) {
+      if (char === 's' && (flags.includes('e') || (fileCommands && flags.includes('w')))) {
         return true;
       }
       at += flags.length;
@@ -218,11 +219,19 @@ function sedRunsCode(rest: readonly string[]): boolean {
   for (let index = 0; index < rest.length; index += 1) {
     const item = rest[index] ?? '';
     const short = /^-[A-Za-z]*?([ef])(.*)$/.exec(item);
-    if (item === '--expression' || item === '--file') {
-      (item === '--file' ? files : scripts).push(rest[index + 1] ?? '');
-      index += 1;
-    } else if (item.startsWith('--expression=') || item.startsWith('--file=')) {
-      (item.startsWith('--file=') ? files : scripts).push(item.slice(item.indexOf('=') + 1));
+    const long = item.startsWith('--') ? (item.slice(2).split('=')[0] ?? '') : '';
+    const longInto =
+      long === ''
+        ? null
+        : 'expression'.startsWith(long)
+          ? scripts
+          : 'file'.startsWith(long)
+            ? files
+            : null;
+    if (longInto !== null) {
+      const eq = item.indexOf('=');
+      longInto.push(eq < 0 ? (rest[index + 1] ?? '') : item.slice(eq + 1));
+      index += eq < 0 ? 1 : 0;
     } else if (short !== null && !item.startsWith('--')) {
       const glued = short[2] ?? '';
       const value = glued.length > 0 ? glued : (rest[index + 1] ?? '');
@@ -323,8 +332,8 @@ interface Wrapper {
 }
 const WRAPPERS: Record<string, Wrapper> = {
   env: {
-    valueShort: 'uCSP',
-    valueLong: ['unset', 'chdir', 'split-string'],
+    valueShort: 'auCSP',
+    valueLong: ['argv0', 'unset', 'chdir', 'split-string'],
     operands: 0,
     assignments: true,
   },
@@ -338,17 +347,7 @@ const WRAPPERS: Record<string, Wrapper> = {
   nohup: { valueShort: '', valueLong: [], operands: 0 },
   xargs: {
     valueShort: 'adEILnPs',
-    valueLong: [
-      'arg-file',
-      'delimiter',
-      'eof',
-      'replace',
-      'max-lines',
-      'max-args',
-      'max-procs',
-      'max-chars',
-      'process-slot-var',
-    ],
+    valueLong: ['arg-file', 'delimiter', 'max-args', 'max-procs', 'max-chars', 'process-slot-var'],
     operands: 0,
   },
   setsid: { valueShort: '', valueLong: [], operands: 0 },
@@ -442,114 +441,606 @@ function wrappedProgram(argv: readonly string[]): { at: number; problem: string 
   }
 }
 
-/** The default-deny list behind which a param may fill an argv slot: programs that read their
- *  arguments as data and never start a program one of them names. `first` constrains the first
- *  item after the program when params follow: `literal` (php's script file, which is the code it
- *  runs) or the subcommands that take only data (`docker exec`, `systemctl link` are not). `find`
- *  and `sed` are here because RUNS_CODE_WITH already refuses their executing forms. */
-const DATA_PROGRAMS: Record<string, { first?: 'literal' | ReadonlySet<string> }> = {
-  cat: {},
-  tac: {},
-  head: {},
-  tail: {},
-  ls: {},
-  du: {},
-  df: {},
-  stat: {},
-  wc: {},
-  grep: {},
-  egrep: {},
-  fgrep: {},
-  zcat: {},
-  md5sum: {},
-  sha1sum: {},
-  sha256sum: {},
-  readlink: {},
-  realpath: {},
-  echo: {},
-  date: {},
-  id: {},
-  hostname: {},
-  uname: {},
-  uptime: {},
-  free: {},
-  ps: {},
-  touch: {},
-  mkdir: {},
-  rmdir: {},
-  rm: {},
-  cp: {},
-  mv: {},
-  ln: {},
-  chmod: {},
-  chown: {},
-  journalctl: {},
-  find: {},
-  sed: {},
-  php: { first: 'literal' },
+/** How a data-only program reads one of its options: `flag` takes no value, `value` takes the
+ *  next item or a glued one, `optional` only a glued one (`sed -i.bak`, `tail --follow=name`), and
+ *  `code` a value the program runs or reads as a script, which a param may never fill. */
+type OptionKind = 'flag' | 'value' | 'optional' | 'code';
+
+interface OptionTable {
+  short: Record<string, OptionKind>;
+  long: Record<string, OptionKind>;
+}
+
+/** One table from its spellings: short letters per kind, long names (without `--`) per kind,
+ *  space-separated. Only these exact spellings pass: no GNU abbreviation, no unknown option. */
+function options(spec: {
+  flags?: string;
+  values?: string;
+  optional?: string;
+  code?: string;
+  long?: string;
+  longValues?: string;
+  longOptional?: string;
+  longCode?: string;
+}): OptionTable {
+  const short: Record<string, OptionKind> = {};
+  const long: Record<string, OptionKind> = {};
+  const shortKinds: [string | undefined, OptionKind][] = [
+    [spec.flags, 'flag'],
+    [spec.values, 'value'],
+    [spec.optional, 'optional'],
+    [spec.code, 'code'],
+  ];
+  for (const [letters, kind] of shortKinds) {
+    for (const letter of letters ?? '') {
+      short[letter] = kind;
+    }
+  }
+  const longKinds: [string | undefined, OptionKind][] = [
+    [spec.long, 'flag'],
+    [spec.longValues, 'value'],
+    [spec.longOptional, 'optional'],
+    [spec.longCode, 'code'],
+  ];
+  for (const [names, kind] of longKinds) {
+    for (const name of (names ?? '').split(' ').filter((word) => word.length > 0)) {
+      long[name] = kind;
+    }
+  }
+  return { short, long };
+}
+
+const GREP_OPTIONS = options({
+  flags: 'EFGPiywxzsvcLloqbHhnTZUarR',
+  values: 'efmABCdD',
+  long: 'extended-regexp fixed-strings basic-regexp perl-regexp ignore-case no-ignore-case word-regexp line-regexp null-data no-messages invert-match count files-without-match files-with-matches only-matching quiet silent byte-offset with-filename no-filename line-number line-buffered initial-tab null binary text recursive dereference-recursive',
+  longValues:
+    'regexp file max-count after-context before-context context label binary-files devices directories exclude exclude-from exclude-dir include',
+  longOptional: 'color colour',
+});
+const SUM_OPTIONS = options({
+  flags: 'bctwz',
+  long: 'binary check tag text zero ignore-missing quiet status strict warn',
+});
+const DOCKER_STOP_OPTIONS = options({ values: 'st', longValues: 'signal time' });
+const NO_OPTIONS = options({});
+const SYSTEMCTL_OPTIONS = options({
+  flags: 'aql',
+  values: 'noptP',
+  long: 'all quiet full no-pager no-legend plain value now no-block no-ask-password system user failed show-types',
+  longValues: 'lines output property type state job-mode',
+});
+
+/** The data-only programs (rule A7): a param may appear in argv only when argv[0] is one of these
+ *  (or `env` with nothing but literal `NAME=value` items before one), each a program that reads
+ *  its arguments as data and never starts a program one of them names. Every literal option is
+ *  checked against the program's table by exact spelling. `subcommands`: the first item after the
+ *  program is one of these, written literally, and the options after it are that subcommand's.
+ *  `find`, `sed` and `php` are read by their own rules in `paramProblem`. `git` is not here: its
+ *  aliases, `-c`, pager and textconv settings, and a repository's own config can run a program. */
+const DATA_PROGRAMS: Record<
+  string,
+  { options: OptionTable; subcommands?: Record<string, OptionTable> }
+> = {
+  cat: {
+    options: options({
+      flags: 'AbeEnstTuv',
+      long: 'show-all number-nonblank show-ends number squeeze-blank show-tabs show-nonprinting',
+    }),
+  },
+  tac: {
+    options: options({ flags: 'br', values: 's', long: 'before regex', longValues: 'separator' }),
+  },
+  head: {
+    options: options({
+      flags: 'qvz',
+      values: 'cn',
+      long: 'quiet silent verbose zero-terminated',
+      longValues: 'bytes lines',
+    }),
+  },
+  tail: {
+    options: options({
+      flags: 'fFqvz',
+      values: 'cns',
+      long: 'retry quiet silent verbose zero-terminated',
+      longValues: 'bytes lines max-unchanged-stats pid sleep-interval',
+      longOptional: 'follow',
+    }),
+  },
+  ls: {
+    options: options({
+      flags: 'aAbBcCdDfFgGhHiklLmnNopqQrRsStuUvxXZ1',
+      values: 'ITw',
+      long: 'all almost-all author escape ignore-backups directory dired file-type full-time group-directories-first no-group human-readable si dereference-command-line dereference-command-line-symlink-to-dir dereference hide-control-chars show-control-chars inode kibibytes literal numeric-uid-gid quote-name recursive reverse size zero context',
+      longValues:
+        'block-size format hide ignore indicator-style quoting-style sort time time-style tabsize width',
+      longOptional: 'classify color hyperlink',
+    }),
+  },
+  du: {
+    options: options({
+      flags: '0abcDHhklLmPSsx',
+      values: 'BdtX',
+      long: 'null all apparent-size bytes total dereference-args human-readable inodes count-links dereference no-dereference separate-dirs si summarize one-file-system',
+      longValues: 'block-size max-depth files0-from threshold time-style exclude-from exclude',
+      longOptional: 'time',
+    }),
+  },
+  df: {
+    options: options({
+      flags: 'ahHiklPT',
+      values: 'Btx',
+      long: 'all human-readable si inodes local no-sync portability sync total print-type',
+      longValues: 'block-size type exclude-type',
+      longOptional: 'output',
+    }),
+  },
+  stat: {
+    options: options({
+      flags: 'Lft',
+      values: 'c',
+      long: 'dereference file-system terse',
+      longValues: 'format printf cached',
+    }),
+  },
+  wc: {
+    options: options({
+      flags: 'cmlLw',
+      long: 'bytes chars lines max-line-length words',
+      longValues: 'files0-from total',
+    }),
+  },
+  grep: { options: GREP_OPTIONS },
+  egrep: { options: GREP_OPTIONS },
+  fgrep: { options: GREP_OPTIONS },
+  zcat: { options: options({ flags: 'flqtv', long: 'force list quiet test verbose' }) },
+  md5sum: { options: SUM_OPTIONS },
+  sha1sum: { options: SUM_OPTIONS },
+  sha256sum: { options: SUM_OPTIONS },
+  readlink: {
+    options: options({
+      flags: 'femnqsvz',
+      long: 'canonicalize canonicalize-existing canonicalize-missing no-newline quiet silent verbose zero',
+    }),
+  },
+  realpath: {
+    options: options({
+      flags: 'eLmPqsz',
+      long: 'canonicalize-existing canonicalize-missing logical physical quiet strip no-symlinks zero',
+      longValues: 'relative-to relative-base',
+    }),
+  },
+  echo: { options: options({ flags: 'neE' }) },
+  date: {
+    options: options({
+      flags: 'Ru',
+      values: 'dfrs',
+      optional: 'I',
+      long: 'rfc-email utc universal debug',
+      longValues: 'date file reference set rfc-3339',
+      longOptional: 'iso-8601',
+    }),
+  },
+  id: { options: options({ flags: 'aZgGnruz', long: 'context group groups name real user zero' }) },
+  hostname: {
+    options: options({
+      flags: 'aAbdfiIsy',
+      values: 'F',
+      long: 'alias all-fqdns boot domain fqdn long ip-address all-ip-addresses short yp nis',
+      longValues: 'file',
+    }),
+  },
+  uname: {
+    options: options({
+      flags: 'asnrvmpio',
+      long: 'all kernel-name nodename kernel-release kernel-version machine processor hardware-platform operating-system',
+    }),
+  },
+  uptime: { options: options({ flags: 'ps', long: 'pretty since' }) },
+  free: {
+    options: options({
+      flags: 'bkmghlwtv',
+      values: 'cs',
+      long: 'bytes kibi mebi gibi tebi pebi kilo mega giga tera peta human lohi wide total committed si',
+      longValues: 'count seconds',
+    }),
+  },
+  ps: {
+    options: options({
+      flags: 'AadeNTrfFljHwMyLcxZ',
+      values: 'CGgpqstuUoOk',
+      long: 'deselect forest headers no-headers cumulative',
+      longValues:
+        'pid ppid sid tty user User group Group format sort cols columns lines width rows',
+    }),
+  },
+  touch: {
+    options: options({
+      flags: 'acfhm',
+      values: 'dtr',
+      long: 'no-create no-dereference',
+      longValues: 'date reference time',
+    }),
+  },
+  mkdir: {
+    options: options({
+      flags: 'pvZ',
+      values: 'm',
+      long: 'parents verbose',
+      longValues: 'mode',
+      longOptional: 'context',
+    }),
+  },
+  rmdir: { options: options({ flags: 'pv', long: 'ignore-fail-on-non-empty parents verbose' }) },
+  rm: {
+    options: options({
+      flags: 'fiIrRdv',
+      long: 'force recursive dir verbose one-file-system no-preserve-root preserve-root',
+      longOptional: 'interactive',
+    }),
+  },
+  cp: {
+    options: options({
+      flags: 'aAbdfiHlLnPprRsTuvxZ',
+      values: 'St',
+      long: 'archive attributes-only copy-contents debug force interactive link dereference no-clobber no-dereference parents recursive remove-destination strip-trailing-slashes symbolic-link no-target-directory keep-directory-symlink verbose one-file-system',
+      longValues: 'suffix target-directory sparse no-preserve',
+      longOptional: 'backup preserve reflink update context',
+    }),
+  },
+  mv: {
+    options: options({
+      flags: 'bfinTuvZ',
+      values: 'St',
+      long: 'force interactive no-clobber no-copy strip-trailing-slashes no-target-directory verbose exchange debug',
+      longValues: 'suffix target-directory',
+      longOptional: 'backup update context',
+    }),
+  },
+  ln: {
+    options: options({
+      flags: 'bdFfinLPrsTv',
+      values: 'St',
+      long: 'directory force interactive logical no-dereference physical relative symbolic no-target-directory verbose',
+      longValues: 'suffix target-directory',
+      longOptional: 'backup',
+    }),
+  },
+  chmod: {
+    options: options({
+      flags: 'cfvR',
+      long: 'changes silent quiet verbose no-preserve-root preserve-root recursive',
+      longValues: 'reference',
+    }),
+  },
+  chown: {
+    options: options({
+      flags: 'cfvhRHLP',
+      long: 'changes silent quiet verbose dereference no-dereference no-preserve-root preserve-root recursive',
+      longValues: 'from reference',
+    }),
+  },
+  journalctl: {
+    options: options({
+      flags: 'aefklmqrxN',
+      values: 'cDFgnopSUtTu',
+      optional: 'b',
+      long: 'all pager-end follow dmesg full merge no-full no-pager no-tail quiet reverse catalog utc system user list-boots show-cursor no-hostname header disk-usage',
+      longValues:
+        'cursor after-cursor cursor-file directory field file grep output output-fields priority since until identifier exclude-identifier unit user-unit facility root namespace',
+      longOptional: 'boot lines case-sensitive',
+    }),
+  },
+  sed: {
+    options: options({
+      flags: 'nErsuzb',
+      values: 'l',
+      optional: 'i',
+      code: 'ef',
+      long: 'quiet silent debug posix regexp-extended separate sandbox unbuffered null-data follow-symlinks binary',
+      longValues: 'line-length',
+      longOptional: 'in-place',
+      longCode: 'expression file',
+    }),
+  },
+  find: { options: NO_OPTIONS },
+  php: { options: NO_OPTIONS },
   docker: {
-    first: new Set([
-      'logs',
-      'inspect',
-      'ps',
-      'stats',
-      'top',
-      'port',
-      'diff',
-      'history',
-      'images',
-      'restart',
-      'start',
-      'stop',
-      'kill',
-      'pause',
-      'unpause',
-      'wait',
-    ]),
+    options: NO_OPTIONS,
+    subcommands: {
+      logs: options({
+        flags: 'ft',
+        values: 'n',
+        long: 'details follow timestamps',
+        longValues: 'since tail until',
+      }),
+      inspect: options({ flags: 's', values: 'f', long: 'size', longValues: 'format type' }),
+      ps: options({
+        flags: 'alqs',
+        values: 'fn',
+        long: 'all latest no-trunc quiet size',
+        longValues: 'filter format last',
+      }),
+      stats: options({ flags: 'a', long: 'all no-stream no-trunc', longValues: 'format' }),
+      top: NO_OPTIONS,
+      port: NO_OPTIONS,
+      diff: NO_OPTIONS,
+      history: options({ flags: 'Hq', long: 'human no-trunc quiet', longValues: 'format' }),
+      images: options({
+        flags: 'aq',
+        values: 'f',
+        long: 'all digests no-trunc quiet',
+        longValues: 'filter format',
+      }),
+      restart: DOCKER_STOP_OPTIONS,
+      start: options({ flags: 'ai', long: 'attach interactive', longValues: 'detach-keys' }),
+      stop: DOCKER_STOP_OPTIONS,
+      kill: options({ values: 's', longValues: 'signal' }),
+      pause: NO_OPTIONS,
+      unpause: NO_OPTIONS,
+      wait: NO_OPTIONS,
+    },
   },
   systemctl: {
-    first: new Set([
-      'status',
-      'show',
-      'cat',
-      'is-active',
-      'is-enabled',
-      'is-failed',
-      'list-units',
-      'list-timers',
-      'start',
-      'stop',
-      'restart',
-      'try-restart',
-      'reload',
-      'reload-or-restart',
-    ]),
+    options: NO_OPTIONS,
+    subcommands: Object.fromEntries(
+      [
+        'status',
+        'show',
+        'cat',
+        'is-active',
+        'is-enabled',
+        'is-failed',
+        'list-units',
+        'list-timers',
+        'start',
+        'stop',
+        'restart',
+        'try-restart',
+        'reload',
+        'reload-or-restart',
+      ].map((verb) => [verb, SYSTEMCTL_OPTIONS]),
+    ),
   },
 };
 
-/** Why a param in `argv` could name a program something runs, or `null`. Params may only follow
- *  the program the wrappers start, never sit inside a wrapper's own arguments, and that program
- *  must be on DATA_PROGRAMS: anything else (`ionice`, `flock`, `unshare`, `docker exec`, a
- *  site's own script) may execute an argument, and no list of such programs is ever complete. */
-function paramProblem(argv: readonly string[], at: number): string | null {
-  const slots = argv.flatMap((item, index) => (SLOT.test(item) ? [index] : []));
-  if (slots.length === 0) {
-    return null;
+/** find's own words, by exact spelling: the leading options, then the tests and actions of its
+ *  expression that take a value (which a param may fill) or none. Everything else, `-exec`,
+ *  `-execdir`, `-ok`, `-okdir`, `-delete`, `-fprint`, `-fprint0`, `-fprintf` and `-fls` among it,
+ *  is refused in a definition with a param. */
+const FIND_LEADING = new Set(['-H', '-L', '-P', '-O0', '-O1', '-O2', '-O3']);
+const FIND_VALUE_WORDS = new Set([
+  '-name',
+  '-iname',
+  '-path',
+  '-ipath',
+  '-wholename',
+  '-iwholename',
+  '-regex',
+  '-iregex',
+  '-regextype',
+  '-lname',
+  '-ilname',
+  '-type',
+  '-xtype',
+  '-size',
+  '-perm',
+  '-user',
+  '-group',
+  '-uid',
+  '-gid',
+  '-links',
+  '-inum',
+  '-samefile',
+  '-newer',
+  '-anewer',
+  '-cnewer',
+  '-atime',
+  '-amin',
+  '-ctime',
+  '-cmin',
+  '-mtime',
+  '-mmin',
+  '-used',
+  '-fstype',
+  '-maxdepth',
+  '-mindepth',
+  '-printf',
+  '-files0-from',
+  ...['a', 'B', 'c', 'm'].flatMap((x) => ['a', 'B', 'c', 'm', 't'].map((y) => `-newer${x}${y}`)),
+]);
+const FIND_FLAG_WORDS = new Set([
+  '-print',
+  '-print0',
+  '-ls',
+  '-prune',
+  '-quit',
+  '-true',
+  '-false',
+  '-empty',
+  '-readable',
+  '-writable',
+  '-executable',
+  '-nouser',
+  '-nogroup',
+  '-xdev',
+  '-mount',
+  '-depth',
+  '-daystart',
+  '-follow',
+  '-noleaf',
+  '-ignore_readdir_race',
+  '-noignore_readdir_race',
+  '-not',
+  '-and',
+  '-or',
+  '-a',
+  '-o',
+  '(',
+  ')',
+  '!',
+  ',',
+]);
+
+/** Reads `items` the way getopt would with `table`: every option checked by exact spelling, the
+ *  value of each value-taking one consumed. Returns the operands and each `code` option's value,
+ *  or why the items are refused (an unknown or abbreviated option, a param filling a `code`
+ *  option). */
+function readOptions(
+  program: string,
+  items: readonly string[],
+  table: OptionTable,
+): { problem: string | null; operands: string[]; code: string[] } {
+  const operands: string[] = [];
+  const code: string[] = [];
+  const refuse = (problem: string) => ({ problem, operands, code });
+  let ended = false;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index] ?? '';
+    if (ended || item === '-' || !item.startsWith('-')) {
+      operands.push(item);
+      continue;
+    }
+    if (item === '--') {
+      ended = true;
+      continue;
+    }
+    let spelled = item;
+    let kind: OptionKind | undefined;
+    let value: string | undefined;
+    if (item.startsWith('--')) {
+      const eq = item.indexOf('=');
+      spelled = eq < 0 ? item : item.slice(0, eq);
+      const name = spelled.slice(2);
+      kind = Object.hasOwn(table.long, name) ? table.long[name] : undefined;
+      if (kind === undefined) {
+        return refuse(
+          `${program} ${spelled} is not an option sshepherd knows by that exact spelling`,
+        );
+      }
+      if (eq >= 0) {
+        if (kind === 'flag') {
+          return refuse(`${program} ${spelled} takes no value`);
+        }
+        value = item.slice(eq + 1);
+      } else if (kind === 'value' || kind === 'code') {
+        value = items[index + 1];
+        index += 1;
+      }
+    } else {
+      for (let at = 1; at < item.length; at += 1) {
+        const letter = item[at] ?? '';
+        spelled = `-${letter}`;
+        kind = Object.hasOwn(table.short, letter) ? table.short[letter] : undefined;
+        if (kind === undefined) {
+          return refuse(`${program} ${spelled} is not an option sshepherd knows for ${program}`);
+        }
+        if (kind === 'flag') {
+          continue;
+        }
+        const glued = item.slice(at + 1);
+        if (glued.length > 0 || kind === 'optional') {
+          value = glued;
+        } else {
+          value = items[index + 1];
+          index += 1;
+        }
+        break;
+      }
+    }
+    if (kind === 'code') {
+      if (value === undefined || SLOT.test(value)) {
+        return refuse(`${program} ${spelled} reads code, and its value is a param or missing`);
+      }
+      code.push(spelled === '-f' || spelled === '--file' ? '' : value);
+    }
   }
-  if (slots[0] !== undefined && slots[0] < at) {
-    return `puts ${argv[slots[0]]} among the arguments of the wrapper ${programName(argv[0] ?? '')}`;
+  return { problem: null, operands, code };
+}
+
+/** find: leading options, start points (a param may be one), then an expression whose every word
+ *  is a known test or action, a param filling only the value of a test that takes one. */
+function findProblem(rest: readonly string[]): string | null {
+  let index = 0;
+  while (index < rest.length && FIND_LEADING.has(rest[index] ?? '')) {
+    index += 1;
+  }
+  while (index < rest.length && !/^[-(!]/.test(rest[index] ?? '')) {
+    index += 1;
+  }
+  for (; index < rest.length; index += 1) {
+    const item = rest[index] ?? '';
+    if (FIND_VALUE_WORDS.has(item)) {
+      index += 1;
+      continue;
+    }
+    if (FIND_FLAG_WORDS.has(item)) {
+      continue;
+    }
+    return SLOT.test(item)
+      ? `puts ${item} in find's expression, where only a start point or a test's value may be a param`
+      : `uses find ${item}, which is not a find test sshepherd knows to read data only`;
+  }
+  return null;
+}
+
+/** Why a param in `argv` could become code, or `null` (rule A7). A param may appear only when
+ *  argv[0] is on DATA_PROGRAMS, with no wrapper before it: anything else (`nice`, `sudo`,
+ *  `timeout`, `xargs`, `ionice`, `flock`, `docker exec`, a site's own script) may start a program
+ *  one of its arguments names, and no list of such programs is ever complete. The one prefix
+ *  allowed is `env` followed only by literal `NAME=value` items: env reads no option then, and
+ *  starts the next item, which must itself be a data-only program. */
+function paramProblem(argv: readonly string[]): string | null {
+  let at = 0;
+  if (programName(argv[0] ?? '') === 'env') {
+    at = 1;
+    while (at < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[at] ?? '')) {
+      at += 1;
+    }
+    const next = argv[at] ?? '';
+    if (next === '' || next.startsWith('-') || SLOT.test(next)) {
+      return `puts ${next === '' ? 'nothing' : next} after env, where a param definition allows only NAME=value items and then a data-only program`;
+    }
   }
   const program = programName(argv[at] ?? '');
   const known = Object.hasOwn(DATA_PROGRAMS, program) ? DATA_PROGRAMS[program] : undefined;
   if (known === undefined) {
-    return `hands a param to ${program}, which is not a program sshepherd knows to take its arguments only as data`;
+    return `hands a param to ${program}, which is not a program sshepherd knows to take its arguments only as data (a param may follow only a data-only program as argv[0])`;
   }
-  const first = argv[at + 1] ?? '';
-  if (known.first === 'literal' && (SLOT.test(first) || first.startsWith('-'))) {
-    return `hands a param to ${program} without a literal script first (${program} runs its first operand)`;
+  const rest = argv.slice(at + 1);
+  if (program === 'find') {
+    return findProblem(rest);
   }
-  if (known.first instanceof Set && !known.first.has(first)) {
-    return `hands a param to ${program} ${first}, which is not one of its data-only subcommands`;
+  if (program === 'php') {
+    const script = rest[0] ?? '';
+    return script === '' || SLOT.test(script) || script.startsWith('-')
+      ? 'hands a param to php without a literal script as its first item (php reads its options before the script and runs the script it is handed)'
+      : null;
+  }
+  let table = known.options;
+  let items = rest;
+  if (known.subcommands !== undefined) {
+    const sub = rest[0] ?? '';
+    const subTable = Object.hasOwn(known.subcommands, sub) ? known.subcommands[sub] : undefined;
+    if (subTable === undefined || SLOT.test(sub)) {
+      return `hands a param to ${program} ${sub}, which is not one of its data-only subcommands (written right after ${program})`;
+    }
+    table = subTable;
+    items = rest.slice(1);
+  }
+  const read = readOptions(program, items, table);
+  if (read.problem !== null) {
+    return read.problem;
+  }
+  if (program === 'sed') {
+    const scripts = read.code.length > 0 ? read.code : read.operands.slice(0, 1);
+    if (read.code.length === 0 && SLOT.test(scripts[0] ?? '')) {
+      return 'hands sed a param as its script (the first operand, with no -e or -f)';
+    }
+    if (scripts.some((script) => sedScriptRunsCode(script, true))) {
+      return 'runs a sed script that executes a command or reads or writes a file (e, r, R, w, W, s///e, s///w)';
+    }
   }
   return null;
 }
@@ -557,7 +1048,8 @@ function paramProblem(argv: readonly string[], at: number): string | null {
 /** Why the def's argv runs code it is handed (a shell, an interpreter, a code-running option, a
  *  wrapper around one, a param a program could run), or `null`. Every literal element is checked,
  *  not only argv[0], so an interpreter behind a wrapper this list does not know (`docker exec app
- *  perl`) is still found. */
+ *  perl`) is still found. A def with a param is then held to rule A7 (`paramProblem`); one with
+ *  none to the wrapper walk. */
 function codeRunner(argv: readonly string[]): string | null {
   for (const [index, item] of argv.entries()) {
     if (SLOT.test(item)) {
@@ -572,8 +1064,10 @@ function codeRunner(argv: readonly string[]): string | null {
       return `runs ${programName(item)} with an option that executes code`;
     }
   }
-  const { at, problem } = wrappedProgram(argv);
-  return problem ?? paramProblem(argv, at);
+  if (argv.some((item) => SLOT.test(item))) {
+    return paramProblem(argv);
+  }
+  return wrappedProgram(argv).problem;
 }
 
 /** Characters a remote shell (or a shell the command itself starts) gives meaning to. Quoting makes

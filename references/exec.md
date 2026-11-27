@@ -67,7 +67,7 @@ type = "container"
 | `mutating` | yes | `true` sends it through `exec change` (`--yes`, profile `deploy`) |
 | `summary` | no | shown by `exec list` |
 | `container` | no | run inside this container; it must be in the alias's `containers = [...]` in `targets.toml` |
-| `allow_shell` | no | `true` lets argv run a shell or interpreter (the list under [Code runners](#code-runners-need-allow_shell)), or hand a param to a program not on the [data-only list](#a-param-follows-only-a-data-only-program); off by default |
+| `allow_shell` | no | `true` lets argv run a shell or interpreter (the list under [Code runners](#code-runners-need-allow_shell)), or take a param where [rule A7](#a-param-follows-only-a-data-only-program-rule-a7) refuses one (a wrapper or unlisted program as argv[0], an option not spelled exactly); off by default |
 | `timeout` | no | this definition's budget in seconds, 1-1800 (default 120); `--timeout <sec>` on the call still overrides it, up to 3600 |
 | `params.<name>` | no | at most 16, at most 7 of them `path`; each one must be used in argv |
 
@@ -105,11 +105,13 @@ as well as `perl -e ...`.
 | | `git` with `-c` or `--exec-path`/`--config-env` before the subcommand, `--upload-pack`/`--receive-pack`, or any `core.*` argument |
 | | `tar` with `--to-command`, `--use-compress-program`, `--checkpoint-action`, `--info-script`, `--new-volume-script`, `--rsh-command`, `--rmt-command` (any unambiguous abbreviation), or `I`/`F` in a short-option cluster (`-I`, `-xIf`, old-style `xIf`) |
 | | `rsync` with `-e`/`--rsh` or `--rsync-path`; `scp` with `-S`, `-o` or `-F` |
-| | GNU `sed` whose script holds the `e` command or an `s///e` flag, or whose script (or `-f` file) is a param |
+| | GNU `sed` whose script holds the `e` command or an `s///e` flag, or whose script (or `-f` file) is a param; `--expression`/`--file` are matched in any abbreviation (`--expr`, `--e`, `--fi`) |
 | | `env -S`/`--split-string` |
 
-Wrappers are followed to the program they start: `env` (options and `NAME=value`), `nice`,
-`timeout` (options, then the duration), `stdbuf`, `nohup`, `xargs`, `setsid`, `sudo` (options and
+In a definition with no param, wrappers are followed to the program they start: `env` (options,
+`-a`/`--argv0` included, and `NAME=value`), `nice`,
+`timeout` (options, then the duration), `stdbuf`, `nohup`, `xargs` (`--eof`, `--replace` and
+`--max-lines` take a value only as `=value`), `setsid`, `sudo` (options and
 `NAME=value`), `doas`, `chroot` (options, then the new root). A wrapper whose program is a param
 (`["env", "{prog}"]`) is refused — the caller would pick the program — and so are the wrappers that
 start a shell themselves: `sudo -s`/`-i`/`--shell`/`--login`, `doas -s`, and `chroot <root>` with
@@ -118,31 +120,61 @@ no program.
 A value is refused (`INVALID_ARGS`) when it names a shell or interpreter from the first two rows,
 unless the definition has `allow_shell = true`.
 
-### A param follows only a data-only program
+### A param follows only a data-only program (rule A7)
 
 The lists above name programs known to run code; no such list is ever complete (`ionice`,
 `taskset`, `chrt`, `flock`, `runuser`, `setpriv`, `unshare`, `nsenter`, `time`, a site's own
-script all start the program they are given). So a param is default-deny: a definition with a
-param, and without `allow_shell = true`, is refused (`VALIDATION_ERROR`, no ssh call) unless
+script all start the program they are given), and a wrapper's own option parsing is one more
+place a value can turn into a program (`xargs --max-lines`, `env -a`, GNU long-option
+abbreviations). So a definition with a param, and without `allow_shell = true`, is refused
+(`VALIDATION_ERROR`, no ssh call) unless all of this holds:
 
-1. every param comes after the program the wrappers above start — never inside a wrapper's own
-   arguments (`sudo -u {user}`, `timeout {secs}`, `xargs -a {file}` are refused; write the value
-   in the definition), and
-2. that program is one that takes its arguments as data and never starts a program one of them
-   names:
+1. **argv[0] is a data-only program** (by basename, version suffix dropped), with no wrapper before
+   it. `nice`, `sudo`, `timeout`, `xargs`, `stdbuf`, `nohup`, `setsid`, `doas`, `chroot`, `ionice`,
+   `flock`, `docker exec` and every program not in the table below need `allow_shell = true` as
+   soon as the definition has a param. The one prefix allowed is `env` followed only by literal
+   `NAME=value` items (`["env", "LC_ALL=C", "grep", "-r", "x", "{dir}"]`): env then reads no option
+   and starts the next item, which must itself be a data-only program. `env -i`, `env -u`, `env -a`
+   and a param after `env` are refused.
+2. **Every literal option is spelled exactly as one the program has.** Each program below has a
+   table of its short letters and full long names; a long option written as an abbreviation
+   (`--expr`, `--fi`, `--show`), an unknown option, or a value glued onto a long option that takes
+   none is refused. A short cluster is read letter by letter (`-sh`, `-ne`), a value-taking letter
+   consuming the rest of the cluster or the next item.
+3. **A param is an operand or the value of a data option, never code.** A value starting with `-`
+   is already refused, so a param is never itself an option. It may fill the value of an option
+   that takes data (`tail -n {n}`, `du --max-depth {d}`, `find -name {pattern}`), never the value of
+   one that reads code or a script: `sed -e`/`--expression`, `sed -f`/`--file`.
 
-| Data-only programs | Constraint when a param follows |
+| Data-only program | Options (exact spellings, `-x` short, `--name` long) and constraints |
 |---|---|
-| `cat` `tac` `head` `tail` `ls` `du` `df` `stat` `wc` `grep` `egrep` `fgrep` `zcat` `md5sum` `sha1sum` `sha256sum` `readlink` `realpath` `echo` `date` `id` `hostname` `uname` `uptime` `free` `ps` `touch` `mkdir` `rmdir` `rm` `cp` `mv` `ln` `chmod` `chown` `journalctl` | none |
-| `find`, `sed` | their code-running forms are refused above (`-exec`, a param or `e` sed script) |
-| `php` | the first item after `php` is a literal script, not an option (`php artisan {cmd}`) |
-| `docker` | the first item is one of `logs` `inspect` `ps` `stats` `top` `port` `diff` `history` `images` `restart` `start` `stop` `kill` `pause` `unpause` `wait` (not `exec`, `run`, `compose`) |
-| `systemctl` | the first item is one of `status` `show` `cat` `is-active` `is-enabled` `is-failed` `list-units` `list-timers` `start` `stop` `restart` `try-restart` `reload` `reload-or-restart` (not `link`, `edit`, `set-environment`) |
+| `cat` | `-AbeEnstTuv`; `--show-all` `--number-nonblank` `--show-ends` `--number` `--squeeze-blank` `--show-tabs` `--show-nonprinting` |
+| `tac` | `-b` `-r` `-s V`; `--before` `--regex` `--separator V` |
+| `head` | `-q` `-v` `-z` `-c V` `-n V`; `--quiet` `--silent` `--verbose` `--zero-terminated` `--bytes V` `--lines V` |
+| `tail` | `-f` `-F` `-q` `-v` `-z` `-c V` `-n V` `-s V`; `--retry` `--quiet` `--silent` `--verbose` `--zero-terminated` `--bytes V` `--lines V` `--max-unchanged-stats V` `--pid V` `--sleep-interval V` `--follow[=V]` |
+| `ls` | `-aAbBcCdDfFgGhHiklLmnNopqQrRsStuUvxXZ1` `-I V` `-T V` `-w V`; the GNU long names (`--all`, `--human-readable`, `--sort V`, `--color[=V]`, ...; see `DATA_PROGRAMS` in `src/ops/exec.ts`) |
+| `du` | `-0abcDHhklLmPSsx` `-B V` `-d V` `-t V` `-X V`; `--null` `--all` `--apparent-size` `--bytes` `--total` `--dereference-args` `--human-readable` `--inodes` `--count-links` `--dereference` `--no-dereference` `--separate-dirs` `--si` `--summarize` `--one-file-system` `--block-size V` `--max-depth V` `--files0-from V` `--threshold V` `--time-style V` `--exclude-from V` `--exclude V` `--time[=V]` |
+| `df` `stat` `wc` `zcat` `md5sum` `sha1sum` `sha256sum` `readlink` `realpath` `id` `hostname` `uname` `uptime` `free` `ps` `touch` `mkdir` `rmdir` `rm` `cp` `mv` `ln` `chmod` `chown` `date` `journalctl` | each its GNU coreutils / procps / systemd options, exact spellings only (the table per program is `DATA_PROGRAMS` in `src/ops/exec.ts`). Left out on purpose: `journalctl --vacuum-*`/`--rotate`/`--flush`/`-M`, mode-style `chmod -w` (write `chmod a-w`) |
+| `grep` `egrep` `fgrep` | `-EFGPiywxzsvcLloqbHhnTZUarR` `-e V` `-f V` `-m V` `-A V` `-B V` `-C V` `-d V` `-D V`, the GNU long names, `--color[=V]`; `-e`/`-f` are data here (a pattern) |
+| `echo` | `-n` `-e` `-E` |
+| `sed` | `-n` `-E` `-r` `-s` `-u` `-z` `-b` `-l V` `-i[SUFFIX]`; `--quiet` `--silent` `--debug` `--posix` `--regexp-extended` `--separate` `--sandbox` `--unbuffered` `--null-data` `--follow-symlinks` `--binary` `--line-length V` `--in-place[=SUFFIX]`; `-e`/`--expression` and `-f`/`--file` read code, so their value must be literal. The script (every `-e`, or the first operand when there is none) must be literal and must not run a command or touch a file: no `e`, `r`, `R`, `w`, `W`, `s///e`, `s///w` |
+| `find` | leading `-H` `-L` `-P` `-O0`..`-O3`; start points (a param may be one); then only these words: tests taking a value (a param may fill it) `-name` `-iname` `-path` `-ipath` `-wholename` `-iwholename` `-regex` `-iregex` `-regextype` `-lname` `-ilname` `-type` `-xtype` `-size` `-perm` `-user` `-group` `-uid` `-gid` `-links` `-inum` `-samefile` `-newer` `-anewer` `-cnewer` `-newerXY` `-atime` `-amin` `-ctime` `-cmin` `-mtime` `-mmin` `-used` `-fstype` `-maxdepth` `-mindepth` `-printf` `-files0-from`, and `-print` `-print0` `-ls` `-prune` `-quit` `-true` `-false` `-empty` `-readable` `-writable` `-executable` `-nouser` `-nogroup` `-xdev` `-mount` `-depth` `-daystart` `-follow` `-noleaf` `-ignore_readdir_race` `-noignore_readdir_race` `-not` `-and` `-or` `-a` `-o` `(` `)` `!` `,`. `-exec` `-execdir` `-ok` `-okdir` `-delete` `-fprint` `-fprint0` `-fprintf` `-fls` and any other word are refused |
+| `php` | argv[1] is a literal script path, not an option and not a param (`php artisan {cmd}`, `php /srv/a.php {x}`); no php option at all (`-d`, `-n`, `-r`, `--`, ...). What follows the script is the script's own arguments |
+| `docker` | argv[1] is one of `logs` `inspect` `ps` `stats` `top` `port` `diff` `history` `images` `restart` `start` `stop` `kill` `pause` `unpause` `wait`, written literally (no global option such as `-H`/`--context` before it); after it only that subcommand's options: `logs` `-f` `-t` `-n V` `--details` `--follow` `--timestamps` `--since V` `--tail V` `--until V`; `inspect` `-s` `-f V` `--size` `--format V` `--type V`; `ps` `-a` `-l` `-q` `-s` `-f V` `-n V` `--all` `--latest` `--no-trunc` `--quiet` `--size` `--filter V` `--format V` `--last V`; `stats` `-a` `--all` `--no-stream` `--no-trunc` `--format V`; `history` `-H` `-q` `--human` `--no-trunc` `--quiet` `--format V`; `images` `-a` `-q` `-f V` `--all` `--digests` `--no-trunc` `--quiet` `--filter V` `--format V`; `restart`/`stop` `-s V` `-t V` `--signal V` `--time V`; `start` `-a` `-i` `--attach` `--interactive` `--detach-keys V`; `kill` `-s V` `--signal V`; `top` `port` `diff` `pause` `unpause` `wait` none |
+| `systemctl` | argv[1] is one of `status` `show` `cat` `is-active` `is-enabled` `is-failed` `list-units` `list-timers` `start` `stop` `restart` `try-restart` `reload` `reload-or-restart`, written literally (so `--user` comes after the verb); then `-a` `-q` `-l` `-n V` `-o V` `-p V` `-t V` `-P V` `--all` `--quiet` `--full` `--no-pager` `--no-legend` `--plain` `--value` `--now` `--no-block` `--no-ask-password` `--system` `--user` `--failed` `--show-types` `--lines V` `--output V` `--property V` `--type V` `--state V` `--job-mode V`. `-H`/`--host` and `-M`/`--machine` are refused |
 
-Every other program with a param needs `allow_shell = true` — `git` included, whose subcommands,
-aliases and `-u`/`--upload-pack` options can run one. A command inside a container is declared
-with `container = "<name>"` and the program itself as `argv[0]`, never as `docker exec <c> ...`.
-A definition with no param is not affected: `["git", "log", "-n", "1"]` runs.
+`git` is not on the list: its aliases, `-c`, pager and textconv settings, and the repository's own
+config can each run a program, so a `git` definition with a param needs `allow_shell = true`.
+A command inside a container is declared with `container = "<name>"` and the program itself as
+`argv[0]`, never as `docker exec <c> ...`. A definition with no param is not affected by this
+rule: `["git", "log", "-n", "1"]` and `["nice", "-n", "10", "du", "-sh", "/srv"]` run.
+
+**Behaviour change (fix I).** Before rule A7 a param could follow a program the wrappers above
+started, and any option of a data-only program passed. Now a definition with a param behind
+`nice`, `sudo`, `timeout`, `xargs`, `stdbuf`, `nohup`, `setsid`, `doas` or `chroot`, with a php
+option before the script, with a docker global option, with `systemctl --user` before the verb, or
+with an abbreviated or unlisted option needs `allow_shell = true` (or the value written into the
+definition). `env NAME=value <data-only program> ...` still runs.
 
 ## What every value passes first
 

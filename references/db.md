@@ -220,6 +220,12 @@ line already read. If a COMMIT or ROLLBACK ran that the splitter never saw, the 
 `COMMAND_FAILED` with `data.committed: null` and a message saying what ran may already be committed
 — never a quiet `committed: false` or `rolled_back`. After a forged one, statements behind it may
 already be committed too.
+Every operator, function and type in sshepherd's own lines (the BEGIN and end markers, the xid
+check, the watchdog's queries) is written with `pg_catalog.` — `OPERATOR(pg_catalog.||)`,
+`pg_catalog.txid_current()`, `::pg_catalog.text` — and `search_path` is set to `pg_catalog` right
+before the end checks, so an operator or function a statement created in another schema and put on
+the path cannot stand in for the catalog's. A `SET search_path` in the file still applies to the
+file's own statements after it.
 
 **The budget ends the backend, not only the ssh session.** Killing the ssh session does not stop a
 psql inside `docker exec`, which would run the rest of a file that outlived its budget and could

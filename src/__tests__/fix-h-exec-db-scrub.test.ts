@@ -161,9 +161,6 @@ describe('fix H', () => {
       ['["cat", "{p}"]', fileParam, '/etc/hostname'],
       ['["du", "-sh", "{p}"]', pathParam, '/srv/app'],
       ['["sed", "-n", "1,5p", "{p}"]', fileParam, '/etc/hostname'],
-      ['["nice", "du", "{p}"]', pathParam, '/srv/app'],
-      ['["nice", "-n", "5", "du", "-sh", "{p}"]', pathParam, '/srv/app'],
-      ['["sudo", "-u", "admins", "du", "-sh", "{p}"]', pathParam, '/srv/app'],
       ['["docker", "restart", "{p}"]', cParam, 'app'],
       ['["systemctl", "status", "{p}"]', unitParam, 'nginx'],
       ['["git", "log", "-n", "1"]', '', ''],
@@ -192,6 +189,9 @@ describe('fix H', () => {
       '["xargs", "-a", "{v}", "du"]',
       '["timeout", "{v}", "du", "/srv"]',
       '["sed", "{v}", "/etc/hostname"]',
+      '["nice", "du", "{v}"]',
+      '["nice", "-n", "5", "du", "-sh", "{v}"]',
+      '["sudo", "-u", "admins", "du", "-sh", "{v}"]',
     ]) {
       writeDefs(`[run-it]\nargv = ${argv}\nmutating = false\n${v}`);
       const { envelope, remotes } = await drive('run-it', ['v=x']);
@@ -262,7 +262,24 @@ describe('fix H', () => {
     const command = buildDbExecCommand(CONN, 5, ['UPDATE t SET n = 1', 'UPDATE t SET n = 2'], true);
     expect(command.split('SET statement_timeout=3000;SET lock_timeout=2000').length - 1).toBe(2);
     expect(command).toContain('SET idle_in_transaction_session_timeout=3000');
-    expect(command).toContain("pg_settings WHERE name = '\\''transaction_timeout'\\''");
+    expect(command).toContain(
+      "pg_settings WHERE name OPERATOR(pg_catalog.=) '\\''transaction_timeout'\\''",
+    );
+  });
+
+  test("AH-2: sshepherd's own lines name every operator and function with pg_catalog, and pin search_path before the end checks", () => {
+    const command = buildDbExecCommand(CONN, 5, ['UPDATE t SET n = 1'], false);
+    const own = command.slice(command.indexOf('__SSHEPHERD_EXEC_BEGIN__'));
+    const tail = command.slice(command.lastIndexOf(`${EXEC_ROWS_MARKER} 1 :ROW_COUNT`));
+    expect(own).not.toMatch(/[^(.]\|\|/);
+    expect(tail).toContain('SET search_path=pg_catalog');
+    expect(tail.indexOf('SET search_path=pg_catalog')).toBeLessThan(
+      tail.indexOf('sshepherd.exec_xid'),
+    );
+    expect(tail).toContain(
+      "SELECT '\\''__SSHEPHERD_EXEC_END__ '\\'' OPERATOR(pg_catalog.||) pg_catalog.txid_current()",
+    );
+    expect(tail).not.toMatch(/[^.]txid_current|[^.]current_setting|::text|::int[^4]/);
   });
 
   test('NEW-4: the relay passes the rows through and exits 0 when the xid at the end is the BEGIN one', async () => {
@@ -300,7 +317,7 @@ describe('fix H', () => {
     await Bun.sleep(1500);
     const sent = readFileSync(log, 'utf8');
     const match =
-      'FROM pg_catalog.pg_stat_activity WHERE pid = 4242 AND extract(epoch FROM backend_start) = 1764300000.5;';
+      'FROM pg_catalog.pg_stat_activity WHERE pid OPERATOR(pg_catalog.=) 4242 AND extract(epoch FROM backend_start) OPERATOR(pg_catalog.=) 1764300000.5;';
     expect(sent).toContain(`SELECT pg_catalog.pg_cancel_backend(pid) ${match}`);
     expect(sent).toContain(`SELECT pg_catalog.pg_terminate_backend(pid) ${match}`);
     expect(sent.indexOf('pg_cancel_backend')).toBeLessThan(sent.indexOf('pg_terminate_backend'));

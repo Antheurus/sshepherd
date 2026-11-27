@@ -1300,6 +1300,10 @@ export const EXEC_BEGIN_MARKER = '__SSHEPHERD_EXEC_BEGIN__';
 /** The line psql prints just before `COMMIT`/`ROLLBACK`: the xid then open. */
 export const EXEC_END_MARKER = '__SSHEPHERD_EXEC_END__';
 
+/** `||` as sshepherd's own lines spell it: a schema-qualified operator, so an `||` the statements
+ *  created in a schema earlier on the `search_path` cannot stand in for the catalog's. */
+const CAT = 'OPERATOR(pg_catalog.||)';
+
 /** The pin before every statement: the parser settings and the two timers that bound a running
  *  or lock-waiting statement, as plain `SET`s (no function a changed `search_path` could shadow),
  *  in milliseconds so no quote is repeated 500 times. A statement that lifts one where the
@@ -1344,26 +1348,27 @@ export function buildDbExecCommand(
     '\\o /dev/null',
     boundedSessionSql(statementTimeoutSec),
     `SET idle_in_transaction_session_timeout=${statementTimeoutSec * 1000}`,
-    `SELECT pg_catalog.set_config(name, '${statementTimeoutSec * 1000}', false) FROM pg_catalog.pg_settings WHERE name = 'transaction_timeout'`,
+    `SELECT pg_catalog.set_config(name, '${statementTimeoutSec * 1000}', false) FROM pg_catalog.pg_settings WHERE name OPERATOR(pg_catalog.=) 'transaction_timeout'`,
     EXEC_SESSION_PIN_SQL,
     'BEGIN',
     '\\o',
-    `SELECT '${EXEC_BEGIN_MARKER} ' || pg_catalog.set_config('sshepherd.exec_xid', pg_catalog.txid_current()::text, true) || ' ' || pid || ' ' || extract(epoch FROM backend_start) FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid()`,
+    `SELECT '${EXEC_BEGIN_MARKER} ' ${CAT} pg_catalog.set_config('sshepherd.exec_xid', pg_catalog.txid_current()::pg_catalog.text, true) ${CAT} ' ' ${CAT} pid ${CAT} ' ' ${CAT} extract(epoch FROM backend_start) FROM pg_catalog.pg_stat_activity WHERE pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()`,
     '\\o /dev/null',
   ];
   statements.forEach((statement, index) => {
     buffers.push(pin, statement, `\\echo ${EXEC_ROWS_MARKER} ${index + 1} :ROW_COUNT`);
   });
   buffers.push(
-    `SELECT CASE WHEN current_setting('sshepherd.exec_xid', true) = txid_current()::text THEN 1 ELSE ('${EXEC_TXN_ENDED_MARKER} ' || txid_current()::text)::int END`,
+    'SET search_path=pg_catalog',
+    `SELECT CASE WHEN pg_catalog.current_setting('sshepherd.exec_xid', true) OPERATOR(pg_catalog.=) pg_catalog.txid_current()::pg_catalog.text THEN 1 ELSE ('${EXEC_TXN_ENDED_MARKER} ' ${CAT} pg_catalog.txid_current()::pg_catalog.text)::pg_catalog.int4 END`,
     '\\o',
-    `SELECT '${EXEC_END_MARKER} ' || pg_catalog.txid_current()`,
+    `SELECT '${EXEC_END_MARKER} ' ${CAT} pg_catalog.txid_current()`,
     commit ? 'COMMIT' : 'ROLLBACK',
     `\\echo ${EXEC_DONE_MARKER} ${commit ? 'committed' : 'rolled_back'}`,
   );
   const signal = buildPsqlCommand(conn);
   const match =
-    'FROM pg_catalog.pg_stat_activity WHERE pid = $p AND extract(epoch FROM backend_start) = $s';
+    'FROM pg_catalog.pg_stat_activity WHERE pid OPERATOR(pg_catalog.=) $p AND extract(epoch FROM backend_start) OPERATOR(pg_catalog.=) $s';
   const watchdog = [
     "trap '' HUP INT TERM PIPE",
     'i=0',
@@ -1374,7 +1379,7 @@ export function buildDbExecCommand(
     '  if [ -n "$p" ]; then',
     `    printf '%s\\n' "SELECT pg_catalog.pg_cancel_backend(pid) ${match};" | ${signal} >/dev/null 2>&1`,
     '    j=0',
-    `    while [ "$j" -lt ${DB_EXEC_CANCEL_GRACE_SEC} ] && [ "$(printf '%s\\n' "SELECT count(*) ${match};" | ${signal} 2>/dev/null)" != 0 ]; do j=$((j + 1)); sleep 1; done`,
+    `    while [ "$j" -lt ${DB_EXEC_CANCEL_GRACE_SEC} ] && [ "$(printf '%s\\n' "SELECT pg_catalog.count(*) ${match};" | ${signal} 2>/dev/null)" != 0 ]; do j=$((j + 1)); sleep 1; done`,
     `    printf '%s\\n' "SELECT pg_catalog.pg_terminate_backend(pid) ${match};" | ${signal} >/dev/null 2>&1`,
     '  fi',
     'fi',
