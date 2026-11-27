@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } f
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { AUDIT_KEEP_FILES, AUDIT_ROTATE_BYTES, MAX_SESSION_ID_CHARS } from './limits.ts';
-import type { AuditPathRole } from './types.ts';
+import type { AuditExtra, AuditPathRole } from './types.ts';
 
 export type AuditOutcome = 'ok' | 'error' | 'refused';
 
@@ -20,6 +20,8 @@ export interface AuditEntryInput {
   errorCode?: string;
   /** Size of the envelope as printed. */
   bytes?: number;
+  /** Op-specific fields (`db exec`: `sql_sha256`, `tables`). */
+  extra?: AuditExtra;
 }
 
 /** The arg names whose values are safe to log: they name a thing, they are not its contents. */
@@ -150,6 +152,8 @@ export function auditMutating(
     remote_exit: input.remoteExit,
     error_code: input.errorCode,
     bytes: input.bytes,
+    sql_sha256: input.extra?.sqlSha256,
+    tables: input.extra?.tables,
     profile: profile !== undefined && PROFILES.has(profile) ? profile : undefined,
     session_id:
       sessionId !== undefined && sessionId.length > 0

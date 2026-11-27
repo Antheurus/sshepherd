@@ -252,3 +252,40 @@ export const DOCTOR_HOSTS_PROBE_TIMEOUT_SEC = CONNECT_TIMEOUT_SEC + 5;
 /** Aliases `doctor hosts` probes in one run: 200 at `DOCTOR_HOSTS_CONCURRENCY` is at most about 6
  *  minutes against unreachable hosts; any beyond it are reported unchecked, never silently dropped. */
 export const DOCTOR_HOSTS_MAX_ALIASES = 200;
+/** `db exec`'s ssh budget when `--timeout` is absent: a governed data change (a backfill, a bulk
+ *  UPDATE) can run minutes; 5 minutes bounds one without holding row locks for an hour, and
+ *  `statement_timeout` follows it less `DB_STATEMENT_GRACE_SEC`. */
+export const DB_EXEC_TIMEOUT_SEC = 300;
+/** `db exec --file` size: every statement travels inside the one remote command line, which Linux
+ *  caps at 128 KiB per argument; 64 KiB of SQL leaves room for the quoting and the psql wrapper. */
+export const DB_EXEC_MAX_SQL_BYTES = 65_536;
+/** Statements one `db exec` file may hold: each is its own psql buffer plus a row-count echo, and
+ *  500 covers any hand-written change file while refusing a generated dump fed in by mistake. */
+export const DB_EXEC_MAX_STATEMENTS = 500;
+/** Table names one `db exec` audit row and envelope carry: enough to say what a change touched,
+ *  never a row that grows with the file. */
+export const DB_EXEC_MAX_TABLES = 100;
+/** Days a `db exec` SQL side file (the scrubbed text its audit row's `sql_sha256` names) is kept
+ *  under the state dir; older files are deleted on the next write (A4: 90 days). */
+export const DB_EXEC_SQL_KEEP_DAYS = 90;
+/** Total bytes of `db exec` SQL side files; past it the oldest go first, the one just written never
+ *  (A4: 200 MB). */
+export const DB_EXEC_SQL_DIR_MAX_BYTES = 200 * 1_024 * 1_024;
+/** `db backup`'s ssh budget: `pg_dump -Fc` of a multi-GB database plus the checksum and the archive
+ *  listing; 30 minutes is about 5 GiB on a slow disk. */
+export const DB_BACKUP_TIMEOUT_SEC = 1_800;
+/** `db backup-verify`'s ssh budget: a restore of the same dump into a throwaway database plus a
+ *  `count(*)` of every table on both sides, which takes about as long as the dump itself. */
+export const DB_BACKUP_VERIFY_TIMEOUT_SEC = 1_800;
+/** Dumps `db backup` keeps per pg-target when neither `--keep` nor `backup_keep` says otherwise: a
+ *  week of daily backups. */
+export const DB_BACKUP_KEEP_DEFAULT = 7;
+/** `--keep` / `backup_keep` ceiling: 100 dumps is three months of dailies; more belongs in real
+ *  backup storage, not the database host's disk. */
+export const DB_BACKUP_KEEP_MAX = 100;
+/** Total bytes of one pg-target's dumps when `backup_max_bytes` is absent: past it the oldest are
+ *  pruned (never the dump just made), so retention cannot fill the database host's disk. */
+export const DB_BACKUP_MAX_BYTES_DEFAULT = 5 * 1_024 * 1_024 * 1_024;
+/** Tables `db backup-verify` counts on each side: 2,000 per-table rows stay inside
+ *  `MAX_STDOUT_BYTES`; a database with more is refused instead of half verified. */
+export const DB_BACKUP_VERIFY_MAX_TABLES = 2_000;

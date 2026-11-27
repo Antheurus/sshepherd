@@ -1,5 +1,15 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.13 — Governed database writes and verified backups
+
+- New `sshepherd db exec <target> --file ./change.sql --dry-run` runs a change file in one transaction, reports how many rows each statement touched, then rolls everything back. Run it again with `--yes` instead of `--dry-run` to commit.
+- `db exec` connects as the target's `write_role`, a new `targets.toml` field, and never as the read-only login. A target without `write_role` is refused with a message naming the field.
+- Statements that change the schema or privileges (`DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `GRANT`, `DO`, ...) are refused with `DDL_REFUSED` unless you add `--allow-ddl`. `BEGIN`/`COMMIT`, psql backslash commands and `SET ROLE` in the file are always refused.
+- Every real `db exec` run is in the audit log with the SQL's sha256 and the table names. The SQL text is kept only in a private file (`sql/<sha256>.sql` in the sshepherd state directory, owner read/write only), for 90 days and 200 MB at most.
+- New `sshepherd db backup <target> --keep 7 --yes` writes a `pg_dump` file on the server and returns its path, size, sha256 and how many tables it holds. It keeps the newest 7 dumps of that target (and at most 5 GiB) and deletes older ones, never any other file.
+- New `sshepherd db backup-verify <target>` restores the newest dump into a temporary database, compares the row count of every table with the live database, and deletes the temporary database again. `verified: true` means the restore had no errors and every count matched.
+- New optional `targets.toml` fields: `write_role`, `backup_dir`, `backup_keep`, `backup_max_bytes` (see `targets.example.toml`).
+
 ## v0.4.0-rc.19 — Add a server in one command
 
 - `sshepherd setup host add <alias> --host <ip> --user <user> --yes` now does the whole onboarding: it registers the alias, creates its key, checks the server's host key, opens the one-time browser form where you type the password, and confirms key login works. The result lists each step it took.

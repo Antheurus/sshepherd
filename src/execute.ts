@@ -1,8 +1,10 @@
+import { dirname } from 'node:path';
 import {
   AUDIT_IDENTIFIER_ARGS,
   type AuditIdentifier,
   type AuditOutcome,
   AuditWriteError,
+  auditLogPath,
   auditMutating,
   confirmGate,
 } from './audit.ts';
@@ -214,6 +216,7 @@ function auditFor(
   envelope: Envelope<unknown>,
 ): void {
   const ran = outcome !== 'refused';
+  const extra = op.auditFields?.(ctx, dirname(deps.auditLogPath ?? auditLogPath()));
   auditMutating(
     {
       alias,
@@ -227,6 +230,7 @@ function auditFor(
         : undefined,
       errorCode: envelope.error?.code,
       bytes: Buffer.byteLength(serializeJson(envelope)),
+      ...(extra === undefined ? {} : { extra }),
     },
     deps.auditLogPath ? { logPath: deps.auditLogPath } : undefined,
   );

@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { DB_BACKUP_KEEP_MAX } from './limits.ts';
 import { isProfile, PROFILES, type Profile } from './profiles.ts';
 import { didYouMean } from './suggest.ts';
 import { parseTomlFile } from './toml-parse.ts';
@@ -51,7 +52,20 @@ export interface PgTarget {
   /** A table with only `alias` and `containers`: it gates `env keys --container` and `services
    *  inspect`'s env, and is no pg-target — a db op naming it is refused. */
   containersOnly?: boolean;
+  /** The login `db exec` and `db backup-verify` connect as — never `user`, the read login; absent
+   *  when the target declares none, which refuses both. */
+  writeRole?: string;
+  /** Directory on the host `db backup` writes dumps into; absent = `DB_BACKUP_DEFAULT_DIR`. */
+  backupDir?: string;
+  /** Dumps kept per target (`backup_keep`, absent = `DB_BACKUP_KEEP_DEFAULT`) and their total size
+   *  cap in bytes (`backup_max_bytes`, absent = `DB_BACKUP_MAX_BYTES_DEFAULT`); db ops apply both. */
+  backupKeep?: number;
+  backupMaxBytes?: number;
 }
+
+/** Where `db backup` writes dumps when the target declares no `backup_dir`: relative to the ssh
+ *  login's home directory, the directory every remote command starts in. */
+export const DB_BACKUP_DEFAULT_DIR = '.sshepherd/backups';
 
 /** The fields a containers-only table holds; any other field makes it a pg-target again. */
 const CONTAINERS_ONLY_FIELDS = new Set(['alias', 'containers']);
@@ -140,6 +154,48 @@ function readContainers(name: string, raw: unknown): string[] {
   return list;
 }
 const PORT_PATTERN = /^[0-9]{1,5}$/;
+const ROLE_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_$]{0,62}$/;
+
+function readWriteRole(name: string, raw: unknown): string | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'string' || !ROLE_NAME_PATTERN.test(raw)) {
+    throw targetsError(
+      `targets.toml: target '${name}' has write_role ${JSON.stringify(raw)}; expected a Postgres role name (letters, digits, _ and $)`,
+    );
+  }
+  return raw;
+}
+
+function readBackupDir(name: string, raw: unknown): string | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'string' || raw.length === 0 || /[\0\r\n]/.test(raw)) {
+    throw targetsError(
+      `targets.toml: target '${name}' has backup_dir ${JSON.stringify(raw)}; expected a directory path on one line`,
+    );
+  }
+  return raw;
+}
+
+function readPositiveInt(
+  name: string,
+  field: string,
+  raw: unknown,
+  max: number,
+): number | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw < 1 || raw > max) {
+    throw targetsError(
+      `targets.toml: target '${name}' has ${field} ${JSON.stringify(raw)}; expected a whole number from 1 to ${max}`,
+    );
+  }
+  return raw;
+}
 
 function readKind(name: string, raw: unknown): PgTargetKind {
   if (raw === undefined) {
@@ -171,6 +227,17 @@ function readTarget(name: string, raw: unknown): PgTarget {
   const maxProfile = readMaxProfile(name, record.max_profile);
   const denyColumns = readDenyColumns(name, record.deny_columns);
   const containers = readContainers(name, record.containers);
+  const writeFields = {
+    writeRole: readWriteRole(name, record.write_role),
+    backupDir: readBackupDir(name, record.backup_dir),
+    backupKeep: readPositiveInt(name, 'backup_keep', record.backup_keep, DB_BACKUP_KEEP_MAX),
+    backupMaxBytes: readPositiveInt(
+      name,
+      'backup_max_bytes',
+      record.backup_max_bytes,
+      Number.MAX_SAFE_INTEGER,
+    ),
+  };
   const base: PgTarget = {
     alias,
     kind,
@@ -187,6 +254,7 @@ function readTarget(name: string, raw: unknown): PgTarget {
     maxProfile,
     denyColumns,
     containers,
+    ...Object.fromEntries(Object.entries(writeFields).filter(([, value]) => value !== undefined)),
   };
 
   if (alias.length === 0) {
@@ -340,6 +408,12 @@ export function buildDbOpContext(
       pg_port: target.pgPort ?? '',
       max_profile: target.maxProfile ?? '',
       deny_columns: JSON.stringify(target.denyColumns),
+      ...(target.writeRole === undefined ? {} : { write_role: target.writeRole }),
+      ...(target.backupDir === undefined ? {} : { backup_dir: target.backupDir }),
+      ...(target.backupKeep === undefined ? {} : { backup_keep: String(target.backupKeep) }),
+      ...(target.backupMaxBytes === undefined
+        ? {}
+        : { backup_max_bytes: String(target.backupMaxBytes) }),
     },
   };
 }

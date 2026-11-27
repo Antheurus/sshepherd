@@ -40,6 +40,15 @@ database = "myapp"
 max_profile = "read"                         # optional: db ops on this target never run above
                                              # SSHEPHERD_PROFILE=read, whatever the caller holds
                                              # (read | deploy | admin; absent = no cap)
+write_role = "myapp_writer"                  # optional: the login db exec and db backup-verify
+                                             # connect as (never `user`); absent = both refused.
+                                             # Grant it only the writes changes need, plus
+                                             # CREATEDB for backup-verify's throwaway database
+backup_dir = "/var/backups/myapp"            # optional: where db backup writes on the host
+                                             # (absent = .sshepherd/backups under the ssh login's home)
+backup_keep = 7                              # optional: dumps of this target kept (1-100, default 7)
+backup_max_bytes = 5368709120                # optional: their total size cap (default 5 GiB);
+                                             # the oldest are pruned first, never the newest
 
 # Plain-container Postgres — `docker exec -i <container> psql ...`
 [staging]

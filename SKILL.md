@@ -157,7 +157,7 @@ Exit codes: `0` success, `1` the op ran and failed (transport/command error, or 
 `CONFIRMATION_REQUIRED`), `2` a usage error (unknown group/action, missing required
 argument — no ssh connection was attempted).
 
-## Quick reference — 15 registry-driven groups (73 ops) + 1 `setup` group (7 sub-groups, 16 actions)
+## Quick reference — 15 registry-driven groups (76 ops) + 1 `setup` group (7 sub-groups, 16 actions)
 
 ```bash
 # hosts
@@ -236,6 +236,10 @@ sshepherd db describe prod users
 sshepherd db count prod users --where-eq org_id=1
 sshepherd db migrations prod
 sshepherd db migrations prod --table schema_migrations --dir /opt/myapp/migrations   # current version + pending
+sshepherd db exec prod --file ./change.sql --dry-run   # writes: one transaction as write_role, per-statement row counts, ROLLBACK
+sshepherd db exec prod --file ./change.sql --yes       # COMMIT; DROP/ALTER/TRUNCATE/CREATE/DO without --allow-ddl -> DDL_REFUSED
+sshepherd db backup prod --keep 7 --yes                # pg_dump -Fc on the host: {path, bytes, sha256, table_data_entries}
+sshepherd db backup-verify prod                        # restore into a throwaway db, COUNT(*) per table both sides, drop it
 
 # deploy
 sshepherd deploy run demo --dry-run

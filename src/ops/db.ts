@@ -1,26 +1,60 @@
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { AuditWriteError } from '../audit.ts';
 import {
   assertNoMultiStatementSql,
   assertSelectOnly,
   assertSelfContainedSql,
+  backupNamePattern,
   boundedSessionSql,
+  buildDbBackupScript,
+  buildDbBackupVerifyScript,
+  buildDbExecCommand,
   buildDbMigrationsCommand,
   buildDbSlowCommand,
   buildPsqlCommand,
+  classifySqlStatement,
   countRowsSql,
   type DbConnection,
   describeTableSql,
+  EXEC_DONE_MARKER,
+  EXEC_ROWS_MARKER,
   limitRows,
   MIGRATION_TABLES,
   MIGRATIONS_DIR_MARKER,
   MIGRATIONS_NO_DIR_MARKER,
   migrationTableRef,
   quoteIdentifier,
+  type SqlStatement,
+  type StatementInfo,
+  splitSqlStatements,
   statementTimeoutFor,
   wrapAsJsonAgg,
   wrapReadOnlyTxn,
 } from '../db.ts';
 import { describeError } from '../errors.ts';
 import {
+  DB_BACKUP_KEEP_DEFAULT,
+  DB_BACKUP_KEEP_MAX,
+  DB_BACKUP_MAX_BYTES_DEFAULT,
+  DB_BACKUP_TIMEOUT_SEC,
+  DB_BACKUP_VERIFY_MAX_TABLES,
+  DB_BACKUP_VERIFY_TIMEOUT_SEC,
+  DB_EXEC_MAX_SQL_BYTES,
+  DB_EXEC_MAX_STATEMENTS,
+  DB_EXEC_MAX_TABLES,
+  DB_EXEC_SQL_DIR_MAX_BYTES,
+  DB_EXEC_SQL_KEEP_DAYS,
+  DB_EXEC_TIMEOUT_SEC,
   DB_LOCK_TIMEOUT_SEC,
   DB_MIGRATIONS_COMPARE_MAX,
   DB_MIGRATIONS_LIMIT,
@@ -30,9 +64,10 @@ import {
   DB_TIMEOUT_SEC,
   MAX_TIMEOUT_SEC,
 } from '../limits.ts';
-import { arg, optStr, optStrOrNull, readRecord, reqStr } from '../op-args.ts';
-import { MASK } from '../scrub.ts';
+import { arg, optBool, optStr, optStrOrNull, readRecord, reqStr } from '../op-args.ts';
+import { MASK, scrubText } from '../scrub.ts';
 import {
+  DB_BACKUP_DEFAULT_DIR,
   DEFAULT_DENY_COLUMNS,
   defaultTargetsPath,
   PG_TARGET_KINDS,
@@ -918,6 +953,517 @@ const dbMigrations: OpSpec<DbMigrationsResult> = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// governed writes and backups: db exec, db backup, db backup-verify
+// ---------------------------------------------------------------------------
+
+/** Connection args of the write ops: the read set plus the write login, masked in errors the same way. */
+const DB_WRITE_ARGS = [...DB_CONNECTION_ARGS, 'write_role'];
+
+function targetName(ctx: OpContext): string {
+  return String(ctx.args.target ?? '');
+}
+
+/** The write ops reach Postgres as a login the target names; a container-env URL carries its own. */
+function refuseUrlTarget(ctx: OpContext, conn: DbConnection, op: string): void {
+  if (conn.kind === 'container-env') {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `${op}: pg-target '${targetName(ctx)}' is kind container-env, whose URL names its own login; ${op} runs only on container and host targets`,
+      {
+        hint: 'Declare a container or host pg-target for the same database with user and write_role.',
+      },
+    );
+  }
+}
+
+/** The connection as the target's `write_role`: declared, and never the read login `user`. */
+function writeConnection(ctx: OpContext, op: string): DbConnection {
+  const conn = dbConnectionFromCtx(ctx);
+  refuseUrlTarget(ctx, conn, op);
+  const role = optStr(ctx, 'write_role', '');
+  if (role.length === 0) {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `${op}: pg-target '${targetName(ctx)}' declares no write_role in targets.toml, and ${op} never connects as the read-only login`,
+      {
+        hint: 'A human adds write_role = "<login>" to that target: a login allowed to write the tables the change touches (and CREATEDB for backup-verify).',
+      },
+    );
+  }
+  if (role === conn.user) {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `${op}: pg-target '${targetName(ctx)}' has write_role equal to user; write_role must be a different login than the read-only one db query uses`,
+      { hint: 'Point write_role at the separate write login in targets.toml.' },
+    );
+  }
+  return { ...conn, user: role };
+}
+
+/** The SQL `--file` held when `buildRemote` read it, kept for the same call's `shape` and audit row
+ *  so all three see the very text that ran, even if the file changes meanwhile. */
+const execSqlByCall = new WeakMap<OpContext, string>();
+
+function readExecSql(ctx: OpContext): string {
+  const cached = execSqlByCall.get(ctx);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const path = reqStr(ctx, 'file');
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch {
+    throw new OpError('VALIDATION_ERROR', `db exec: local file '${path}' not found or unreadable`, {
+      hint: '--file names a LOCAL .sql file, e.g. ./migrations/fix-orders.sql.',
+    });
+  }
+  if (bytes.length > DB_EXEC_MAX_SQL_BYTES) {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `db exec: '${path}' is ${bytes.length} bytes; one call takes at most ${DB_EXEC_MAX_SQL_BYTES}`,
+      { hint: 'Split the change into smaller files and run them one after the other.' },
+    );
+  }
+  const sql = bytes.toString('utf8');
+  if (sql.includes('\0')) {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `db exec: '${path}' contains a NUL byte; it is not a SQL text file`,
+    );
+  }
+  execSqlByCall.set(ctx, sql);
+  return sql;
+}
+
+const sha256Hex = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+function tablesOfStatements(infos: StatementInfo[]): string[] {
+  return [...new Set(infos.flatMap((info) => info.tables))].sort().slice(0, DB_EXEC_MAX_TABLES);
+}
+
+interface ExecPlan {
+  statements: SqlStatement[];
+  infos: StatementInfo[];
+}
+
+/** The file split and classified; a refused statement or (without `--allow-ddl`) a DDL one stops
+ *  the call before anything is sent. */
+function execPlan(ctx: OpContext): ExecPlan {
+  const statements = splitSqlStatements(readExecSql(ctx));
+  if (statements.length === 0) {
+    throw new OpError('VALIDATION_ERROR', 'db exec: the file holds no SQL statement');
+  }
+  if (statements.length > DB_EXEC_MAX_STATEMENTS) {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `db exec: the file holds ${statements.length} statements; one call runs at most ${DB_EXEC_MAX_STATEMENTS}`,
+      { hint: 'Split the change into smaller files.' },
+    );
+  }
+  const infos = statements.map(classifySqlStatement);
+  const refused = infos.findIndex((info) => info.refused !== null);
+  if (refused !== -1) {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `db exec: statement ${refused + 1} (${infos[refused]?.command || 'unknown'}) is refused: ${infos[refused]?.refused}`,
+      { hint: 'Remove that statement; nothing in the file ran.' },
+    );
+  }
+  if (!optBool(ctx, 'allow-ddl', false)) {
+    const ddl = infos.findIndex((info) => info.ddl);
+    if (ddl !== -1) {
+      throw new OpError(
+        'DDL_REFUSED',
+        `db exec: statement ${ddl + 1} (${infos[ddl]?.command}) changes the schema or privileges (or runs opaque code), and --allow-ddl was not given; nothing ran`,
+      );
+    }
+  }
+  return { statements, infos };
+}
+
+/** Writes the scrubbed SQL as `<stateDir>/sql/<sha256>.sql` (0600, dir 0700), then deletes side
+ *  files older than `DB_EXEC_SQL_KEEP_DAYS` and, oldest first, any past `DB_EXEC_SQL_DIR_MAX_BYTES`
+ *  — never the one just written. */
+function writeSqlSideFile(stateDir: string, sha: string, sql: string): void {
+  const dir = join(stateDir, 'sql');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const masked = scrubText(sql, { maskAddresses: true }).value.replace(
+    /(\bPASSWORD\s+)'(?:[^']|'')*'/gi,
+    `$1'${MASK}'`,
+  );
+  const file = join(dir, `${sha}.sql`);
+  writeFileSync(file, masked, { mode: 0o600 });
+  chmodSync(file, 0o600);
+  const oldest = Date.now() - DB_EXEC_SQL_KEEP_DAYS * 86_400_000;
+  const entries = readdirSync(dir)
+    .filter((name) => /^[0-9a-f]{64}\.sql$/.test(name))
+    .map((name) => ({ path: join(dir, name), ...statSync(join(dir, name)) }))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+  let total = 0;
+  for (const entry of entries) {
+    if (entry.path === file) {
+      total += entry.size;
+    } else if (entry.mtimeMs < oldest || total + entry.size > DB_EXEC_SQL_DIR_MAX_BYTES) {
+      rmSync(entry.path, { force: true });
+    } else {
+      total += entry.size;
+    }
+  }
+}
+
+interface DbExecStatement {
+  index: number;
+  command: string;
+  row_count: number | null;
+}
+
+interface DbExecResult {
+  dry_run: boolean;
+  committed: boolean;
+  sql_sha256: string;
+  tables: string[];
+  statements: DbExecStatement[];
+}
+
+/** The `ROW_COUNT` echo of every statement that finished, and how the transaction ended. */
+function parseExecOutput(stdout: string): { rows: Map<number, number>; done: string | null } {
+  const rows = new Map<number, number>();
+  let done: string | null = null;
+  for (const line of stdout.split('\n')) {
+    const parts = line.trim().split(' ');
+    if (parts[0] === EXEC_ROWS_MARKER && parts.length === 3) {
+      rows.set(Number(parts[1]), Number(parts[2]));
+    } else if (parts[0] === EXEC_DONE_MARKER && parts.length === 2) {
+      done = parts[1] ?? null;
+    }
+  }
+  return { rows, done };
+}
+
+const dbExec: OpSpec<DbExecResult> = {
+  group: 'db',
+  name: 'exec',
+  summary:
+    "Governed SQL writes from a local file: one transaction as the target's write_role, per-statement row counts; --dry-run rolls back; DDL needs --allow-ddl.",
+  args: [
+    arg(
+      'target',
+      'positional',
+      true,
+      'pg-target name declared in targets.toml (needs write_role).',
+    ),
+    arg(
+      'file',
+      'flag',
+      true,
+      `Local .sql file, at most ${DB_EXEC_MAX_SQL_BYTES} bytes and ${DB_EXEC_MAX_STATEMENTS} statements; no BEGIN/COMMIT, no psql meta-commands.`,
+    ),
+    arg(
+      'dry-run',
+      'flag',
+      false,
+      'Run every statement, report the row counts, then ROLLBACK (sequences and side effects outside the transaction still happen).',
+    ),
+    arg(
+      'allow-ddl',
+      'flag',
+      false,
+      'Allow CREATE/ALTER/DROP/TRUNCATE/GRANT/REVOKE/DO/CALL and SELECT ... INTO; without it they are DDL_REFUSED.',
+    ),
+    TIMEOUT_ARG,
+  ],
+  mutating: true,
+  exposes: 'metadata',
+  timeoutSec: DB_EXEC_TIMEOUT_SEC,
+  output: { parse: parseExecOutput },
+  errorData: psqlErrorData,
+  refineError: refinePsqlTimeout(DB_EXEC_TIMEOUT_SEC),
+  hiddenArgs: DB_WRITE_ARGS,
+  buildRemote: (ctx) => {
+    const conn = writeConnection(ctx, 'db exec');
+    const { statements } = execPlan(ctx);
+    return buildDbExecCommand(
+      conn,
+      boundedSql(ctx, DB_EXEC_TIMEOUT_SEC),
+      statements.map((statement) => statement.text),
+      !optBool(ctx, 'dry-run', false),
+    );
+  },
+  shapeError: (raw) => ({ committed: false, statements_ok: parseExecOutput(raw.stdout).rows.size }),
+  shape: (parsed, ctx) => {
+    const { rows, done } = parsed as ReturnType<typeof parseExecOutput>;
+    if (done === null) {
+      throw new OpError(
+        'PARSE_ERROR',
+        'db exec: psql exited 0 but never reported the end of the transaction',
+      );
+    }
+    const { infos } = execPlan(ctx);
+    return {
+      dry_run: optBool(ctx, 'dry-run', false),
+      committed: done === 'committed',
+      sql_sha256: sha256Hex(readExecSql(ctx)),
+      tables: tablesOfStatements(infos),
+      statements: infos.map((info, index) => ({
+        index: index + 1,
+        command: info.command,
+        row_count: rows.get(index + 1) ?? null,
+      })),
+    };
+  },
+  auditFields: (ctx, stateDir) => {
+    let sql: string;
+    try {
+      sql = readExecSql(ctx);
+    } catch {
+      return undefined;
+    }
+    let tables: string[];
+    try {
+      tables = tablesOfStatements(splitSqlStatements(sql).map(classifySqlStatement));
+    } catch {
+      tables = [];
+    }
+    const sha = sha256Hex(sql);
+    try {
+      writeSqlSideFile(stateDir, sha, sql);
+    } catch (err) {
+      const code = err instanceof Error && 'code' in err ? err.code : undefined;
+      throw new AuditWriteError('state_dir', typeof code === 'string' ? code : undefined);
+    }
+    return { sqlSha256: sha, tables };
+  },
+};
+
+/** This target's dump directory and the file-name prefix its dumps share. */
+function backupLocation(ctx: OpContext): { dir: string; prefix: string } {
+  const safe = targetName(ctx).replace(/[^A-Za-z0-9_-]/g, '_');
+  return { dir: optStr(ctx, 'backup_dir', DB_BACKUP_DEFAULT_DIR), prefix: `sshepherd-${safe}-` };
+}
+
+function wholeNumber(raw: unknown): number {
+  return typeof raw === 'string' && /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+}
+
+/** `--keep`, else the target's `backup_keep`; 1 to `DB_BACKUP_KEEP_MAX`. */
+function keepCount(ctx: OpContext): number {
+  const flag = ctx.args.keep;
+  const value = wholeNumber(flag ?? ctx.args.backup_keep ?? String(DB_BACKUP_KEEP_DEFAULT));
+  if (!Number.isInteger(value) || value < 1 || value > DB_BACKUP_KEEP_MAX) {
+    throw new OpError(
+      'INVALID_ARGS',
+      `--keep must be a whole number of dumps from 1 to ${DB_BACKUP_KEEP_MAX}, got ${JSON.stringify(flag)}`,
+    );
+  }
+  return value;
+}
+
+/** Marker lines `KEY rest` of the backup scripts, the last value per key and every `__PRUNED__`. */
+function parseMarkerLines(stdout: string): { values: Map<string, string>; pruned: string[] } {
+  const values = new Map<string, string>();
+  const pruned: string[] = [];
+  for (const line of stdout.split('\n')) {
+    const match = /^(__[A-Z_]+__)(?: (.*))?$/.exec(line.trimEnd());
+    if (match === null) {
+      continue;
+    }
+    const [, key = '', rest = ''] = match;
+    if (key === '__PRUNED__') {
+      pruned.push(rest);
+    } else {
+      values.set(key, rest);
+    }
+  }
+  return { values, pruned };
+}
+
+interface DbBackupResult {
+  path: string;
+  name: string;
+  bytes: number;
+  sha256: string;
+  table_data_entries: number;
+  kept: number;
+  kept_bytes: number;
+  pruned: string[];
+}
+
+const dbBackup: OpSpec<DbBackupResult> = {
+  group: 'db',
+  name: 'backup',
+  summary:
+    "pg_dump -Fc into the target's backup directory on the host; returns path, bytes, sha256 and TABLE DATA entries, then prunes this target's oldest dumps past --keep / backup_max_bytes.",
+  args: [
+    arg('target', 'positional', true, 'pg-target name declared in targets.toml.'),
+    arg(
+      'keep',
+      'flag',
+      false,
+      `Dumps of this target to keep, 1-${DB_BACKUP_KEEP_MAX} (default backup_keep, else 7); older ones in the directory are deleted.`,
+    ),
+  ],
+  mutating: true,
+  exposes: 'metadata',
+  timeoutSec: DB_BACKUP_TIMEOUT_SEC,
+  output: { parse: parseMarkerLines },
+  hiddenArgs: DB_WRITE_ARGS,
+  buildRemote: (ctx) => {
+    const conn = dbConnectionFromCtx(ctx);
+    refuseUrlTarget(ctx, conn, 'db backup');
+    const { dir, prefix } = backupLocation(ctx);
+    const stamp = new Date()
+      .toISOString()
+      .replace(/[-:]/g, '')
+      .replace(/\.\d+Z$/, 'Z');
+    return buildDbBackupScript(conn, {
+      dir,
+      prefix,
+      name: `${prefix}${stamp}.dump`,
+      keep: keepCount(ctx),
+      maxBytes: wholeNumber(ctx.args.backup_max_bytes ?? String(DB_BACKUP_MAX_BYTES_DEFAULT)),
+    });
+  },
+  shape: (parsed, ctx) => {
+    const { values, pruned } = parsed as ReturnType<typeof parseMarkerLines>;
+    const fields = (values.get('__BACKUP__') ?? '').split(' ');
+    if (fields.length !== 6) {
+      throw new OpError('PARSE_ERROR', 'db backup: the host never reported the finished dump');
+    }
+    const [name = '', bytes, sha256 = '', entries, kept, keptBytes] = fields;
+    return {
+      path: `${backupLocation(ctx).dir}/${name}`,
+      name,
+      bytes: Number(bytes),
+      sha256,
+      table_data_entries: Number(entries),
+      kept: Number(kept),
+      kept_bytes: Number(keptBytes),
+      pruned,
+    };
+  },
+};
+
+interface DbTableCountPair {
+  table: string;
+  source: number | null;
+  restored: number | null;
+}
+
+interface DbBackupVerifyResult {
+  dump: string;
+  verified: boolean;
+  restore_errors: number;
+  tables_compared: number;
+  mismatched: string[];
+  throwaway_dropped: boolean;
+  tables: DbTableCountPair[];
+}
+
+function readCounts(raw: string | undefined, side: string): Map<string, number> {
+  const list = parseJsonArray(JSON.parse(raw === undefined || raw.length === 0 ? 'null' : raw));
+  if (list.length > DB_BACKUP_VERIFY_MAX_TABLES) {
+    throw new OpError(
+      'OUTPUT_TOO_LARGE',
+      `db backup-verify: the ${side} has more than ${DB_BACKUP_VERIFY_MAX_TABLES} tables, so it cannot be verified table by table`,
+    );
+  }
+  const counts = new Map<string, number>();
+  for (const item of list) {
+    const record = readRecord(item);
+    if (typeof record.table === 'string' && typeof record.count === 'number') {
+      counts.set(record.table, record.count);
+    }
+  }
+  return counts;
+}
+
+const dbBackupVerify: OpSpec<DbBackupVerifyResult> = {
+  group: 'db',
+  name: 'backup-verify',
+  summary:
+    "Restores a dump (default: this target's newest) into a throwaway database as write_role, compares every table's COUNT(*) with the source, then drops it.",
+  args: [
+    arg(
+      'target',
+      'positional',
+      true,
+      'pg-target name declared in targets.toml (needs write_role with CREATEDB).',
+    ),
+    arg(
+      'dump',
+      'flag',
+      false,
+      'Dump file name from db backup (default: the newest one of this target).',
+    ),
+    TIMEOUT_ARG,
+  ],
+  mutating: false,
+  exposes: 'metadata',
+  timeoutSec: DB_BACKUP_VERIFY_TIMEOUT_SEC,
+  output: { parse: parseMarkerLines },
+  errorData: psqlErrorData,
+  refineError: refinePsqlTimeout(DB_BACKUP_VERIFY_TIMEOUT_SEC),
+  hiddenArgs: DB_WRITE_ARGS,
+  buildRemote: (ctx) => {
+    const conn = dbConnectionFromCtx(ctx);
+    const writer = writeConnection(ctx, 'db backup-verify');
+    const { dir, prefix } = backupLocation(ctx);
+    const dump = optStrOrNull(ctx, 'dump');
+    if (dump !== null && !new RegExp(backupNamePattern(prefix)).test(dump)) {
+      throw new OpError(
+        'INVALID_ARGS',
+        `--dump must be a dump name db backup wrote for this target (${prefix}<YYYYMMDDTHHMMSSZ>.dump), got ${JSON.stringify(dump)}`,
+      );
+    }
+    return buildDbBackupVerifyScript(conn, {
+      dir,
+      prefix,
+      dump,
+      throwaway: `sshepherd_verify_${randomBytes(8).toString('hex')}`,
+      writeRole: writer.user,
+      sessionSql: boundedSql(ctx, DB_BACKUP_VERIFY_TIMEOUT_SEC),
+      maxTables: DB_BACKUP_VERIFY_MAX_TABLES,
+    });
+  },
+  shape: (parsed, ctx) => {
+    const { values } = parsed as ReturnType<typeof parseMarkerLines>;
+    if (values.has('__NO_DUMP__')) {
+      throw new OpError(
+        'VALIDATION_ERROR',
+        `db backup-verify: no dump of pg-target '${targetName(ctx)}' in its backup directory${optStrOrNull(ctx, 'dump') === null ? '' : ' under that name'}`,
+        { next: `sshepherd db backup ${targetName(ctx)} --yes` },
+      );
+    }
+    if (!values.has('__LEFTOVER__')) {
+      throw new OpError('PARSE_ERROR', 'db backup-verify: the host never reported the comparison');
+    }
+    const source = readCounts(values.get('__SOURCE__'), 'source database');
+    const restored = readCounts(values.get('__RESTORED__'), 'restored copy');
+    const names = [...new Set([...source.keys(), ...restored.keys()])].sort();
+    const tables = names.map((table) => ({
+      table,
+      source: source.get(table) ?? null,
+      restored: restored.get(table) ?? null,
+    }));
+    const mismatched = tables
+      .filter((pair) => pair.source !== pair.restored)
+      .map((pair) => pair.table);
+    const restoreErrors = Number(values.get('__RESTORE_ERRORS__') ?? 'NaN');
+    return {
+      dump: values.get('__DUMP__') ?? '',
+      verified: restoreErrors === 0 && mismatched.length === 0,
+      restore_errors: restoreErrors,
+      tables_compared: tables.length,
+      mismatched,
+      throwaway_dropped: values.get('__LEFTOVER__') === '0',
+      tables,
+    };
+  },
+};
+
 export const dbOps = [
   dbList,
   dbTables,
@@ -929,4 +1475,7 @@ export const dbOps = [
   dbDescribe,
   dbCount,
   dbMigrations,
+  dbExec,
+  dbBackup,
+  dbBackupVerify,
 ] as OpSpec[];
