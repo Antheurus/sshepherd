@@ -133,7 +133,7 @@ describe('remote tools that support it get `--` before the positional', () => {
     ['services', 'restart', { container: 'web' }, "'--' 'web'"],
     ['services', 'systemctl-restart', { unit: 'nginx.service' }, "'--' 'nginx.service'"],
     ['files', 'ls', { path: '/srv/app' }, "'--' '/srv/app'"],
-    ['files', 'tail', { path: '/srv/app/log' }, "'--' '/srv/app/log'"],
+    ['files', 'tail', { path: '/srv/app/log' }, '-- "$p"'],
     ['files', 'disk-usage', { path: '/srv/app' }, "'\\''--'\\'' '\\''/srv/app'\\''"],
   ];
   for (const [group, name, args, expected] of CASES) {

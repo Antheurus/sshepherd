@@ -322,3 +322,9 @@ export const DB_BACKUP_MAX_BYTES_DEFAULT = 5 * 1_024 * 1_024 * 1_024;
 /** Tables `db backup-verify` counts on each side: 2,000 per-table rows stay inside
  *  `MAX_STDOUT_BYTES`; a database with more is refused instead of half verified. */
 export const DB_BACKUP_VERIFY_MAX_TABLES = 2_000;
+
+/** Private-key line ranges the host's PEM membership pass reports for one file (`files head|tail|
+ *  grep`, `files cat --lines`): one range per key block, so a bundle of a few dozen keys stays far
+ *  under it while the answer stays under 6 KiB (`start-end ` each); past it every returned line of
+ *  that file is masked rather than judged from a partial list. */
+export const MAX_PEM_SECRET_RANGES = 256;
