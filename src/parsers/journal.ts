@@ -24,6 +24,14 @@ function readString(record: Record<string, unknown>, key: string): string | null
   return typeof value === 'string' ? value : null;
 }
 
+/** journald's own microsecond precision, kept: a millisecond `ts` plus the 1 ns `next_since` step
+ *  would re-read every entry later in that same millisecond. */
+function microsIso(micros: number): string {
+  const seconds = Math.floor(micros / 1_000_000);
+  const fraction = String(micros - seconds * 1_000_000).padStart(6, '0');
+  return `${new Date(seconds * 1_000).toISOString().slice(0, 19)}.${fraction}Z`;
+}
+
 export function shapeJournalEntry(entry: unknown): LogLine | null {
   if (typeof entry !== 'object' || entry === null) {
     return null;
@@ -38,9 +46,7 @@ export function shapeJournalEntry(entry: unknown): LogLine | null {
   }
 
   const micros = Number.parseInt(realtimeMicros, 10);
-  const ts = Number.isNaN(micros)
-    ? new Date(0).toISOString()
-    : new Date(micros / 1000).toISOString();
+  const ts = Number.isNaN(micros) ? new Date(0).toISOString() : microsIso(micros);
   const priorityNum = priority !== null ? Number.parseInt(priority, 10) : Number.NaN;
   const stream: LogLine['stream'] =
     !Number.isNaN(priorityNum) && priorityNum <= STDERR_PRIORITY_THRESHOLD ? 'stderr' : 'stdout';

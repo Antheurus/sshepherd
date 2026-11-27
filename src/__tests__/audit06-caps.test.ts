@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as limits from '../limits.ts';
 import { selectFields } from '../output.ts';
+import { nextSinceAfter } from '../parsers/logs-shape.ts';
 import { executeOp, getOp } from '../registry.ts';
 import { buildSetupResult } from '../setup-types.ts';
 import type { SpawnOutcome, SshRunner } from '../transport.ts';
@@ -115,7 +116,7 @@ describe('audit06 PHASE-06 F2 — a capped log keeps the newest lines and stays 
     expect({
       lastReturnedTs: data.lines.at(-1)?.ts,
       linesReturnedMatches: data.lines_returned === data.lines.length,
-      nextSinceIsLastReturned: data.next_since === data.lines.at(-1)?.ts,
+      nextSinceIsLastReturned: data.next_since === nextSinceAfter(data.lines.at(-1)?.ts),
     }).toEqual({
       lastReturnedTs: newestTs,
       linesReturnedMatches: true,

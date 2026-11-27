@@ -65,31 +65,61 @@ text, not line-shaped) — check the op's own summary via `--help` before assumi
 
 ```ts
 interface LogsResult {
-  source: string;             // e.g. "docker:myapp", "service:nginx"
+  source: string;             // e.g. "docker:myapp", "compose:/opt/app", "service:nginx"
   lines_returned: number;
-  truncated: boolean;         // true when the line count hit the requested tail limit
-  lines: Array<{ ts: string | null; stream: 'stdout' | 'stderr'; text: string }>;
-  next_since: string | null;  // the last line's ts — pass as the next call's --since
+  truncated: boolean;         // more lines exist in the window than this page returned
+  kept: 'oldest' | 'newest';  // which end of the window the page holds (see paging)
+  lines: Array<{
+    ts: string | null;
+    stream: 'stdout' | 'stderr';
+    text: string;
+    service?: string;         // `logs compose` only: the compose service that wrote the line
+  }>;
+  next_since: string | null;  // exclusive cursor: the last line's instant + 1 ns
 }
 ```
 
-`ts` is `null` when the source has no reliable per-line timestamp (e.g. an nginx access
-log line). `stream` is a real field for docker (`--timestamps` output distinguishes
-stdout/stderr natively) and a documented heuristic for journald sources — journald has no
-first-class stdout/stderr field for arbitrary units, so `shapeJournalEntry`
+`ts` is `null` when the source has no reliable per-line timestamp (an nginx log line).
+`docker logs` and `docker compose logs` fold stdout and stderr into one stream (`2>&1`, so a
+line a service wrote to stderr is never lost) and print no per-line tag, so their `stream` is
+always `stdout`. For journald sources `stream` is a heuristic: `shapeJournalEntry`
 (`parsers/journal.ts`) maps syslog `PRIORITY <= 3` (err/crit/alert/emerg) to `stderr` and
-everything else to `stdout`. `truncated: true` means more lines may exist beyond the
-requested `--tail`/`-n` limit — page forward with `next_since` as the next call's
-`--since`, don't assume you've seen everything.
+everything else to `stdout`. Journald `ts` keeps journald's microseconds.
 
-## Verdict fields — `dead_end_risk`
+**Paging.** `next_since` is exclusive: passing it as the next call's `--since` never returns
+the same line again (it is the last line's timestamp plus one nanosecond; journalctl gets it as
+`@<epoch>.<microseconds>`). It is `null` when the page returned no line — nothing new yet; keep
+the `--since` you had.
 
-`check overview`/`check mem`/`check disk` each compute a `dead_end_risk: boolean` —
-`computeDeadEndRisk` (`parsers/verdict.ts`, the one shared implementation, never
-duplicated per-op) is `true` when either:
+- **With `--since`** the page holds the **oldest** lines of the window (`kept: "oldest"`): it
+  starts at `--since`, and `truncated: true` means a next page exists. Page forward with
+  `--since <next_since>` until `truncated` is `false`; every line comes back exactly once, in
+  order. `--max-lines` sizes the page, and `--limit`/`--max-bytes` cutting it still keep its
+  oldest lines. When a page boundary falls inside one instant, the lines of that instant move to
+  the next page and `next_since` is that instant itself. `--tail` cannot be combined with
+  `--since` (`INVALID_ARGS`).
+- **Without `--since`** the page holds the **newest** lines (`kept: "newest"`, as a tail does),
+  and `truncated: true` means older lines were not returned; `next_since` is for following new
+  lines from here, not for reaching the older ones. `--until` alone returns the newest lines at
+  or before it.
 
-- any filesystem's `use_percent` exceeds **90%**, or
-- PSI memory pressure's `some avg10` exceeds **10%**.
+A `--grep` on journald matches the entry's `MESSAGE` only, never its metadata fields; on docker,
+compose and nginx it matches the raw line (for docker that includes the timestamp prefix).
+
+## Verdict fields — `dead_end_risk`, `degraded`, `risk_signals`
+
+`check overview`/`check mem`/`check disk` each carry:
+
+- `degraded: string[]` — the sections whose command failed or printed nothing usable
+  (`nproc`, `mem`, `disk`, `uptime`, `inodes`, `top_du`). A degraded section's own reading is
+  `null` (`mem: null`, `nproc: null`), never a zero.
+- `risk_signals: string[]` — the readings past their threshold: `disk` (any filesystem's
+  `use_percent` above **90%**) and `mem_pressure` (PSI memory `some avg10` above **10%**).
+- `dead_end_risk: boolean | null` — `computeDeadEndRisk` (`parsers/verdict.ts`, the one shared
+  implementation): `true` when a reading that came back is at risk, whatever else degraded (a
+  full disk stays a dead end when memory cannot be read); `null` when nothing known is at risk
+  and a section the verdict reads (`disk`, `mem`) degraded — unknown, never an all-clear;
+  otherwise `false`. A degraded `nproc`/`uptime`/`inodes`/`top_du` cannot change it.
 
 Both thresholds are named constants (`DISK_USE_PERCENT_RISK_THRESHOLD`,
 `PSI_MEM_SOME_AVG10_RISK_THRESHOLD`) in that one file — this is the field to check first

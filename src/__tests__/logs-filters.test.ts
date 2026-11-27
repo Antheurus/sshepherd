@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import {
   chmodSync,
   existsSync,
@@ -192,14 +192,14 @@ describe('logs --max-lines, --since, --until and the stream merge', () => {
     expect(result.err).toBe('');
   });
 
-  test('--since and --until become docker flags, each its own argv slot', () => {
+  test('--since and --until become docker flags, each its own argv slot, with no --tail applied before them', () => {
     const remote = remoteOf('logs', 'docker', {
       container: 'web',
       since: '60m',
       until: '2026-11-27T10:00:01',
     });
     expect(runLocal(remote, [bin]).log.trim()).toBe(
-      'logs --timestamps --tail 200 --since 60m --until 2026-11-27T10:00:01 web',
+      'logs --timestamps --since 60m --until 2026-11-27T10:00:01 web',
     );
   });
 
@@ -326,6 +326,17 @@ describe('heavy ops run niced', () => {
 });
 
 describe('logs compose', () => {
+  // project_dir is a files-allowlist path: this block declares /srv/app for alias web.
+  const allowlistBefore = process.env.SSHEPHERD_FILES_ALLOWLIST_PATH;
+  beforeAll(() => {
+    const path = join(work, 'files-allowlist.toml');
+    writeFileSync(path, '[web]\npaths = ["/srv/app"]\n');
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = path;
+  });
+  afterAll(() => {
+    process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = allowlistBefore;
+  });
+
   const stream = [
     'web-1  | 2026-11-27T10:00:02.000000000Z second from web',
     'db-1   | 2026-11-27T10:00:01.000000000Z first from db',
@@ -362,7 +373,7 @@ describe('logs compose', () => {
       'web-1:second from web',
       'db-1:third from db',
     ]);
-    expect(data.next_since).toBe('2026-11-27T10:00:03.000000000Z');
+    expect(data.next_since).toBe('2026-11-27T10:00:03.000000001Z');
   });
 
   test('--max-lines keeps the newest lines across services', async () => {

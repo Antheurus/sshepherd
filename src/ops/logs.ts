@@ -1,9 +1,11 @@
 import { MAX_TAIL_LINES } from '../limits.ts';
 import {
-  grepCommand,
+  filteredCommand,
   journalCommand,
   type LogQuery,
   lineLimit,
+  logPipelineCommand,
+  PAGE_FULL_MARKER,
   plainCommand,
   readLogQuery,
 } from '../log-command.ts';
@@ -12,7 +14,7 @@ import { parseComposeLogLines } from '../parsers/compose-log.ts';
 import { parseDockerLogLines } from '../parsers/docker-log.ts';
 import { type LogLine, parseJournalLines, shapeJournalEntry } from '../parsers/journal.ts';
 import { buildLogsResult, capLines, type LogsResult, recountLines } from '../parsers/logs-shape.ts';
-import { maskPemLines } from '../scrub.ts';
+import { maskPemBodyChunks, maskPemLines } from '../scrub.ts';
 import { didYouMeanOrAll } from '../suggest.ts';
 import { type OpContext, OpError, type OpSpec, Premasked, type RawResult } from '../types.ts';
 
@@ -21,10 +23,11 @@ import { type OpContext, OpError, type OpSpec, Premasked, type RawResult } from 
 // ---------------------------------------------------------------------------
 
 /** Every log op splits output per line or journald entry, so no single string holds a whole PEM
- *  block for `scrubText` to see: the line-array pass masks its body first. `masked` counts the
- *  lines it changed, for the envelope's `scrubbed`. */
+ *  block for `scrubText` to see: the line-array pass masks its body first. A window or `--grep` can
+ *  keep body lines and drop both markers, so a bare full-width body chunk is masked as well
+ *  (`maskPemBodyChunks`). `masked` counts the lines it changed, for the envelope's `scrubbed`. */
 function maskPemLogLines<T extends LogLine>(lines: T[]): { lines: T[]; masked: number } {
-  const texts = maskPemLines(lines.map((line) => line.text));
+  const texts = maskPemBodyChunks(maskPemLines(lines.map((line) => line.text)));
   let masked = 0;
   const out = lines.map((line, index) => {
     const text = texts[index] ?? line.text;
@@ -36,16 +39,37 @@ function maskPemLogLines<T extends LogLine>(lines: T[]): { lines: T[]; masked: n
   return { lines: out, masked };
 }
 
-/** What every `logs *` op shares past its own parsing: the PEM pass, the result shape, and the
- *  count of what the PEM pass masked. */
-function shapeLogs(source: string, raw: LogLine[], ctx: OpContext): Premasked<LogsResult> {
+/** What every `logs *` op shares past its own parsing: the PEM pass (over every line read, the
+ *  one past a page included), the result shape, and the count of what the PEM pass masked. */
+function shapeLogs(
+  source: string,
+  raw: LogLine[],
+  ctx: OpContext,
+  full = false,
+): Premasked<LogsResult> {
   const query = readLogQuery(ctx);
   const { lines, masked } = maskPemLogLines(raw);
-  return new Premasked(buildLogsResult(source, lines, lineLimit(query)), masked);
+  return new Premasked(
+    buildLogsResult(source, { lines, limit: lineLimit(query), kept: query.kept, full }),
+    masked,
+  );
 }
 
-/** A capped or `--limit`ed log keeps its newest lines, and its counters follow what was kept;
- *  `truncateKeeps` also makes a stream past the transport read ceiling keep its newest bytes. */
+/** Raw page output with the page reader's `PAGE_FULL_MARKER` line taken off; `full` says it was there. */
+function pageText(parsed: unknown): { text: string; full: boolean } {
+  const text = parsed as string;
+  const lines = text.split('\n');
+  const at = lines.lastIndexOf(PAGE_FULL_MARKER);
+  if (at === -1) {
+    return { text, full: false };
+  }
+  return { text: lines.slice(0, at).join('\n'), full: true };
+}
+
+/** A capped or `--limit`ed log keeps its newest lines, and its counters follow what was kept (a
+ *  `--since` page takes its oldest instead, in `recountLines`); `truncateKeeps` also makes a stream
+ *  past the transport read ceiling keep its newest bytes, which a `--since` page never reaches: its
+ *  reader stops at `LOG_PAGE_MAX_BYTES`. */
 const LOG_CAPS = {
   truncateKeeps: 'tail',
   limitKeeps: 'tail',
@@ -62,11 +86,21 @@ const LOG_FILTER_ARGS = [
     'Only lines matching this extended regular expression (512 chars max).',
   ),
   arg('context', 'flag', false, 'With --grep: lines kept around each match (0-20).'),
-  arg('max-lines', 'flag', false, 'Most lines returned, newest kept (default 500).'),
+  arg(
+    'max-lines',
+    'flag',
+    false,
+    'Most lines returned (default 500): the newest, or with --since the oldest from that moment.',
+  ),
 ];
 const LOG_WINDOW_ARGS = [
-  arg('since', 'flag', false, 'Only lines newer than this timestamp or duration.'),
-  arg('until', 'flag', false, 'Only lines older than this timestamp or duration.'),
+  arg(
+    'since',
+    'flag',
+    false,
+    'Read forward from this timestamp or duration (a page; pass next_since as the next --since). Not with --tail.',
+  ),
+  arg('until', 'flag', false, 'Only lines at or before this timestamp or duration.'),
 ];
 
 const FAILURE_TAIL_LINES = 5;
@@ -85,24 +119,34 @@ function shapeLogsError(raw: RawResult): Record<string, unknown> | undefined {
   return lines.length === 0 ? undefined : { output_tail: lines.slice(-FAILURE_TAIL_LINES) };
 }
 
-/** The remote command of a source with no pipeline of its own: filtered by `grep -E` when asked. */
-function filteredCommand(producer: string[], query: LogQuery, merge: boolean): string {
-  return query.grep === null
-    ? plainCommand(producer, merge)
-    : grepCommand(producer, query, merge, query.maxLines);
+/** `--since`/`--until` as docker flags. docker applies `--tail` before either, so a windowed read
+ *  never passes it one: `--tail 200 --until <t>` is the newest 200 lines filtered to `<t>`, empty
+ *  whenever those are all newer. */
+function windowFlags(query: LogQuery): string[] {
+  return [
+    ...(query.since === null ? [] : ['--since', query.since]),
+    ...(query.until === null ? [] : ['--until', query.until]),
+  ];
 }
+
+const isWindowed = (query: LogQuery): boolean => query.since !== null || query.until !== null;
 
 function buildLogsDocker(ctx: OpContext): string {
   const query = readLogQuery(ctx);
-  const parts = ['docker', 'logs', '--timestamps', '--tail', String(query.scanLines)];
-  if (query.since !== null) {
-    parts.push('--since', query.since);
+  const container = reqStr(ctx, 'container');
+  if (!isWindowed(query)) {
+    return filteredCommand(
+      ['docker', 'logs', '--timestamps', '--tail', String(query.scanLines), container],
+      query,
+      true,
+    );
   }
-  if (query.until !== null) {
-    parts.push('--until', query.until);
-  }
-  parts.push(reqStr(ctx, 'container'));
-  return filteredCommand(parts, query, true);
+  return logPipelineCommand(query, {
+    producer: ['docker', 'logs', '--timestamps', ...windowFlags(query), container],
+    merge: true,
+    filter: 'text',
+    scan: query.kept === 'newest' ? query.scanLines : 0,
+  });
 }
 
 const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
@@ -122,8 +166,10 @@ const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
   buildRemote: buildLogsDocker,
   shapeError: shapeLogsError,
   ...LOG_CAPS,
-  shape: (parsed, ctx) =>
-    shapeLogs(`docker:${reqStr(ctx, 'container')}`, parseDockerLogLines(parsed as string), ctx),
+  shape: (parsed, ctx) => {
+    const { text, full } = pageText(parsed);
+    return shapeLogs(`docker:${reqStr(ctx, 'container')}`, parseDockerLogLines(text), ctx, full);
+  },
 };
 
 function buildLogsCompose(ctx: OpContext): string {
@@ -136,30 +182,38 @@ function buildLogsCompose(ctx: OpContext): string {
     'logs',
     '--no-color',
     '--timestamps',
-    '--tail',
-    String(query.scanLines),
   ];
-  if (query.since !== null) {
-    parts.push('--since', query.since);
+  if (!isWindowed(query)) {
+    parts.push('--tail', String(query.scanLines));
+    return query.grep === null
+      ? plainCommand(parts, true)
+      : logPipelineCommand(query, {
+          producer: parts,
+          merge: true,
+          filter: 'text',
+          newestMax: MAX_TAIL_LINES,
+        });
   }
-  if (query.until !== null) {
-    parts.push('--until', query.until);
-  }
-  return query.grep === null
-    ? plainCommand(parts, true)
-    : grepCommand(parts, query, true, MAX_TAIL_LINES);
+  return logPipelineCommand(query, {
+    producer: [...parts, ...windowFlags(query)],
+    merge: true,
+    filter: 'text',
+    order: true,
+    newestMax: query.grep === null ? query.scanLines : query.maxLines,
+  });
 }
 
 /** Compose prints one container after another, so the lines are put in time order before the
- *  newest `limit` are kept. */
+ *  newest `limit` are kept (a `--since` page was ordered and cut on the host). */
 function shapeComposeLogs(parsed: unknown, ctx: OpContext): Premasked<LogsResult> {
   const query = readLogQuery(ctx);
-  const ordered = parseComposeLogLines(parsed as string)
+  const { text, full } = pageText(parsed);
+  const ordered = parseComposeLogLines(text)
     .map((line, index) => ({ line, index }))
     .sort((a, b) => (a.line.ts ?? '').localeCompare(b.line.ts ?? '') || a.index - b.index)
-    .map(({ line }) => line)
-    .slice(-query.maxLines);
-  return shapeLogs(`compose:${reqStr(ctx, 'project_dir')}`, ordered, ctx);
+    .map(({ line }) => line);
+  const page = query.kept === 'oldest' ? ordered : ordered.slice(-query.maxLines);
+  return shapeLogs(`compose:${reqStr(ctx, 'project_dir')}`, page, ctx, full);
 }
 
 const logsCompose: OpSpec<ReturnType<typeof buildLogsResult>> = {
@@ -168,7 +222,12 @@ const logsCompose: OpSpec<ReturnType<typeof buildLogsResult>> = {
   summary:
     'Tail every service of a compose project (stdout and stderr merged) as {ts, stream, text, service} line objects + next_since.',
   args: [
-    arg('project_dir', 'positional', true, 'Compose project directory on the remote.'),
+    arg(
+      'project_dir',
+      'positional',
+      true,
+      'Compose project directory on the remote — must be on, or under, a files-allowlist.toml entry.',
+    ),
     arg('tail', 'flag', false, `Lines to read from each container (default ${DEFAULT_LOG_TAIL}).`),
     ...LOG_FILTER_ARGS.slice(1),
     ...LOG_WINDOW_ARGS,
@@ -181,10 +240,15 @@ const logsCompose: OpSpec<ReturnType<typeof buildLogsResult>> = {
   shapeError: shapeLogsError,
   ...LOG_CAPS,
   shape: shapeComposeLogs,
+  allowlist: [{ kind: 'path', scope: 'files', argName: 'project_dir', within: true }],
 };
 
-function shapeJournalLines(parsed: unknown): LogLine[] {
-  return (parsed as unknown[]).map(shapeJournalEntry).filter((line) => line !== null);
+function shapeJournalLogs(source: string, parsed: unknown, ctx: OpContext): Premasked<LogsResult> {
+  const { text, full } = pageText(parsed);
+  const lines = parseJournalLines(text)
+    .map(shapeJournalEntry)
+    .filter((line) => line !== null);
+  return shapeLogs(source, lines, ctx, full);
 }
 
 const logsService: OpSpec<ReturnType<typeof buildLogsResult>> = {
@@ -199,11 +263,10 @@ const logsService: OpSpec<ReturnType<typeof buildLogsResult>> = {
   mutating: false,
   exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
-  output: { parse: parseJournalLines },
+  output: 'raw',
   buildRemote: (ctx) => journalCommand(reqStr(ctx, 'unit'), readLogQuery(ctx)),
   ...LOG_CAPS,
-  shape: (parsed, ctx) =>
-    shapeLogs(`service:${reqStr(ctx, 'unit')}`, shapeJournalLines(parsed), ctx),
+  shape: (parsed, ctx) => shapeJournalLogs(`service:${reqStr(ctx, 'unit')}`, parsed, ctx),
 };
 
 const logsDockerDaemon: OpSpec<ReturnType<typeof buildLogsResult>> = {
@@ -214,10 +277,10 @@ const logsDockerDaemon: OpSpec<ReturnType<typeof buildLogsResult>> = {
   mutating: false,
   exposes: 'content',
   timeoutSec: LOG_TIMEOUT_SEC,
-  output: { parse: parseJournalLines },
+  output: 'raw',
   buildRemote: (ctx) => journalCommand('docker', readLogQuery(ctx)),
   ...LOG_CAPS,
-  shape: (parsed, ctx) => shapeLogs('docker-daemon', shapeJournalLines(parsed), ctx),
+  shape: (parsed, ctx) => shapeJournalLogs('docker-daemon', parsed, ctx),
 };
 
 const NGINX_LOG_PATHS: Record<string, string> = {

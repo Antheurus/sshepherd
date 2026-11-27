@@ -179,7 +179,7 @@ function socketDir(): string {
 /** Opaque, short, deterministic per alias — never `%h`/`%r`/`%p` (those leak host/user/port).
  *  sha256 prefix, not crc32: two aliases sharing a 32-bit checksum would share a master and
  *  silently run one alias's commands on the other's host. */
-function socketPath(alias: string): string {
+export function socketPath(alias: string): string {
   const dir = socketDir();
   const name = new Bun.CryptoHasher('sha256')
     .update(alias)

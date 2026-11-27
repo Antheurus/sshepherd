@@ -1,10 +1,10 @@
-import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { diagnoseHost } from '../hosts-diagnose.ts';
 import { executeOp, getOp } from '../registry.ts';
-import type { SpawnOutcome, SshRunner } from '../transport.ts';
+import { type SpawnOutcome, type SshRunner, socketPath } from '../transport.ts';
 import { OpError } from '../types.ts';
 
 type Server = { stop: (closeActive?: boolean) => void };
@@ -20,9 +20,21 @@ function serve(onOpen: (socket: { write: (data: string) => unknown }) => void): 
   return server.port;
 }
 
+// The ControlMaster socket directory is a throwaway one (under /tmp: a socket path must stay under
+// 100 characters), so no real master on this machine is seen.
+const runtimeBefore = process.env.XDG_RUNTIME_DIR;
+beforeAll(() => {
+  process.env.XDG_RUNTIME_DIR = mkdtempSync('/tmp/sshepherd-diag-run-');
+});
+
 afterAll(() => {
   for (const server of servers) {
     server.stop(true);
+  }
+  if (runtimeBefore === undefined) {
+    delete process.env.XDG_RUNTIME_DIR;
+  } else {
+    process.env.XDG_RUNTIME_DIR = runtimeBefore;
   }
 });
 
@@ -53,17 +65,25 @@ async function verdicts(config: string, login: SpawnOutcome) {
 }
 
 describe('hosts test --diagnose', () => {
-  test('a healthy host passes all five stages, in order', async () => {
+  test('a healthy host with no master open passes all six stages, in order', async () => {
     const port = serve((socket) => socket.write('SSH-2.0-OpenSSH_9.6\r\n'));
     const { result, byStage } = await verdicts(configOf(port), OK_LOGIN);
     expect(result.stages.map((entry) => entry.stage)).toEqual([
+      'master',
       'dns',
       'tcp',
       'banner',
       'auth',
       'echo',
     ]);
-    expect(byStage).toEqual({ dns: 'skipped', tcp: 'ok', banner: 'ok', auth: 'ok', echo: 'ok' });
+    expect(byStage).toEqual({
+      master: 'skipped',
+      dns: 'skipped',
+      tcp: 'ok',
+      banner: 'ok',
+      auth: 'ok',
+      echo: 'ok',
+    });
     expect({ reachable: result.reachable, failed_at: result.failed_at }).toEqual({
       reachable: true,
       failed_at: null,
@@ -76,6 +96,7 @@ describe('hosts test --diagnose', () => {
     closed.stop(true);
     const { result, byStage } = await verdicts(configOf(port), OK_LOGIN);
     expect(byStage).toEqual({
+      master: 'skipped',
       dns: 'skipped',
       tcp: 'fail',
       banner: 'skipped',
@@ -140,6 +161,7 @@ describe('hosts test --diagnose', () => {
     const config = 'hostname 127.0.0.1\nport 22\nproxyjump bastion\nproxycommand none\n';
     const { byStage } = await verdicts(config, OK_LOGIN);
     expect(byStage).toEqual({
+      master: 'skipped',
       dns: 'skipped',
       tcp: 'skipped',
       banner: 'skipped',
@@ -179,7 +201,7 @@ describe('hosts test --diagnose', () => {
       { transport: { runner: runnerFor(configOf(port), OK_LOGIN) } },
     );
     expect(diagnosed.ok).toBe(true);
-    expect((diagnosed.data as { stages: unknown[] }).stages).toHaveLength(5);
+    expect((diagnosed.data as { stages: unknown[] }).stages).toHaveLength(6);
 
     const calls: string[][] = [];
     const plain = await executeOp(
@@ -197,5 +219,105 @@ describe('hosts test --diagnose', () => {
       },
     );
     expect(plain.data).toEqual({ reachable: true });
+  });
+});
+
+describe('hosts test --diagnose — the ControlMaster stage (control-master-stale)', () => {
+  /** A socket file for `alias` in the throwaway runtime dir: the stage only probes a master that exists. */
+  function openMaster(alias: string): void {
+    const sock = socketPath(alias);
+    mkdirSync(join(sock, '..'), { recursive: true });
+    writeFileSync(sock, '');
+  }
+
+  /** `-O check` answers `check`; a command through the master (ControlMaster=no) answers `viaMaster`. */
+  function masterRunner(
+    port: number,
+    check: SpawnOutcome,
+    viaMaster: SpawnOutcome = OK_LOGIN,
+  ): SshRunner {
+    return async (args) => {
+      if (args.includes('-O')) {
+        return check;
+      }
+      if (args.includes('ControlMaster=no') && !args.includes('ControlPath=none')) {
+        return viaMaster;
+      }
+      return args.includes('echo') ? OK_LOGIN : outcome({ stdout: configOf(port) });
+    };
+  }
+
+  test('a master whose ssh -O check hangs fails first, as control-master-stale, and the host stages still run', async () => {
+    openMaster('frozen');
+    const port = serve((socket) => socket.write('SSH-2.0-OpenSSH_9.6\r\n'));
+    const seen: number[] = [];
+    const runner = masterRunner(port, outcome({ code: -1, timedOut: true }));
+    const result = await diagnoseHost('frozen', {
+      runner: async (args, ms, options) => {
+        if (args.includes('-O')) {
+          seen.push(ms);
+        }
+        return runner(args, ms, options);
+      },
+    });
+    const byStage = Object.fromEntries(result.stages.map((entry) => [entry.stage, entry.verdict]));
+    expect(byStage).toEqual({
+      master: 'fail',
+      dns: 'skipped',
+      tcp: 'ok',
+      banner: 'ok',
+      auth: 'ok',
+      echo: 'ok',
+    });
+    expect({ failed_at: result.failed_at, likely_cause: result.likely_cause }).toEqual({
+      failed_at: 'master',
+      likely_cause: 'control-master-stale',
+    });
+    expect(result.stages[0]?.detail).toContain('hosts disconnect frozen');
+    expect(seen).toEqual([3_000]);
+  });
+
+  test('a master that answers check but cannot carry a command is stale', async () => {
+    openMaster('deadlink');
+    const port = serve((socket) => socket.write('SSH-2.0-OpenSSH_9.6\r\n'));
+    const result = await diagnoseHost('deadlink', {
+      runner: masterRunner(port, outcome({}), outcome({ code: -1, timedOut: true })),
+    });
+    expect(result.stages[0]?.verdict).toBe('fail');
+    expect(result.stages[0]?.detail).toContain('stale');
+    expect(result.likely_cause).toBe('control-master-stale');
+  });
+
+  test('a live master passes; a socket left by an exited master is not a fault', async () => {
+    const port = serve((socket) => socket.write('SSH-2.0-OpenSSH_9.6\r\n'));
+    openMaster('livemaster');
+    const live = await diagnoseHost('livemaster', { runner: masterRunner(port, outcome({})) });
+    expect({ verdict: live.stages[0]?.verdict, reachable: live.reachable }).toEqual({
+      verdict: 'ok',
+      reachable: true,
+    });
+    openMaster('exited');
+    const refused = outcome({ code: 255, stderr: 'Control socket connect(x): Connection refused' });
+    const exited = await diagnoseHost('exited', { runner: masterRunner(port, refused) });
+    expect({ verdict: exited.stages[0]?.verdict, reachable: exited.reachable }).toEqual({
+      verdict: 'ok',
+      reachable: true,
+    });
+  });
+
+  test('a login held behind a Tailscale SSH check banner is named tailscale-check-approval-pending', async () => {
+    const port = serve((socket) => socket.write('SSH-2.0-OpenSSH_9.6\r\n'));
+    const held = outcome({
+      code: -1,
+      timedOut: true,
+      stderr:
+        '# Tailscale SSH requires an additional check.\n# To authenticate, visit: https://login.tailscale.com/a/0000\n',
+    });
+    const { result } = await verdicts(configOf(port), held);
+    expect({ failed_at: result.failed_at, likely_cause: result.likely_cause }).toEqual({
+      failed_at: 'auth',
+      likely_cause: 'tailscale-check-approval-pending',
+    });
+    expect(JSON.stringify(result)).not.toContain('login.tailscale.com');
   });
 });

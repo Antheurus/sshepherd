@@ -259,7 +259,7 @@ describe('check overview — dead_end_risk verdict', () => {
     expect(data.degraded).toEqual([]);
   });
 
-  test('null with a full disk still names the disk as a risk signal', async () => {
+  test('true with a full disk even when free is missing: a known risk is a dead end (D1 ruling)', async () => {
     const op = getOp('check', 'overview');
     if (!op) {
       throw new Error('check overview op missing');
@@ -289,7 +289,7 @@ describe('check overview — dead_end_risk verdict', () => {
       { transport: { runner: scriptedRunner(connectedRunOutcomes(stdout)) } },
     );
     const data = envelope.data as { dead_end_risk: boolean | null; risk_signals: string[] };
-    expect(data.dead_end_risk).toBeNull();
+    expect(data.dead_end_risk).toBe(true);
     expect(data.risk_signals).toEqual(['disk']);
   });
 
@@ -422,7 +422,7 @@ describe('services ps — merges docker inspect data into each entry', () => {
 });
 
 describe('logs docker — line objects + next_since', () => {
-  test('shapes {ts, stream, text} lines and carries next_since from the last line', async () => {
+  test('shapes {ts, stream, text} lines; next_since is the last line plus 1 ns (exclusive)', async () => {
     const op = getOp('logs', 'docker');
     if (!op) {
       throw new Error('logs docker op missing');
@@ -455,7 +455,7 @@ describe('logs docker — line objects + next_since', () => {
       stream: 'stdout',
       text: 'booting app',
     });
-    expect(data.next_since).toBe('2026-07-12T10:00:01.200000000Z');
+    expect(data.next_since).toBe('2026-07-12T10:00:01.200000001Z');
   });
 });
 

@@ -38,18 +38,22 @@ export function riskSignals(input: {
   ];
 }
 
-/** `null` when any section degraded (the picture is incomplete, so the verdict is unknown, never
- *  an all-clear; `riskSignals` still names what did cross a threshold), else whether a reading is
- *  at risk. */
+/** The sections the verdict reads: `disk` for the full-disk half, `mem` for the memory half. A
+ *  degraded `nproc`, `uptime`, `inodes` or `top_du` cannot change the verdict. */
+const VERDICT_SECTIONS = new Set(['disk', 'mem']);
+
+/** `true` when a reading that did come back is at risk, whatever else degraded (a full disk stays a
+ *  dead end when memory cannot be read); `null` when nothing known is at risk and a section the
+ *  verdict reads degraded (unknown, never an all-clear); else `false`. */
 export function computeDeadEndRisk(input: {
   diskUsePercents: number[];
   memSomeAvg10: number | null;
   degraded: string[];
 }): boolean | null {
-  if (input.degraded.length > 0) {
-    return null;
+  if (isDiskAtRisk(input.diskUsePercents) || isMemPressureAtRisk(input.memSomeAvg10)) {
+    return true;
   }
-  return isDiskAtRisk(input.diskUsePercents) || isMemPressureAtRisk(input.memSomeAvg10);
+  return input.degraded.some((section) => VERDICT_SECTIONS.has(section)) ? null : false;
 }
 
 /** Whether the command behind section `NAME` exited 0, per the `__NAME_RC__` line `sec` printed after it. */

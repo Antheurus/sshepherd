@@ -24,12 +24,15 @@ import type { OpSpec } from '../types.ts';
 // ---------------------------------------------------------------------------
 
 interface CheckOverviewResult {
-  nproc: number;
-  mem: ReturnType<typeof parseFree>;
+  /** `null` when `nproc` degraded: no reading, never a zero. */
+  nproc: number | null;
+  /** `null` when `mem` degraded: no reading, never a zero-filled one. */
+  mem: ReturnType<typeof parseFree> | null;
   disk: ReturnType<typeof parseDf>;
   uptime: ReturnType<typeof parseUptime>;
   psi_mem: ReturnType<typeof parsePsi>;
-  /** `null` when a section degraded and nothing that did read is at risk: unknown, not safe. */
+  /** `true` when a reading that came back is at risk; `null` when nothing known is at risk and the
+   *  disk or memory section degraded: unknown, not safe. */
   dead_end_risk: boolean | null;
   /** Sections whose command failed or printed nothing usable. */
   degraded: string[];
@@ -82,8 +85,8 @@ const checkOverview: OpSpec<CheckOverviewResult> = {
       uptime: sectionOk(sections, 'UPTIME') && uptime !== null,
     });
     return {
-      nproc: Number.isNaN(nproc) ? 0 : nproc,
-      mem: parseFree(sections.FREE ?? ''),
+      nproc: degraded.includes('nproc') ? null : nproc,
+      mem: degraded.includes('mem') ? null : parseFree(sections.FREE ?? ''),
       disk,
       uptime,
       psi_mem: psi,
@@ -95,7 +98,8 @@ const checkOverview: OpSpec<CheckOverviewResult> = {
 };
 
 interface CheckMemResult {
-  mem: ReturnType<typeof parseFree>;
+  /** `null` when `mem` degraded: no reading, never a zero-filled one. */
+  mem: ReturnType<typeof parseFree> | null;
   psi_mem: ReturnType<typeof parsePsi>;
   dead_end_risk: boolean | null;
   degraded: string[];
@@ -120,7 +124,7 @@ const checkMem: OpSpec<CheckMemResult> = {
       mem: sectionOk(sections, 'FREE') && hasMemRow(sections.FREE ?? ''),
     });
     return {
-      mem: parseFree(sections.FREE ?? ''),
+      mem: degraded.includes('mem') ? null : parseFree(sections.FREE ?? ''),
       psi_mem: psi,
       dead_end_risk: computeDeadEndRisk({ ...inputs, degraded }),
       degraded,

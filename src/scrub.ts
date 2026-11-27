@@ -12,6 +12,7 @@ import {
   MAX_HOSTNAME_CHARS,
   MAX_IDENTITY_GAP_CHARS,
   MAX_LABEL_HEX_TAIL_CHARS,
+  MAX_PEM_LONE_END_SCAN_LINES,
   MAX_PSQL_TYPE_NAME_CHARS,
   MIN_BARE_HOSTNAME_CHARS,
   MIN_MASKED_USER_CHARS,
@@ -375,11 +376,46 @@ const PSQL_DATA_ECHO_RULES: ShapeRule[] = [
   },
 ];
 
+/** A stored password verifier, whatever column or key holds it (`SELECT rolpassword AS h FROM
+ *  pg_authid` comes back under `h`): Postgres SCRAM-SHA-256 and `md5` + 32 hex as a whole value,
+ *  bcrypt `$2a$`/`$2b$`/`$2y$`, argon2, and crypt(3) `$1$`/`$5$`/`$6$` and yescrypt `$y$` (the
+ *  `/etc/shadow` default on Debian 11+ and Ubuntu 22.04+, added beside the listed crypt forms). */
+const PASSWORD_VERIFIER = new RegExp(
+  [
+    String.raw`SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+`,
+    'md5[0-9a-f]{32}',
+    String.raw`\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}`,
+    String.raw`\$argon2(?:id|i|d)\$v=\d+\$m=\d+,t=\d+,p=\d+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+`,
+    String.raw`\$[156]\$(?:rounds=\d+\$)?[./A-Za-z0-9]{0,16}\$[./A-Za-z0-9]{22,86}`,
+    String.raw`\$y\$[./A-Za-z0-9]+\$[./A-Za-z0-9]{1,86}\$[./A-Za-z0-9]{43}`,
+  ]
+    .map((shape) => String.raw`(?<![\w$])${shape}(?![\w$./+=])`)
+    .join('|'),
+  'g',
+);
+
+/** A lone private-key END (its BEGIN cut off) masks the text before it. The END line's own lead
+ *  (`path:4:` of a grep match, `web-1  | ` of a log) stays on that line unless it ends in a base64
+ *  body chunk, so one line stays one line; with nothing body-like before it the text is unchanged. */
+function maskBeforeLoneEnd(match: string, body: string, end: string): string {
+  const lineStart = body.lastIndexOf('\n') + 1;
+  const above = body.slice(0, lineStart);
+  const lead = body.slice(lineStart);
+  const leadIsBody = PEM_BODY_CHUNK.test(bareSide(lead).slice(-16));
+  if (!HAS_CONTENT.test(above) && !leadIsBody) {
+    return match;
+  }
+  if (leadIsBody) {
+    return `${MASK}\n${end}`;
+  }
+  return `${MASK}\n${lead}${end}`;
+}
+
 /** Value shapes that are secrets wherever they appear, independent of any key name. */
 const SHAPE_RULES: ShapeRule[] = [
   {
     pattern: new RegExp(String.raw`^((?:(?!-----BEGIN)[\s\S])*?)(-----END ${PEM_LABEL}-----)`, 'g'),
-    replace: (m, body = '', end = '') => (HAS_CONTENT.test(body) ? `${MASK}\n${end}` : m),
+    replace: (m, body = '', end = '') => maskBeforeLoneEnd(m, body, end),
   },
   {
     pattern: /\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]+/g,
@@ -396,6 +432,10 @@ const SHAPE_RULES: ShapeRule[] = [
   },
   {
     pattern: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+    replace: () => MASK,
+  },
+  {
+    pattern: PASSWORD_VERIFIER,
     replace: () => MASK,
   },
   {
@@ -572,11 +612,17 @@ const leadThen =
 
 /** Between a host keyword and a short hostname: `=`/`:` or at least one blank, so `toweb1` is no context. */
 const HOST_SEP = `["']?(?:${GAP}[=:]${GAP}|[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}})["']?`;
+/** Options between `ssh` and its destination (`ssh -l opsuser -p 2222 web1`): a dashed flag and, when
+ *  the next word does not start with a dash, its value. Eight is more than any real command line. */
+const SSH_OPTIONS = `(?:[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}}-\\w+(?:[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}}[^\\s-]\\S*)?){0,8}`;
+/** A syslog line's own host field: after a BSD (`Nov 27 10:00:00`) or RFC 3339 timestamp at line start. */
+const SYSLOG_STAMP = String.raw`^(?:[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:?\d\d)) `;
 
 /** The alias hostname. An IPv6 one is compared by value, so its expanded and compressed forms are
  *  both `<host>`. A dotless one under `MIN_BARE_HOSTNAME_CHARS` (`web1`, `db`) is masked only in a
- *  host context — `host X`, `hostname X`, `to X`, `ssh X`, `@X`, `X:<port>` — and everywhere else
- *  stays, being too common a word; any longer or dotted one is masked wherever it stands. */
+ *  host context — `host X`, `hostname X`, `to X`, `ssh [options] X`, `@X`, `X:<port>`, `[X]:<port>`,
+ *  a syslog line's host field — and everywhere else stays, being too common a word; any longer or
+ *  dotted one is masked wherever it stands. */
 function hostnameRule(hostname: string): IdentityRule | null {
   const escaped = escapeRegExp(hostname);
   if (IPV4_EXACT.test(hostname)) {
@@ -609,7 +655,7 @@ function hostnameRule(hostname: string): IdentityRule | null {
   if (!hostname.includes('.') && hostname.length < MIN_BARE_HOSTNAME_CHARS) {
     return {
       pattern: new RegExp(
-        String.raw`((?:^|[^\w-])(?:host(?:name)?|to|ssh)${HOST_SEP}|@)${escaped}(?![\w-]|\.[\w-])|(?<![\w.-])${escaped}(?=:\d{1,5}(?![\d.]))`,
+        String.raw`((?:^|[^\w-])(?:host(?:name)?|to|ssh${SSH_OPTIONS})${HOST_SEP}|@|${SYSLOG_STAMP})${escaped}(?![\w-]|\.[\w-])|(?<![\w.-])${escaped}(?=:\d{1,5}(?![\d.]))|(?<=\[)${escaped}(?=\]:\d{1,5}(?!\d))`,
         'gim',
       ),
       mask: leadThen(HOST_MASK),
@@ -673,9 +719,15 @@ const COMMON_USER_NAMES = new Set([
 const SYSTEMD_UNIT_SUFFIX =
   /\.(?:service|socket|timer|target|mount|automount|path|slice|scope|device|swap)$/;
 
+/** npm dist-tags (`app@latest`) and package protocols (`app@npm:`, `app@workspace:*`): after `@`
+ *  they name a package version, not a host. */
+const PACKAGE_DIST_TAG = /^(?:latest|next|beta|alpha|canary|rc|stable|nightly|experimental|lts)$/i;
+const PACKAGE_PROTOCOL = /^(?:npm|workspace|file|link|portal|patch|catalog|jsr|github)$/i;
+
 /** What follows `user@` when it is a login: `<host>`, a `[v6]` literal, an IPv4 address or a
- *  letter-led hostname — never a version (`app@2.0.0`), a digest (`app@sha256:`) or a unit
- *  instance (`getty@tty1.service`). */
+ *  letter-led hostname — never a version (`app@2.0.0`, `app@v2.1.0`), a dist-tag (`app@latest`), a
+ *  package protocol (`app@npm:core`), a digest (`app@sha256:`) or a unit instance
+ *  (`getty@tty1.service`). */
 function isHostAfterAt(token: string): boolean {
   if (token.startsWith(HOST_MASK) || token.startsWith('[')) {
     return true;
@@ -688,6 +740,12 @@ function isHostAfterAt(token: string): boolean {
     return false;
   }
   if (/^sha\d+$/i.test(head) && token[head.length] === ':') {
+    return false;
+  }
+  if (PACKAGE_DIST_TAG.test(head) || /^v\d+(?:\.\d+)*$/i.test(head)) {
+    return false;
+  }
+  if (token[head.length] === ':' && PACKAGE_PROTOCOL.test(head)) {
     return false;
   }
   return !SYSTEMD_UNIT_SUFFIX.test(head);
@@ -716,7 +774,7 @@ function userRule(user: string): IdentityRule | null {
   const blanks = `[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}}`;
   return {
     pattern: new RegExp(
-      String.raw`((?:^|[^\w-])(?:-l|user(?:name)?|login|logname)${IDENTITY_SEP})${escaped}(?![\w.-])|((?:^|[^\w-])for${blanks}(?:invalid${blanks}user${blanks})?)${escaped}(?=${blanks}from\b)|(?<![\w.-])${escaped}(?=@([^\s"']{0,${MAX_HOSTNAME_CHARS}}))|(?<=:\/\/)${escaped}(?=:)|(?<![\w.-])${escaped}(?=${blanks}:[ \t][^\n]{0,${MAX_SUDO_LINE_CHARS}}?\b(?:TTY|PWD|COMMAND)=)|(?<=\/home\/)${escaped}(?![\w.-])`,
+      String.raw`((?:^|[^\w-])(?:-l|user(?:name)?|login|logname)${IDENTITY_SEP})${escaped}(?![\w-]|\.[\w-])|((?:^|[^\w-])for${blanks}(?:invalid${blanks}user${blanks})?)${escaped}(?=${blanks}from\b)|(?<![\w.-])${escaped}(?=@([^\s"']{0,${MAX_HOSTNAME_CHARS}}))|(?<=:\/\/)${escaped}(?=:)|(?<![\w.-])${escaped}(?=${blanks}:[ \t][^\n]{0,${MAX_SUDO_LINE_CHARS}}?\b(?:TTY|PWD|COMMAND)=)|(?<=\/home\/)${escaped}(?![\w.-])`,
       'gim',
     ),
     mask: (match, [keyword = '', sshd = '', afterAt = ''], offset, whole) => {
@@ -739,9 +797,10 @@ function isPortKey(key: string): boolean {
   return new RegExp(`^${GLUED_PORT_KEY}$`).test(key) || /^port$/i.test(key);
 }
 
-/** The alias port where it is one: `host:port`, `-p port`/`-P port`, `port port`, `Port=port`, a
- *  key holding a port (`SSH_PORT=port`, `"HostPort":"port"`), and `port/tcp`/`port/udp`; the last
- *  also in object keys (`docker inspect`'s `"2222/tcp"`). */
+/** The alias port where it is one: `host:port`, docker's `:::port` and ss's `*:port` listeners,
+ *  `-p port`/`-P port`, `port port`, `Port=port`, a key holding a port (`SSH_PORT=port`,
+ *  `"HostPort":"port"`), and `port/tcp`/`port/udp`; the last also in object keys (`docker
+ *  inspect`'s `"2222/tcp"`). */
 function portRules(port: string): IdentityRule[] {
   if (!/^\d+$/.test(port)) {
     return [];
@@ -749,7 +808,7 @@ function portRules(port: string): IdentityRule[] {
   return [
     {
       pattern: new RegExp(
-        String.raw`((?:[\w\]>]:|(?:^|[^\w-])(?:-p|-P|[Pp][Oo][Rr][Tt])${IDENTITY_SEP}|${GLUED_PORT_KEY}["']?${GAP}[=:]${GAP}["']?))${port}(?!\d)`,
+        String.raw`((?:[\w\]>]:|:::|\*:|(?:^|[^\w-])(?:-p|-P|[Pp][Oo][Rr][Tt])${IDENTITY_SEP}|${GLUED_PORT_KEY}["']?${GAP}[=:]${GAP}["']?))${port}(?!\d)`,
         'gm',
       ),
       mask: leadThen(PORT_MASK),
@@ -1178,49 +1237,107 @@ function opensPemBlock(line: string): boolean {
   return PEM_MARKER_EDGE.test(after) || PEM_BODY_CHUNK.test(after.slice(0, 16));
 }
 
-const PEM_BODY_REST = /^[A-Za-z0-9+/]+={0,2}$/;
-const prefixShape = (prefix: string): string => prefix.replace(/\d/g, '0');
+const prefixShape = (prefix: string): string => prefix.replace(/\d+/g, '0');
 
-/** How many base64 characters `line` holds past a log prefix shaped like `prefix` (digits may
- *  differ: a timestamp ticks between lines), or -1 when it is not a key body line under it. */
-function prefixedBodyLength(line: string | undefined, prefix: string): number {
-  if (line === undefined || prefixShape(line.slice(0, prefix.length)) !== prefixShape(prefix)) {
-    return -1;
+/** Longest run a key body line holds: PEM wraps at 64 columns, OpenSSH keys at 70. A longer run
+ *  ending a line is something else (a JWT, a minified blob) and is never read as one. */
+const MAX_PEM_BODY_LINE_CHARS = 70;
+/** How far past the END line's own prefix a line's prefix may run and still be compared with it
+ *  (a timestamp's digit runs vary in length: Go trims trailing zeros of its nanoseconds). */
+const MAX_PREFIX_SLACK_CHARS = 64;
+
+const isBase64Char = (code: number): boolean =>
+  (code >= 65 && code <= 90) ||
+  (code >= 97 && code <= 122) ||
+  (code >= 48 && code <= 57) ||
+  code === 43 ||
+  code === 47;
+
+/** `line` split into a log prefix and the base64 run that ends it (`=` padding allowed at its end;
+ *  trailing blanks and `PEM_MARKER_EDGE` characters ignored), or null when no run of at most
+ *  `MAX_PEM_BODY_LINE_CHARS` ends it. Scans back from the end only, so a long line costs no more
+ *  than a short one. */
+function splitBodyLine(line: string): { prefix: string; body: string } | null {
+  let end = line.length;
+  while (end > 0 && /[\s"',;)}\]]/.test(line[end - 1] ?? '')) {
+    end -= 1;
   }
-  const rest = line.slice(prefix.length).trim();
-  return PEM_BODY_REST.test(rest) ? rest.length : -1;
+  let start = end;
+  while (start > 0 && end - start < 2 && line[start - 1] === '=') {
+    start -= 1;
+  }
+  const padding = end - start;
+  while (start > 0 && isBase64Char(line.charCodeAt(start - 1))) {
+    start -= 1;
+    if (end - start > MAX_PEM_BODY_LINE_CHARS) {
+      return null;
+    }
+  }
+  if (end - start - padding === 0) {
+    return null;
+  }
+  return { prefix: line.slice(0, start), body: line.slice(start, end) };
 }
 
-/** An END closes a body whose BEGIN was cut off when the marker is the whole line, ends a base64
- *  body on it, or carries a log prefix (`web-1  | `, `<ts> INFO `, `+ echo `) that the line above
- *  repeats over a base64 body — the last body line may be short, so then the one above it must hold
- *  a full chunk. `must end with -----END RSA PRIVATE KEY-----` is prose about a key. */
-function isLonePemEnd(
-  line: string,
-  above: string | undefined,
-  twoAbove: string | undefined,
-): boolean {
+/** Whether `line` was written under the log prefix whose digit-collapsed shape is `shape`. */
+function sameWriter(line: string, shape: string, prefixLength: number): boolean {
+  return prefixShape(line.slice(0, prefixLength + MAX_PREFIX_SLACK_CHARS)).startsWith(shape);
+}
+
+/** The lines a lone END (its BEGIN cut off) masks, or null when it is not one. When the marker is
+ *  the whole line or ends a base64 body on it, that is every line since `bodyStart`. When it carries
+ *  a log prefix (`web-1  | `, `<ts> INFO `, `time=<ts> msg=`), it is the base64 body lines that same
+ *  prefix wrote above it, looking past other writers' lines (another compose service, a WARN): the
+ *  last body line may be short, every one above it holds a full chunk, and the first line of that
+ *  writer that is not a body line ends the search. Prefixes compare with digit runs collapsed, so a
+ *  ticking timestamp of varying length still matches. `must end with -----END RSA PRIVATE KEY-----`
+ *  is prose about a key. */
+function lonePemEndBody(lines: readonly string[], i: number, bodyStart: number): number[] | null {
+  const line = lines[i] ?? '';
   const end = PEM_END_LINE.exec(line);
   if (!end) {
-    return false;
+    return null;
   }
   const prefix = line.slice(0, end.index);
   const before = bareSide(prefix);
   const after = bareSide(line.slice(end.index + end[0].length));
   if (!PEM_MARKER_EDGE.test(after)) {
-    return false;
+    return null;
   }
   if (PEM_MARKER_EDGE.test(before) || PEM_BODY_CHUNK.test(before.slice(-16))) {
-    return true;
+    return Array.from({ length: i - bodyStart }, (_, k) => bodyStart + k);
   }
-  const last = prefixedBodyLength(above, prefix);
-  return last >= 16 || (last > 0 && prefixedBodyLength(twoAbove, prefix) >= 16);
+  const shape = prefixShape(prefix);
+  const body: number[] = [];
+  let fullChunk = false;
+  const stop = Math.max(bodyStart, i - MAX_PEM_LONE_END_SCAN_LINES);
+  for (let j = i - 1; j >= stop; j -= 1) {
+    const candidate = lines[j] ?? '';
+    const split = splitBodyLine(candidate);
+    const ownPrefix =
+      split !== null &&
+      split.prefix.length <= prefix.length + MAX_PREFIX_SLACK_CHARS &&
+      prefixShape(split.prefix) === shape;
+    if (ownPrefix) {
+      const length = split.body.replace(/=+$/, '').length;
+      if (body.length > 0 && length < 16) {
+        break;
+      }
+      fullChunk = fullChunk || length >= 16;
+      body.push(j);
+      continue;
+    }
+    if (sameWriter(candidate, shape, prefix.length)) {
+      break;
+    }
+  }
+  return fullChunk ? body : null;
 }
 
 /** For output already split into lines (`files tail`, `logs *`), where no single string holds
  *  both ends of a PEM block: every line between a private-key BEGIN and its END is masked, and a
- *  lone END (its BEGIN cut off by `-n`) masks every line before it since the output start or the
- *  previous END. A line that only mentions a marker in prose does neither. */
+ *  lone END (its BEGIN cut off by `-n`) masks the body before it (`lonePemEndBody`). A line that
+ *  only mentions a marker in prose does neither. */
 export function maskPemLines(lines: readonly string[]): string[] {
   const out = [...lines];
   let inside = false;
@@ -1242,12 +1359,64 @@ export function maskPemLines(lines: readonly string[]): string[] {
       bodyStart = i + 1;
       continue;
     }
-    if (isLonePemEnd(line, lines[i - 1], lines[i - 2])) {
-      for (let j = bodyStart; j < i; j += 1) {
+    const body = lonePemEndBody(lines, i, bodyStart);
+    if (body !== null) {
+      for (const j of body) {
         out[j] = MASK;
       }
       bodyStart = i + 1;
     }
+  }
+  return out;
+}
+
+/** Full-width key body lines (64 or 70 base64 characters, no padding). */
+const PEM_CHUNK_WIDTHS = new Set([64, 70]);
+const PUBLIC_PEM_BEGIN = /-----BEGIN (?![A-Z0-9 ]*PRIVATE KEY)[A-Z0-9 ]+-----/;
+const ANY_PEM_END = /-----END [A-Z0-9 ]+-----/;
+const HEX_ONLY = /^[0-9A-Fa-f]+$/;
+
+/** A key body line with no marker around it at all: a `logs *` window (`--since`/`--until`) or
+ *  `--grep` can keep body lines and drop both the BEGIN and the END. Any line that ends in a
+ *  full-width base64 chunk (64 or 70 characters, nothing but a blank, `=`, `|`, `:` or a quote
+ *  before it, mixed digits and letters rather than a hex digest) is masked, and so is the short
+ *  last body line right below one under the same prefix. Lines inside a public block (`BEGIN
+ *  CERTIFICATE`) stay. Run after `maskPemLines`, on log output only: a cert body cut off from its
+ *  markers is masked too, which fails safe. */
+export function maskPemBodyChunks(lines: readonly string[]): string[] {
+  const out = [...lines];
+  let inPublicBlock = false;
+  let chunkShape: string | null = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    if (inPublicBlock) {
+      inPublicBlock = !ANY_PEM_END.test(line);
+      continue;
+    }
+    if (PUBLIC_PEM_BEGIN.test(line)) {
+      inPublicBlock = !ANY_PEM_END.test(line.slice(line.search(PUBLIC_PEM_BEGIN) + 11));
+      chunkShape = null;
+      continue;
+    }
+    const split = splitBodyLine(line);
+    const lead = split?.prefix.at(-1);
+    if (split === null || (lead !== undefined && !/[\s=|:"']/.test(lead))) {
+      chunkShape = null;
+      continue;
+    }
+    const full =
+      PEM_CHUNK_WIDTHS.has(split.body.length) &&
+      !split.body.includes('=') &&
+      !HEX_ONLY.test(split.body);
+    if (full) {
+      out[i] = MASK;
+      chunkShape = prefixShape(split.prefix);
+      continue;
+    }
+    if (chunkShape !== null && prefixShape(split.prefix) === chunkShape) {
+      out[i] = MASK;
+    }
+    chunkShape = null;
   }
   return out;
 }

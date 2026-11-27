@@ -215,7 +215,7 @@ describe('executeOp — byte cap, applied after the scrubber', () => {
     const data = envelope.data as { lines: { text: string }[]; next_since: string };
     expect(seen.at(-1)).toEqual({ stdoutCap: 'drain-tail' });
     expect(data.lines.map((line) => line.text)).toEqual(['middle', 'newest']);
-    expect(data.next_since).toBe('2026-01-01T00:00:02Z');
+    expect(data.next_since).toBe('2026-01-01T00:00:02.000000001Z');
     expect(envelope.output_truncated).toBe(true);
   });
 

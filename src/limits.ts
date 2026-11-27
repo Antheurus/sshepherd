@@ -158,3 +158,15 @@ export const TUNNEL_OPEN_WAIT_SEC = CONNECT_TIMEOUT_SEC + 5;
 /** After ssh reports it authenticated, how long `tunnel open` watches it before calling the forward
  *  up: a refused local bind exits at once, a refused remote forward within one round trip. */
 export const TUNNEL_FORWARD_SETTLE_MS = 1_000;
+/** Lines a lone private-key END (its BEGIN cut off) looks back for the body lines its own log prefix
+ *  wrote, skipping other writers' lines in between: an 8192-bit RSA key is about 100 body lines, and
+ *  400 leaves room for three interleaved lines per body line while keeping the pass linear. */
+export const MAX_PEM_LONE_END_SCAN_LINES = 400;
+/** Bytes a `logs *` page read forward from `--since` may print: whole lines stop short of the
+ *  transport read ceiling (`MAX_STDOUT_BYTES` less 64 KiB), so the ceiling never cuts the oldest
+ *  lines off a page that is meant to keep them. */
+export const LOG_PAGE_MAX_BYTES = MAX_STDOUT_BYTES - 65_536;
+/** `hosts test --diagnose`'s `ssh -O check` on sshepherd's own ControlMaster: a local socket round
+ *  trip answers in milliseconds, so a master still silent after 3 s is hung, and every op that
+ *  reuses it would stall behind it. */
+export const DIAGNOSE_MASTER_CHECK_TIMEOUT_SEC = 3;

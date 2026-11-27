@@ -8,9 +8,9 @@ description: >-
   "server gua kenapa", "servernya down", "disk penuh", "restart service", "liat log server", "deploy ke
   server", "ssh ke", "cek RAM server", "kenapa lemot servernya", "port apa aja yang kebuka". Keeps the
   agent zero-knowledge about credentials — no password, private key, or host/user/port ever reaches the
-  agent context or a tool response. Covers all 9 registry-driven command groups (hosts, check, logs,
-  services, deploy, config, db, files, security) via a single compiled Bun/TypeScript CLI that shells
-  out to the system ssh binary; the agent only ever passes an ssh alias, a pg-target name, or a recipe
+  agent context or a tool response. Covers all 12 registry-driven command groups (hosts, check, logs,
+  services, files, env, config, db, deploy, security, tunnel, audit) via a single compiled
+  Bun/TypeScript CLI that shells out to the system ssh binary; the agent only ever passes an ssh alias, a pg-target name, or a recipe
   name. setup is a separate group that writes sshepherd own local config files; every setup action is
   agent-invocable except setup ssh-alias install, which opens a one-shot browser form only a human can
   type a password into.
@@ -76,7 +76,8 @@ exception noted below.
 - Every `files` op (`ls`/`cat`/`tail`/`download`/`disk-usage`/`upload`) refuses any remote
   path not pre-declared for that alias in `~/.config/sshepherd/files-allowlist.toml` —
   fail-closed, same rule as `config get`/`put`/`validate` and `config-allowlist.toml`. See
-  Gotchas #11.
+  Gotchas #11. `logs compose`'s project directory is checked against the same file (on, or
+  under, a declared entry).
 - Secret-shaped files — a basename containing `.env` (`.env`, `.env.local`, `prod.env`), ending
   `.vars`/`.secrets`, `credentials*`, `*.pem`, `id_*` — are masked by default
   (`KEY=***MASKED***`, `export` and quoted/continued values included) in `files cat`, `files tail`,
@@ -159,11 +160,12 @@ argument — no ssh connection was attempted).
 # hosts
 sshepherd hosts list
 sshepherd hosts test web-01
-sshepherd hosts test web-01 --diagnose   # stages dns, tcp, banner, auth, echo, each with a verdict
+sshepherd hosts test web-01 --diagnose   # stages master, dns, tcp, banner, auth, echo, each with a verdict
 sshepherd hosts info web-01
 sshepherd hosts disconnect web-01   # or --all; connections self-close after 5 idle minutes
 sshepherd hosts trust web-01 --dry-run                          # the host key fingerprint it presents
 sshepherd hosts trust web-01 --fingerprint SHA256:<fp> --yes    # record it once a human confirmed it
+sshepherd hosts trust web-01 --fingerprint SHA256:<fp> --all-types --yes   # and every other key type it presents
 
 # check
 sshepherd check overview web-01
@@ -177,6 +179,7 @@ sshepherd check kernel web-01
 # logs
 sshepherd logs docker web-01 myapp --tail 100
 sshepherd logs docker web-01 myapp --grep 'ERROR|boom' --since 60m --context 2 --max-lines 100   # stdout and stderr merged
+sshepherd logs docker web-01 myapp --since 2026-11-27T10:00:00Z --max-lines 200   # oldest first; repeat with --since <next_since> while truncated
 sshepherd logs compose web-01 /opt/myapp --grep timeout --tail 200
 sshepherd logs service web-01 nginx --tail 100
 sshepherd logs docker-daemon web-01 --tail 100
@@ -185,7 +188,7 @@ sshepherd logs nginx web-01 error --tail 100
 # services
 sshepherd services ps web-01
 sshepherd services stats web-01
-sshepherd services inspect web-01 myapp
+sshepherd services inspect web-01 myapp --fields networks,cmd   # also mounts, ports, health, image, restart
 sshepherd services compose-ps web-01 /opt/myapp/docker-compose.yml
 sshepherd services healthcheck web-01 myapp
 sshepherd services systemctl-status web-01 nginx
@@ -200,6 +203,7 @@ sshepherd files ls web-01 /opt/myapp
 sshepherd files cat web-01 /opt/myapp/.env --reveal DB_HOST
 sshepherd files tail web-01 /var/log/syslog --n 100
 sshepherd files head web-01 /opt/myapp/.env --n 20
+sshepherd files cat web-01 /opt/myapp/app.log --lines 120:180   # head/tail/cat: lines A to B only
 sshepherd files grep web-01 /opt/myapp 'ERROR' --context 2
 sshepherd files find web-01 /opt/myapp --name '*.log'
 sshepherd files download web-01 /opt/myapp/backup.sql ./backup.sql
@@ -207,7 +211,7 @@ sshepherd files disk-usage web-01 /var/lib/docker
 sshepherd files upload web-01 ./local.conf /opt/myapp/local.conf --yes
 
 # env (key names only — values never leave the host)
-sshepherd env keys web-01 --container myapp
+sshepherd env keys web-01 --container myapp   # only a container listed in containers = [...] in targets.toml
 sshepherd env keys web-01 --path /opt/myapp/.env
 sshepherd env diff web-01 --path /opt/myapp/.env --against ./.env.example
 
@@ -228,6 +232,7 @@ sshepherd db query prod "SELECT count(*) FROM users"
 sshepherd db describe prod users
 sshepherd db count prod users --where-eq org_id=1
 sshepherd db migrations prod
+sshepherd db migrations prod --table schema_migrations --dir /opt/myapp/migrations   # current version + pending
 
 # deploy
 sshepherd deploy run demo --dry-run
@@ -262,6 +267,7 @@ sshepherd setup ssh-alias update myserver --host 5.6.7.8 --port 2222 --yes
 sshepherd setup ssh-alias remove myserver --yes
 sshepherd setup db-target scaffold prod --alias myserver --user app --database appdb --container app_db --yes
 sshepherd setup db-target ro-role prod --print-sql
+sshepherd setup db-target ro-role prod --print-sql --tables-only   # SELECT on tables only, no pg_read_all_data (pg_authid)
 sshepherd setup db-target discover myserver
 sshepherd setup config-allowlist scaffold myserver --paths /etc/nginx/nginx.conf,/opt/app/.env --yes
 sshepherd setup deploy-recipe scaffold demo --alias myserver --workdir /opt/app --yes
@@ -287,7 +293,8 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
    **Host keys are checked strictly** (`StrictHostKeyChecking=yes` on every connection): an
    unknown key is `HOST_KEY_UNKNOWN`, a different one `HOST_KEY_CHANGED`, and the only way to
    record one is `hosts trust <alias> --fingerprint SHA256:... --yes` after a human confirmed
-   the fingerprint `--dry-run` shows.
+   the fingerprint `--dry-run` shows (`--all-types` records every key type the host presents once
+   that fingerprint matched one of them).
 3. **No raw exec, ever.** There is no `sshepherd exec "<any command>"`. A genuinely novel
    need is authored as a named, versioned recipe step (`references/recipes.md`) —
    reviewable, not a free-text shell escape hatch. `plain ssh <alias>` remains the
@@ -405,7 +412,9 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `UNKNOWN_ALIAS` | the ssh alias isn't defined in `~/.ssh/config` (or any file it `Include`s) and no wildcard `Host` line or `Match` block could apply to it |
 | `CONNECT_TIMEOUT` | couldn't reach the host within the connect timeout |
 | `AUTH_FAILED` | SSH authentication failed for this alias |
-| `HOST_KEY_CHANGED` | the host presented a different key than `known_hosts` holds for the alias (or not the one `hosts trust --fingerprint` named); `next` is `hosts trust <alias> --dry-run` |
+| `HOST_KEY_CHANGED` | the host presented a different key than `known_hosts` holds for the alias (a reinstalled server, or someone in the middle); from `hosts trust`, `known_hosts` holds a key the host no longer presents and none it presents matches `--fingerprint` — find out why before trusting anything; `next` is `hosts trust <alias> --dry-run` |
+| `HOST_KEY_FINGERPRINT_MISMATCH` | `hosts trust --fingerprint` named no key the host presents, and nothing was trusted for this host yet: a mistyped or wrong fingerprint, not a changed key; compare with the provider console or `ssh-keygen -l` on the host; exit `2` |
+| `KNOWN_HOSTS_UNWRITABLE` | `hosts trust` cannot record the key: the alias's `known_hosts` (or its directory) is not writable, is `/dev/null` or not a regular file, or the write did not read back; nothing was recorded; exit `2` |
 | `HOST_KEY_UNKNOWN` | `known_hosts` has no key for the alias; sshepherd never accepts one on first use — confirm it with `hosts trust` |
 | `SSH_TRANSPORT_ERROR` | ssh failed before the remote command could run, unclassified |
 | `COMMAND_FAILED` | the remote command exited non-zero (`error.remote_exit` carries the code) |
@@ -426,5 +435,5 @@ same command can succeed on a re-run) and, when one exists, `next` (an exact com
 
 Exit codes: `0` on `ok: true`; `1` when the run failed (`COMMAND_FAILED`, a timeout, a transport
 or internal error, `AUDIT_WRITE_FAILED`); `2` when the command line or its config was wrong (`INVALID_ARGS`,
-`PARSE_ERROR`, `UNKNOWN_SUBGROUP`, `VALIDATION_ERROR`, `CONFIG_PARSE_ERROR`, `UNKNOWN_ALIAS`, `CONFIRMATION_REQUIRED`, `PROFILE_DENIED`) —
+`PARSE_ERROR`, `UNKNOWN_SUBGROUP`, `VALIDATION_ERROR`, `CONFIG_PARSE_ERROR`, `UNKNOWN_ALIAS`, `CONFIRMATION_REQUIRED`, `PROFILE_DENIED`, `HOST_KEY_FINGERPRINT_MISMATCH`, `KNOWN_HOSTS_UNWRITABLE`) —
 no ssh command is ever run for an exit-`2` other than the alias check behind `UNKNOWN_ALIAS`.

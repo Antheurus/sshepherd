@@ -79,6 +79,7 @@ afterAll(() => {
 
 const ARG_VALUES: Record<string, () => string> = {
   path: () => REMOTE_PATH,
+  project_dir: () => REMOTE_PATH,
   remote_path: () => REMOTE_PATH,
   local_path: () => join(scratch, 'source.txt'),
   against: () => join(scratch, 'source.txt'),

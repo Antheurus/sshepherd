@@ -387,8 +387,8 @@ run_matrix() {
 
   step "[$variant] hosts test --diagnose"
   run_cli hosts_diagnose hosts test "$alias" --diagnose
-  assert_json "[$variant] hosts test --diagnose: dns, tcp, banner, auth, echo, every one passing or skipped" hosts_diagnose \
-    "d['ok'] is True and d['data']['reachable'] is True and [s['stage'] for s in d['data']['stages']] == ['dns','tcp','banner','auth','echo'] and all(s['verdict'] in ('ok','skipped') for s in d['data']['stages'])"
+  assert_json "[$variant] hosts test --diagnose: master, dns, tcp, banner, auth, echo, every one passing or skipped" hosts_diagnose \
+    "d['ok'] is True and d['data']['reachable'] is True and [s['stage'] for s in d['data']['stages']] == ['master','dns','tcp','banner','auth','echo'] and all(s['verdict'] in ('ok','skipped') for s in d['data']['stages'])"
 
   step "[$variant] services ps"
   run_cli services_ps services ps "$alias"
