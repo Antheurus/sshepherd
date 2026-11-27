@@ -273,15 +273,38 @@ describe('db exec gates before any ssh call (scripted runner)', () => {
     expect(readFileSync(side, 'utf8')).toContain('DROP TABLE orders;');
   });
 
-  test('--dry-run runs no confirm gate and writes no audit row; --allow-ddl lets the plan through to ssh', async () => {
-    const auditLogPath = join(dir, 'dry.jsonl');
-    const dry = await exec(
-      'prod',
-      { file: join(dir, 'drop.sql'), 'dry-run': true, 'allow-ddl': true },
-      auditLogPath,
-    );
-    expect(dry.calls).toBe(1);
-    expect(existsSync(auditLogPath)).toBe(false);
+  test('--dry-run runs for real then rolls back: no confirm gate, but the deploy profile and an audit row with dry_run; --allow-ddl lets the plan through to ssh', async () => {
+    const savedProfile = process.env.SSHEPHERD_PROFILE;
+    try {
+      process.env.SSHEPHERD_PROFILE = 'read';
+      const readLog = join(dir, 'dry-read.jsonl');
+      const denied = await exec('prod', { file: join(dir, 'ok.sql'), 'dry-run': true }, readLog);
+      expect([denied.envelope.error?.code, denied.calls]).toEqual(['PROFILE_DENIED', 0]);
+
+      process.env.SSHEPHERD_PROFILE = 'deploy';
+      const auditLogPath = join(dir, 'dry.jsonl');
+      const dry = await exec(
+        'prod',
+        { file: join(dir, 'drop.sql'), 'dry-run': true, 'allow-ddl': true },
+        auditLogPath,
+      );
+      expect(dry.calls).toBe(1);
+      const sha = new Bun.CryptoHasher('sha256')
+        .update(readFileSync(join(dir, 'drop.sql'), 'utf8'))
+        .digest('hex');
+      expect(JSON.parse(readFileSync(auditLogPath, 'utf8').trim())).toMatchObject({
+        command: 'db exec',
+        dry_run: true,
+        sql_sha256: sha,
+        tables: ['orders', 'users'],
+      });
+    } finally {
+      if (savedProfile === undefined) {
+        delete process.env.SSHEPHERD_PROFILE;
+      } else {
+        process.env.SSHEPHERD_PROFILE = savedProfile;
+      }
+    }
   });
 
   test('side files: one older than 90 days is deleted, and the oldest go first past 200 MB', async () => {
@@ -474,7 +497,9 @@ describe.skipIf(!fixtureUp())('db exec / backup / backup-verify (smoke fixture)'
       ],
     });
     expect(demoCount()).toBe(0);
-    expect(auditRows()).toEqual([]);
+    expect(auditRows()).toEqual([
+      expect.objectContaining({ command: 'db exec', dry_run: true, tables: ['exec_demo'] }),
+    ]);
 
     const real = cli('db', 'exec', 'prod', '--file', './fixtures/change.sql', '--yes');
     expect(real.envelope.data).toMatchObject({ dry_run: false, committed: true });

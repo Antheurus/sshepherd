@@ -22,6 +22,8 @@ export interface AuditEntryInput {
   bytes?: number;
   /** Op-specific fields (`db exec`: `sql_sha256`, `tables`). */
   extra?: AuditExtra;
+  /** Set on the row of a `--dry-run` that ran for real (`db exec`). */
+  dryRun?: boolean;
 }
 
 /** The arg names whose values are safe to log: they name a thing, they are not its contents. */
@@ -154,6 +156,7 @@ export function auditMutating(
     bytes: input.bytes,
     sql_sha256: input.extra?.sqlSha256,
     tables: input.extra?.tables,
+    dry_run: input.dryRun,
     profile: profile !== undefined && PROFILES.has(profile) ? profile : undefined,
     session_id:
       sessionId !== undefined && sessionId.length > 0

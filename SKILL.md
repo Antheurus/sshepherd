@@ -236,7 +236,7 @@ sshepherd db describe prod users
 sshepherd db count prod users --where-eq org_id=1
 sshepherd db migrations prod
 sshepherd db migrations prod --table schema_migrations --dir /opt/myapp/migrations   # current version + pending
-sshepherd db exec prod --file ./change.sql --dry-run   # writes: one transaction as write_role, per-statement row counts, ROLLBACK
+sshepherd db exec prod --file ./change.sql --dry-run   # runs for real as write_role, then ROLLBACK (not a simulation); deploy profile, audited
 sshepherd db exec prod --file ./change.sql --yes       # COMMIT; DROP/ALTER/TRUNCATE/CREATE/DO without --allow-ddl -> DDL_REFUSED
 sshepherd db backup prod --keep 7 --yes                # pg_dump -Fc on the host: {path, bytes, sha256, table_data_entries}
 sshepherd db backup-verify prod                        # restore into a throwaway db, COUNT(*) per table both sides, drop it
@@ -317,7 +317,7 @@ sshepherd setup ssh-alias adopt-env ./my-project --yes                 # SSH_* /
    `CONFIRMATION_REQUIRED` envelope and refuses before touching ssh. Success *and* failure
    both get an audit line in `~/.local/state/sshepherd/audit.jsonl`.
    **`SSHEPHERD_PROFILE` caps what a caller may run, before any ssh call:** `read` (every
-   read-only op and any `--dry-run`), `deploy` (adds services/config/files/deploy/tunnel
+   read-only op and any `--dry-run` but `db exec`'s), `deploy` (adds services/config/files/deploy/tunnel
    changes), `admin` (adds `security harden` and `hosts trust`). Unset means `admin`; any other
    value (`root`, an empty string) is refused with `PROFILE_DENIED` rather than read as admin. A
    pg-target's `max_profile = "read"` in `targets.toml` caps every db op on that target. A
@@ -338,13 +338,22 @@ sshepherd setup ssh-alias adopt-env ./my-project --yes                 # SSH_* /
    `<path>.bak-<UTC-timestamp>` in the same remote round trip, before the overwrite.
    `config put` also refuses any path not declared on that alias's allowlist
    (`~/.config/sshepherd/config-allowlist.toml`) — a local refusal, before any ssh call.
-6. **`db` is Postgres-only, read-only, v1.** `db query` takes a single `SELECT` — a bare
+6. **`db` is Postgres-only. Reads go through the read-only login; `db exec` writes through
+   `write_role`, governed.** `db query` takes a single `SELECT` — a bare
    `;` is rejected before the SQL is even parsed (multi-statement guard), on top of a
    parser check and a `BEGIN TRANSACTION READ ONLY` wrapper. The real boundary is the
    read-only DB role declared on the target (`references/db.md`) — treat the client-side
    checks as UX guardrails, not the security boundary. `db query` returns
    `data: {rows, row_count, truncated}` (a bare row array before 0.4.0): at most `--max-rows`
-   (500) rows, `statement_timeout` 60 s, `lock_timeout` 2 s.
+   (500) rows, `statement_timeout` 60 s, `lock_timeout` 2 s. `db exec`, `db backup` and
+   `db backup-verify` connect as the target's separate `write_role` and need the `deploy`
+   profile; `db exec` runs a local file as one transaction, refuses transaction control, role,
+   timer and parser-setting changes, and DDL without `--allow-ddl`. **`db exec --dry-run` runs
+   for real, then ROLLBACK — not a simulation; sequences advance, rows lock, triggers fire;
+   avoid on a busy production database.** It needs `deploy` and writes an audit row
+   (`dry_run: true`). Let through on purpose, because the DB role is the boundary:
+   `pg_terminate_backend`, `COPY … TO` a file, `lo_import`, dblink, `LOCK`, `LISTEN`/`NOTIFY`,
+   `SET search_path`, `WITH … DELETE` — grant `write_role` only what the change needs.
 7. **A deploy failure names the step that failed.** `deploy run`/`deploy migrate` surface
    `data.failed_step` (`{index, kind, name}`) on a `COMMAND_FAILED` error, recovered from a
    marker each step echoes on non-zero exit — never guess which step broke from the raw
