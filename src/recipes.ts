@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { HTTP_CONNECT_TIMEOUT_SEC, RECIPE_HTTP_PROBE_TIMEOUT_SEC } from './limits.ts';
 import { shellJoin, shq } from './quote.ts';
 import { didYouMean } from './suggest.ts';
 import { parseTomlFile } from './toml-parse.ts';
@@ -324,10 +325,17 @@ function healthcheckScript(target: string, timeoutSec: number): string {
   );
 }
 
+/** The one curl every request on the host runs (`http get|send`, `wait for --until url:`, the
+ *  http-probe step): bounded by `maxTime` (seconds, or shell text that expands to them), never
+ *  through a proxy, http and https only. `flags` (output, method, body) go before `urlRef`. */
+export function hostCurlCommand(urlRef: string, maxTime: string, flags: string): string {
+  return `curl ${flags} --max-time ${maxTime} --connect-timeout ${HTTP_CONNECT_TIMEOUT_SEC} --noproxy '*' --proto '=http,https' ${urlRef}`;
+}
+
 /** The http-probe executor: prints the status code `urlRef` (shell text naming the URL) answers
- *  with. `extraFlags` are inserted before the URL (`wait for --until url:` adds its limits). */
-export function httpStatusCommand(urlRef: string, extraFlags = ''): string {
-  return `curl -s -o /dev/null -w '%{http_code}'${extraFlags} ${urlRef}`;
+ *  with, within `maxTime` seconds. */
+export function httpStatusCommand(urlRef: string, maxTime: string): string {
+  return hostCurlCommand(urlRef, maxTime, "-s -o /dev/null -w '%{http_code}'");
 }
 
 function httpProbeScript(
@@ -339,7 +347,7 @@ function httpProbeScript(
   const u = shq(url);
   return (
     `i=0; while [ "$i" -lt ${retries} ]; do ` +
-    `code=$(${httpStatusCommand(u)} || echo 000); ` +
+    `code=$(${httpStatusCommand(u, String(RECIPE_HTTP_PROBE_TIMEOUT_SEC))} || echo 000); ` +
     `if [ "$code" = "${expectStatus}" ]; then exit 0; fi; ` +
     'i=$((i+1)); sleep ' +
     `${interval}; done; echo http-probe-failed >&2; exit 1`

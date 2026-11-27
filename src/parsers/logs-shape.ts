@@ -117,13 +117,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/** The first `MAX_LINE_BYTES` of `text`, never splitting a UTF-8 character. */
-function capLineText(text: string): string {
+/** The first `maxBytes` (default `MAX_LINE_BYTES`) of `text`, never splitting a UTF-8 character. */
+export function capLineText(text: string, maxBytes: number = MAX_LINE_BYTES): string {
   const bytes = Buffer.from(text, 'utf8');
-  if (bytes.length <= MAX_LINE_BYTES) {
+  if (bytes.length <= maxBytes) {
     return text;
   }
-  let end = MAX_LINE_BYTES;
+  let end = maxBytes;
   while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) {
     end -= 1;
   }

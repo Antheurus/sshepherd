@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { HTTP_CONNECT_TIMEOUT_SEC, RECIPE_HTTP_PROBE_TIMEOUT_SEC } from '../limits.ts';
 import {
   buildDeployOpContext,
   buildMigrateScript,
@@ -302,6 +303,26 @@ describe('quoting — non-shell recipe step fields are injection-safe (real sh -
     ];
     const script = buildRunScript(steps, '/opt/lms');
     assertShellParsesSafely(script, marker);
+  });
+
+  test('http-probe runs the same hardened curl as http get: bounded, no proxy, http(s) only', () => {
+    const script = buildRunScript(
+      [
+        {
+          kind: 'http-probe',
+          name: 'probe',
+          url: 'http://127.0.0.1:8080/health',
+          expect_status: 200,
+          retries: 1,
+          interval: 0,
+        },
+      ],
+      '/opt/lms',
+    );
+    expect(script).toContain(`--max-time ${RECIPE_HTTP_PROBE_TIMEOUT_SEC} `);
+    expect(script).toContain(`--connect-timeout ${HTTP_CONNECT_TIMEOUT_SEC} `);
+    expect(script).toContain(`--noproxy '\\''*'\\''`);
+    expect(script).toContain(`--proto '\\''=http,https'\\''`);
   });
 
   test('http-probe url shaped like a shell injection cannot splice a second command', () => {

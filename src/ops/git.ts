@@ -12,20 +12,66 @@ const NOT_FOUND = '__NOT_FOUND__';
 const NOT_A_REPO = '__NOT_A_REPO__';
 const NOT_REPO_ROOT = '__NOT_REPO_ROOT__';
 const UNSAFE_OWNER = '__UNSAFE_OWNER__';
+const CONFIG_UNREADABLE = '__CONFIG_UNREADABLE__';
+const UNNAMEABLE_DRIVER = '__UNNAMEABLE_DRIVER__';
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
-/** Every git call runs read-only: no optional index lock (`git status` would otherwise rewrite the
- *  index), and no hook or fsmonitor command a repository's own config could start. The path must be
- *  the repository's root, so an allowlisted directory never reads a repository above it. */
+/** Command-valued keys with a fixed name, each switched off on every git call. What the git read
+ *  ops (rev-parse, symbolic-ref, log, status, rev-list, remote, diff --numstat) can otherwise start:
+ *  the fsmonitor hook or daemon, hooks (post-index-change), a pager, the signature verifier `log`
+ *  runs under log.showSignature, an external diff, and — never reached offline, closed anyway — a
+ *  credential helper, askpass, ssh command, alternate-refs command and any remote transport. */
+const FIXED_OVERRIDES = [
+  'core.fsmonitor=false',
+  'core.hooksPath=/dev/null',
+  'core.pager=cat',
+  'log.showSignature=false',
+  'diff.external=',
+  'credential.helper=',
+  'core.askPass=',
+  'core.sshCommand=',
+  'core.alternateRefsCommand=',
+  'protocol.allow=never',
+];
+
+/** The command-valued keys whose name a repository chooses (`filter.<driver>.clean|smudge|process`,
+ *  which `status` and `diff` run on worktree files; `diff.<driver>.textconv|command`), read from
+ *  `git config --list --name-only` (every scope, includes followed) and each emptied, plus
+ *  `filter.<driver>.required=false` so an emptied filter is skipped rather than fatal. A `-c` splits
+ *  at the first `=`, so a driver whose name holds one cannot be named: the op refuses instead. */
+const DRIVER_OVERRIDES_AWK = String.raw`
+/^filter\..+\.(clean|smudge|process)$/ || /^diff\..+\.(textconv|command)$/ { k = $0 "=" }
+/^filter\..+\.required$/ { k = $0 "=false" }
+k != "" { if (index($0, "=") > 0) bad = 1; else print k; k = "" }
+END { if (bad) print "${UNNAMEABLE_DRIVER}" }
+`;
+
+/** Every git call runs read-only and starts no command a repository's config names: no optional
+ *  index lock (`git status` would otherwise rewrite the index), `FIXED_OVERRIDES`, and the
+ *  repository's own filter and diff drivers emptied (`DRIVER_OVERRIDES_AWK`); submodules are never
+ *  entered, since their config would name drivers of its own. The path must be the repository's
+ *  root, so an allowlisted directory never reads a repository above it. */
 function gitPrelude(path: string): string[] {
   return [
     `p=${shq(path)}`,
     `[ -d "$p" ] || { echo ${NOT_FOUND}; exit 0; }`,
     'command -v git >/dev/null 2>&1 || exit 127',
+    'set -f',
     'export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 GIT_PAGER=cat',
-    'g() { git -c core.fsmonitor=false -c core.hooksPath=/dev/null -C "$p" "$@"; }',
-    `top=$(g rev-parse --show-toplevel 2>&1) || { case "$top" in *"dubious ownership"*) echo ${UNSAFE_OWNER} ;; *) echo ${NOT_A_REPO} ;; esac; exit 0; }`,
+    `gb() { git --no-pager ${FIXED_OVERRIDES.map((entry) => `-c ${shq(entry)}`).join(' ')} -C "$p" "$@"; }`,
+    `top=$(gb rev-parse --show-toplevel 2>&1) || { case "$top" in *"dubious ownership"*) echo ${UNSAFE_OWNER} ;; *) echo ${NOT_A_REPO} ;; esac; exit 0; }`,
     `[ "$top" = "$(cd "$p" && pwd -P)" ] || { echo ${NOT_REPO_ROOT}; exit 0; }`,
+    `names=$(gb config --list --name-only 2>/dev/null) || { echo ${CONFIG_UNREADABLE}; exit 0; }`,
+    `ov=$(printf '%s\n' "$names" | awk ${shq(DRIVER_OVERRIDES_AWK)})`,
+    `case "$ov" in *${UNNAMEABLE_DRIVER}*) echo ${UNNAMEABLE_DRIVER}; exit 0 ;; esac`,
+    "nl='\n'",
+    'g() {',
+    '  n=$#; oifs=$IFS; IFS=$nl',
+    '  for o in $ov; do set -- "$@" -c "$o"; done',
+    '  IFS=$oifs',
+    '  while [ "$n" -gt 0 ]; do a=$1; shift; set -- "$@" "$a"; n=$((n - 1)); done',
+    '  gb "$@"',
+    '}',
   ];
 }
 
@@ -56,6 +102,14 @@ function refuseMarker(text: string, ctx: OpContext): void {
     [UNSAFE_OWNER]: [
       `git refuses '${path}': the repository is owned by another user than the ssh login`,
       'A human adds it to safe.directory for the login user on the host, or logs in as its owner.',
+    ],
+    [CONFIG_UNREADABLE]: [
+      `the git config of '${path}' cannot be listed, so the commands it names cannot be switched off`,
+      'git config --list --name-only needs git 2.6 or newer on the host; a human upgrades git there.',
+    ],
+    [UNNAMEABLE_DRIVER]: [
+      `the git config of '${path}' names a filter or diff driver with '=' in its name, which sshepherd cannot switch off`,
+      'A human renames that driver (filter.<name>.* / diff.<name>.*) in the repository config and its attributes.',
     ],
   };
   const refusal = messages[marker];
@@ -116,7 +170,7 @@ const gitHead: OpSpec<GitHead> = {
     gitCommand(reqStr(ctx, 'path'), [
       'echo "branch=$(g symbolic-ref --short -q HEAD)"',
       "g log -1 --format='commit=%H%nsubject=%s%ncommitted_at=%cI%nauthor=%an' 2>/dev/null || true",
-      'echo "dirty=$(g status --porcelain --untracked-files=no 2>/dev/null | wc -l)"',
+      'echo "dirty=$(g status --porcelain --untracked-files=no --ignore-submodules=all 2>/dev/null | wc -l)"',
       `u=$(g rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) && echo "upstream=$u" && echo "ahead_behind=$(g rev-list --left-right --count 'HEAD...@{u}' 2>/dev/null)"`,
       `g remote -v | awk ${shq(REMOTES_AWK)}`,
     ]),
@@ -124,7 +178,8 @@ const gitHead: OpSpec<GitHead> = {
     const text = parsed as string;
     refuseMarker(text, ctx);
     const lines = text.split('\n');
-    const [ahead, behind] = (field(lines, 'ahead_behind') ?? '').trim().split(/\s+/).map(Number);
+    const counts = field(lines, 'ahead_behind');
+    const [ahead, behind] = counts === null ? [] : counts.trim().split(/\s+/).map(Number);
     return {
       branch: field(lines, 'branch'),
       commit: field(lines, 'commit'),
@@ -215,6 +270,10 @@ interface GitDiffStat {
   truncated: boolean;
 }
 
+/** The first `m` numstat lines as `stat\t...`, then `totals=<files> <added> <deleted>` over every
+ *  line, so the totals stay true when the list is capped (a binary file counts no lines). */
+const NUMSTAT_AWK = String.raw`{ c++; if ($1 != "-") a += $1; if ($2 != "-") d += $2; if (c <= m) print "stat\t" $0 } END { printf "totals=%d %d %d\n", c, a, d }`;
+
 const gitDiffStat: OpSpec<GitDiffStat> = {
   group: 'git',
   name: 'diff-stat',
@@ -229,8 +288,8 @@ const gitDiffStat: OpSpec<GitDiffStat> = {
   buildRemote: (ctx) =>
     gitCommand(reqStr(ctx, 'path'), [
       `base=$(g rev-parse -q --verify HEAD) || base=${EMPTY_TREE}`,
-      `g diff --numstat --no-ext-diff --no-textconv "$base" | head -n ${GIT_DIFF_STAT_MAX_FILES + 1} | awk '{ print "stat\\t" $0 }'`,
-      'echo "untracked=$(g status --porcelain --untracked-files=normal | grep -c "^??")"',
+      `g diff --numstat --no-ext-diff --no-textconv --ignore-submodules=all "$base" | awk -v m=${GIT_DIFF_STAT_MAX_FILES} ${shq(NUMSTAT_AWK)}`,
+      'echo "untracked=$(g status --porcelain --untracked-files=normal --ignore-submodules=all | grep -c "^??")"',
     ]),
   shape: (parsed, ctx) => {
     const text = parsed as string;
@@ -246,14 +305,17 @@ const gitDiffStat: OpSpec<GitDiffStat> = {
           deleted: deleted === '-' ? null : Number(deleted),
         };
       });
-    const files = all.slice(0, GIT_DIFF_STAT_MAX_FILES);
+    const [filesChanged = 0, insertions = 0, deletions = 0] = (field(lines, 'totals') ?? '')
+      .trim()
+      .split(/\s+/)
+      .map(Number);
     return {
-      files,
-      files_changed: files.length,
-      insertions: files.reduce((sum, file) => sum + (file.added ?? 0), 0),
-      deletions: files.reduce((sum, file) => sum + (file.deleted ?? 0), 0),
+      files: all.slice(0, GIT_DIFF_STAT_MAX_FILES),
+      files_changed: filesChanged,
+      insertions,
+      deletions,
       untracked: Number((field(lines, 'untracked') ?? '0').trim()),
-      truncated: all.length > GIT_DIFF_STAT_MAX_FILES,
+      truncated: filesChanged > GIT_DIFF_STAT_MAX_FILES,
     };
   },
 };

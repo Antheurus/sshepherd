@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { auditLogPath } from '../audit.ts';
 import { runDoctorHosts } from '../ops/doctor.ts';
+import { scrubLocalOutput } from '../scrub.ts';
 import {
   adoptEnv,
   adoptedAliasName,
@@ -186,6 +187,28 @@ describe('setup host add', () => {
     expect(spawned).toEqual([]);
   });
 
+  test('the refused-trust message keeps the op names sshepherd wrote after the output scrub', async () => {
+    const configPath = tempConfigPath();
+    const { deps } = onboardDeps({
+      verdicts: [UNKNOWN_KEY],
+      hostsTrust: async () => ({
+        ok: false,
+        code: 'HOST_KEY_FINGERPRINT_MISMATCH',
+        message: 'hosts trust: the host presents SHA256:aaa, not SHA256:bbb; nothing was recorded',
+      }),
+    });
+    const result = await hostAdd(
+      'web1',
+      { host: '203.0.113.20', user: 'deploy', fingerprint: 'SHA256:bbb', yes: true },
+      configPath,
+      deps,
+    );
+    const shown = scrubLocalOutput(result).value;
+    expect(shown.error?.message).not.toContain('***');
+    expect(shown.error?.message).toContain('hosts trust');
+    expect(shown.error?.message).toContain('HOST_KEY_FINGERPRINT_MISMATCH');
+  });
+
   test('without --yes nothing is written; an unregistered alias needs --host and --user', async () => {
     const configPath = tempConfigPath();
     const refused = await hostAdd(
@@ -354,6 +377,42 @@ describe('setup ssh-alias adopt-env', () => {
     });
     expect(result.data?.[0]?.next).toStartWith('sshepherd hosts trust proj --dry-run');
     expect(spawned).toEqual([]);
+  });
+
+  test('no host adopted is an error that keeps every reason; one adopted out of two stays ok', async () => {
+    const configPath = tempConfigPath();
+    const dir = project(
+      [
+        'SSH_HOST=203.0.113.30',
+        'SSH_USER=deploy',
+        `SSH_PASSWORD=${FAKE_PASSWORD}`,
+        'OTHER_SSH_HOST=203.0.113.31',
+        'OTHER_SSH_USER=deploy',
+        `OTHER_SSH_PASSWORD=${FAKE_PASSWORD}`,
+      ].join('\n'),
+    );
+    const none = await adoptEnv(
+      dir,
+      { yes: true },
+      configPath,
+      onboardDeps({ verdicts: [UNKNOWN_KEY] }).deps,
+    );
+    expect(none.ok).toBe(false);
+    expect(none.error?.code).toBe('INSTALL_FAILED');
+    expect(none.error?.message).toContain('proj (HOST_KEY_UNKNOWN)');
+    expect(none.data?.map((host) => [host.alias, host.reason])).toEqual([
+      ['proj', 'HOST_KEY_UNKNOWN'],
+      ['proj-other', 'HOST_KEY_UNKNOWN'],
+    ]);
+    expect(scrubLocalOutput(none).value.error?.message).not.toContain('***');
+    const partial = await adoptEnv(
+      dir,
+      { yes: true },
+      configPath,
+      onboardDeps({ verdicts: [OK, UNKNOWN_KEY] }).deps,
+    );
+    expect([partial.ok, partial.error]).toEqual([true, null]);
+    expect(partial.data?.map((host) => host.key_installed)).toEqual([true, false]);
   });
 
   test('a wrong .env password reports INSTALL_FAILED; a second run on an adopted host is a no-op', async () => {

@@ -234,9 +234,10 @@ const KEYED_CALL_ARG = new RegExp(
 
 /** The same pair anywhere in a line (`... password=x&user=y`, `{"token":"x"}`, `--secret=x`), and a
  *  hash-rocket pair (`'password' => 'x'`, `:password=>'x'`) whose value is a quoted or numeric
- *  literal — an arrow function `token => token.trim()` is code, not a secret. */
+ *  literal — an arrow function `token => token.trim()` is code, not a secret. A quoted key starts a
+ *  pair whatever stands before its quote (`aaa"token":"x"`). */
 const KEYED_INLINE = new RegExp(
-  String.raw`${RUN_START}(["']?)(-*${RUN_KEY_NAME})\1([ \t]*(?:=>[ \t]*(?=["'\d])|[=:][ \t]*))("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s"',;&<>)}\]]+)`,
+  String.raw`(?:${RUN_START}|(?=["']))(["']?)(-*${RUN_KEY_NAME})\1([ \t]*(?:=>[ \t]*(?=["'\d])|[=:][ \t]*))("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s"',;&<>)}\]]+)`,
   'g',
 );
 
