@@ -12,6 +12,7 @@ import {
   MAX_HOSTNAME_CHARS,
   MAX_IDENTITY_GAP_CHARS,
   MAX_LABEL_HEX_TAIL_CHARS,
+  MAX_NESTED_ASSIGNMENT_DEPTH,
   MAX_PEM_LONE_END_SCAN_LINES,
   MAX_PSQL_TYPE_NAME_CHARS,
   MIN_BARE_HOSTNAME_CHARS,
@@ -86,7 +87,7 @@ function isSecretPair(name: string, value: string): boolean {
 /** A key name whose value is a secret whatever it holds: the reveal denylist, a name containing a
  *  secret word, a name ending in DSN or having a `_`/`.`/`-` segment equal to PASS/DSN, a
  *  `_PWD`/`_PW` name, a camelCase `...Key`/`...Salt`, a last segment ending in a joined
- *  `<prefix>key` or equal to SALT, or a KEY segment in a name of two or more segments. A bare
+ *  `<prefix>key` or equal to SALT or AUTH (docker's `"auth": "<base64 user:password>"`), or a KEY segment in a name of two or more segments. A bare
  *  `key`, `url`, `APP_URL` or `monkey` is not: a URL's credentials are masked by its shape, not its
  *  name. `PORT`, `NODE_ENV` and `DB_HOST` are not — a host is not a secret by default. */
 export function isSecretKey(name: string): boolean {
@@ -108,6 +109,7 @@ export function isSecretKey(name: string): boolean {
   return (
     JOINED_SECRET_KEY.test(last) ||
     last === 'SALT' ||
+    last === 'AUTH' ||
     segments.some((segment) => SECRET_NAME_SEGMENTS.has(segment)) ||
     (segments.length > 1 && segments.includes('KEY'))
   );
@@ -195,6 +197,20 @@ const FLAG_SPACED = new RegExp(
 interface ShapeRule {
   pattern: RegExp;
   replace: (match: string, ...groups: string[]) => string;
+}
+
+/** `operator does not exist: integer = text` (or `- text` for a prefix operator): psql names the
+ *  operand types, which are catalog names. A computed value echoed through `::regoper` comes back as
+ *  one token with no blank, since a name with one is refused as `invalid name syntax` first. */
+const PSQL_TYPE_NAME = String.raw`[A-Za-z_"][\w."]{0,${MAX_PSQL_TYPE_NAME_CHARS}}(?: [A-Za-z_][\w"]{0,${MAX_PSQL_TYPE_NAME_CHARS}}){0,3}(?:\[\])*`;
+const OPERATOR_SIGNATURE = new RegExp(
+  String.raw`^(?:${PSQL_TYPE_NAME} )?(?:[A-Za-z_]\w*\.)?[-+*/<>=~!@#%^&|\`?]{1,63} ${PSQL_TYPE_NAME}$`,
+);
+
+/** A psql rule: `keep` says a quoted value stays (already masked, or the caller's own SQL text). */
+interface PsqlEchoRule {
+  pattern: RegExp;
+  replace: (keep: (value: string) => boolean, match: string, ...groups: string[]) => string;
 }
 
 const PEM_LABEL = '[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?';
@@ -299,80 +315,83 @@ const PSQL_NAMED_OBJECT_KINDS = [
  *  cast as `syntax error in tsquery: "<v>"` or the content line above libxml's caret. Last, the
  *  backstop: on a line psql prefixes (`ERROR:`, `DETAIL:`, `HINT:`, `CONTEXT:`), a value quoted after
  *  `word: "` or `)=(` is masked whatever the text before it says, so a cast nobody listed still masks
- *  rather than leaks. `sql_error`'s fields carry no prefix, so only the listed texts reach those. */
-const PSQL_DATA_ECHO_RULES: ShapeRule[] = [
+ *  rather than leaks. `sql_error`'s fields carry no prefix, so only the listed texts reach those.
+ *  A value that repeats a whole token of the caller's own SQL (`ScrubOptions.echoText`) stays: it
+ *  names what the SQL wrote, which tells the caller nothing a `WHERE x = '<token>'` would not. */
+const PSQL_DATA_ECHO_RULES: PsqlEchoRule[] = [
   {
     pattern: new RegExp(
       String.raw`\b((?:invalid input syntax for type [^:"\n]{1,${MAX_PSQL_TYPE_NAME_CHARS}}|invalid input value for enum [^:"\n]{1,${MAX_PSQL_TYPE_NAME_CHARS}}|malformed (?:array|record|range|multirange) literal|(?:date\/time field value|interval field value|time zone displacement|date|timestamp) out of range): ")([^\n]*)(")`,
       'g',
     ),
-    replace: (m, head = '', value = '', close = '') =>
-      isMasked(value) ? m : `${head}${MASK}${close}`,
+    replace: (keep, m, head = '', value = '', close = '') =>
+      keep(value) ? m : `${head}${MASK}${close}`,
   },
   {
     pattern: /(\binvalid value ")([^\n]*?)(" for ")|(")([^"\n]*)(" is out of range for type )/g,
-    replace: (m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
+    replace: (keep, m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
       const [lead, inner, tail] = head.length > 0 ? [head, value, close] : [head2, value2, close2];
-      return isMasked(inner) ? m : `${lead}${MASK}${tail}`;
+      return keep(inner) ? m : `${lead}${MASK}${tail}`;
     },
   },
   {
     pattern: /\b(Token ")([^\n]*)(" is invalid)|(, but found ")([^\n]*)(")/g,
-    replace: (m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
+    replace: (keep, m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
       const [lead, inner, tail] = head.length > 0 ? [head, value, close] : [head2, value2, close2];
-      return isMasked(inner) ? m : `${lead}${MASK}${tail}`;
+      return keep(inner) ? m : `${lead}${MASK}${tail}`;
     },
   },
   {
     pattern: /\b(JSON data, line \d+: )([^\n]+)/g,
-    replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
+    replace: (keep, m, head = '', value = '') => (keep(value) ? m : `${head}${MASK}`),
   },
   {
     pattern:
       /\b(Key \([^\n]*?\)=\()([^\n]*?)(\) (?:already exists|is not present in table|is still referenced from table|conflicts with existing key))/g,
-    replace: (m, head = '', value = '', close = '') =>
-      isMasked(value) ? m : `${head}${MASK}${close}`,
+    replace: (keep, m, head = '', value = '', close = '') =>
+      keep(value) ? m : `${head}${MASK}${close}`,
   },
   {
     pattern:
       /\b((?:conflicts with existing key \([^\n]*?\)=|Failing row contains )\()([^\n]*)(\))/g,
-    replace: (m, head = '', value = '', close = '') =>
-      isMasked(value) ? m : `${head}${MASK}${close}`,
+    replace: (keep, m, head = '', value = '', close = '') =>
+      keep(value) ? m : `${head}${MASK}${close}`,
   },
   {
     pattern: new RegExp(
       String.raw`\b((?:${PSQL_NAMED_OBJECT_KINDS}|time zone) ")([^\n]*?)(")(?=(?: for encoding "[^"\n]*")? (?:does not exist|not recognized))|\b(column ")([^\n]*?)(")(?= of relation "[^"\n]*" does not exist)`,
       'g',
     ),
-    replace: (m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
+    replace: (keep, m, head = '', value = '', close = '', head2 = '', value2 = '', close2 = '') => {
       const [lead, inner, tail] = head.length > 0 ? [head, value, close] : [head2, value2, close2];
-      return isMasked(inner) ? m : `${lead}${MASK}${tail}`;
+      return keep(inner) ? m : `${lead}${MASK}${tail}`;
     },
   },
   {
     pattern:
       /\b((?:unrecognized configuration parameter|unrecognized encoding:|invalid (?:source |destination )?encoding name|invalid type name|at or near|syntax error in tsquery:|invalid size:|Invalid size unit:) ")([^\n]*)(")/g,
-    replace: (m, head = '', value = '', close = '') =>
-      isMasked(value) ? m : `${head}${MASK}${close}`,
+    replace: (keep, m, head = '', value = '', close = '') =>
+      keep(value) ? m : `${head}${MASK}${close}`,
   },
   {
     pattern: /\b(operator does not exist: )([^\n]+)/g,
-    replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
+    replace: (keep, m, head = '', value = '') =>
+      keep(value) || OPERATOR_SIGNATURE.test(value) ? m : `${head}${MASK}`,
   },
   {
     pattern: /^((?:DETAIL: {2})?line \d+: [^\n]*\n)([^\n]+)(?=\n[ \t]*\^[ \t]*$)/gm,
-    replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
+    replace: (keep, m, head = '', value = '') => (keep(value) ? m : `${head}${MASK}`),
   },
   {
     pattern: /^((?:psql:\S*\s+)?(?:ERROR|DETAIL|HINT|CONTEXT): {2}[^\n]*?[^\s:]: ")([^\n]*)(")/gm,
-    replace: (m, head = '', value = '', close = '') =>
-      isMasked(value) ? m : `${head}${MASK}${close}`,
+    replace: (keep, m, head = '', value = '', close = '') =>
+      keep(value) ? m : `${head}${MASK}${close}`,
   },
   {
     pattern:
       /^((?:psql:\S*\s+)?(?:ERROR|DETAIL|HINT|CONTEXT): {2}[^\n]*?\)=\()([^\n]*?)(\))(?=[ .,]|$)/gm,
-    replace: (m, head = '', value = '', close = '') =>
-      isMasked(value) ? m : `${head}${MASK}${close}`,
+    replace: (keep, m, head = '', value = '', close = '') =>
+      keep(value) ? m : `${head}${MASK}${close}`,
   },
 ];
 
@@ -485,7 +504,6 @@ const SHAPE_RULES: ShapeRule[] = [
       /(\b(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump)\b[^\n]{0,256}?[ \t]-p)([^\s"']+)/g,
     replace: (m, head = '', value = '') => (isMasked(value) ? m : `${head}${MASK}`),
   },
-  ...PSQL_DATA_ECHO_RULES,
 ];
 
 /** The alias's own connection identity, from the `ssh -G` the transport already runs to validate
@@ -501,6 +519,9 @@ export interface ScrubOptions {
   revealKeys?: ReadonlySet<string>;
   /** Per-alias extra patterns (reveal-allowlist.toml `[<alias>.scrub] extra_patterns`): every match is masked. */
   extraPatterns?: RegExp[];
+  /** Text the caller itself wrote (a `db query` statement): a value a psql error quotes that
+   *  repeats one of its whole tokens is the caller's own words and stays visible. */
+  echoText?: string;
   /** Exact strings masked wherever they stand as a whole word — the db connection fields an
    *  error echoes (`role "<user>" does not exist`), which an envelope never carries. */
   literals?: string[];
@@ -931,6 +952,19 @@ function isMasked(value: string): boolean {
   return bare === MASK || bare === ENV_MASK;
 }
 
+/** Whether `value` stands in `text` as a whole token: no word character or `$` on either side. */
+function isWholeTokenOf(value: string, text: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+  for (let at = text.indexOf(value); at !== -1; at = text.indexOf(value, at + 1)) {
+    if (!/[\w$]/.test(text[at - 1] ?? '') && !/[\w$]/.test(text[at + value.length] ?? '')) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function literalPattern(literal: string): RegExp {
   const escaped = literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?<![\\w.-])${escaped}(?![\\w.-])`, 'g');
@@ -959,10 +993,6 @@ function protectRevealedLines(text: string, revealKeys: ReadonlySet<string>): [s
   });
   return [protectedText, kept];
 }
-
-/** How many assignments deep a value is searched for another one: `CMD="--opt=--password=v"` is
- *  two; a deeper real one has not been seen, and the cap keeps a long `a=b=c=...` run linear. */
-const MAX_NESTED_ASSIGNMENT_DEPTH = 3;
 
 /** `KEYED_INLINE` over the text. A pair whose key is not secret is not consumed: the search resumes
  *  at its value, so an assignment nested inside it (`JAVA_OPTS="-Dspring.datasource.password=v"`,
@@ -1059,6 +1089,20 @@ function scrubTextWith(
       const groups = args.slice(0, -2).map((arg) => (typeof arg === 'string' ? arg : ''));
       const [match = '', ...rest] = groups;
       const replaced = rule.replace(match, ...rest);
+      if (replaced !== match) {
+        count += 1;
+      }
+      return replaced;
+    });
+  }
+  const echoText = options.echoText ?? '';
+  const keepPsqlValue = (value: string): boolean =>
+    isMasked(value) || isWholeTokenOf(value, echoText);
+  for (const rule of PSQL_DATA_ECHO_RULES) {
+    out = out.replace(rule.pattern, (...args: unknown[]) => {
+      const groups = args.slice(0, -2).map((arg) => (typeof arg === 'string' ? arg : ''));
+      const [match = '', ...rest] = groups;
+      const replaced = rule.replace(keepPsqlValue, match, ...rest);
       if (replaced !== match) {
         count += 1;
       }

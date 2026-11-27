@@ -232,6 +232,9 @@ export interface OpSpec<T = unknown> {
   /** Args resolved from local config that an envelope never carries (a db target's user,
    *  database, container, compose file, service): masked as whole words in every error. */
   hiddenArgs?: string[];
+  /** Args holding text the caller wrote that an error may quote back (`db query`'s SQL): a psql
+   *  error value repeating one of its whole tokens stays visible in errors. */
+  echoArgs?: string[];
   runLocal?: (ctx: OpContext, sshConfigPath: string, transport?: TransportDeps) => T | Promise<T>;
   /** Optional: one or more allowlist gates `executeOp` enforces before `buildRemote`. */
   allowlist?: AllowlistPolicy[];

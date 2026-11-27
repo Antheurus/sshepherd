@@ -32,6 +32,8 @@ import {
   type ConnectionIdentity,
   isEnvFile,
   maskEnvContent,
+  maskPemBodyChunks,
+  maskPemLines,
   type ScrubOptions,
   scrub,
 } from './scrub.ts';
@@ -55,8 +57,9 @@ function effectiveTimeoutSec(op: OpSpec, deps: ExecuteDeps): number {
 
 /** A timed-out command's stdout so far is still the legitimate payload — return it
  *  (capped) so a "almost done" step is visible instead of lost. An op reading an env-shaped
- *  allowlisted path gets the same whole-file masking its `shape` would have applied, before the cap
- *  so a cut can never leave a quoted value unclosed. */
+ *  allowlisted path gets the same whole-file masking its `shape` would have applied, and every op
+ *  gets the line-array key-body pass `logs *` runs on its lines (a cut window can hold key body
+ *  lines with neither marker), both before the cap so a cut can never leave a quoted value unclosed. */
 function partialStdout(
   op: OpSpec,
   ctx: OpContext,
@@ -70,7 +73,8 @@ function partialStdout(
   const path = pathPolicy ? ctx.args[pathPolicy.argName] : undefined;
   const text =
     typeof path === 'string' && isEnvFile(path) ? maskEnvContent(stdout, new Set()) : stdout;
-  return { partial_stdout: text.slice(0, MAX_PARTIAL_STDOUT_CHARS) };
+  const lines = maskPemBodyChunks(maskPemLines(text.split('\n'))).join('\n');
+  return { partial_stdout: lines.slice(0, MAX_PARTIAL_STDOUT_CHARS) };
 }
 
 /** `error.stderr_tail` is the last 20 lines of a failed command's stderr, then at most its last
@@ -101,8 +105,8 @@ function scrubOptionsFor(op: OpSpec, ctx: OpContext): ScrubOptions {
   };
 }
 
-function hiddenValues(op: OpSpec, ctx: OpContext): string[] {
-  return (op.hiddenArgs ?? [])
+function argValues(names: string[] | undefined, ctx: OpContext): string[] {
+  return (names ?? [])
     .map((name) => ctx.args[name])
     .filter((value): value is string => typeof value === 'string' && value.length > 0);
 }
@@ -127,7 +131,12 @@ function scrubEnvelope(
   const effective =
     envelope.error === null
       ? withAddresses
-      : { ...withAddresses, revealKeys: new Set<string>(), literals: hiddenValues(op, ctx) };
+      : {
+          ...withAddresses,
+          revealKeys: new Set<string>(),
+          literals: argValues(op.hiddenArgs, ctx),
+          echoText: argValues(op.echoArgs, ctx).join('\n'),
+        };
   const { value, count } = scrub(
     { data: envelope.data, error: envelope.error, stderr: commandStderr },
     effective,

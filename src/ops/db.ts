@@ -522,6 +522,7 @@ const dbQuery: OpSpec<DbQueryResult> = {
   errorData: psqlErrorData,
   refineError: refinePsqlTimeout(DB_QUERY_TIMEOUT_SEC),
   hiddenArgs: DB_CONNECTION_ARGS,
+  echoArgs: ['sql'],
   buildRemote: (ctx) => {
     const sql = reqStr(ctx, 'sql');
     assertNoMultiStatementSql(sql);

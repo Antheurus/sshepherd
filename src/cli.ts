@@ -42,6 +42,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   'help',
   'all',
   'diagnose',
+  'all-types',
 ]);
 
 const GROUPS = [...new Set(listOps().map((op) => op.group))];

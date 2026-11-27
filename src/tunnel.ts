@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { CONNECT_TIMEOUT_SEC, TUNNEL_FORWARD_SETTLE_MS, TUNNEL_OPEN_WAIT_SEC } from './limits.ts';
+import { CONNECT_TIMEOUT_SEC, TUNNEL_OPEN_WAIT_SEC } from './limits.ts';
 import { listHostAliases } from './parsers/ssh-config.ts';
 import { writeTextSecure } from './setup-file-io.ts';
 import { classify, errorInfo, STRICT_HOST_KEY_ARGS, sshConfigArgs } from './transport.ts';
@@ -115,8 +115,8 @@ export function buildSshArgs(params: OpenTunnelParams, localPort: number | null)
 }
 
 /** Strict host keys; ssh exits when a forward cannot be set up rather than idling without it; a
- *  bounded connect; and `VERBOSE` so its stderr says when it authenticated — the one line
- *  `awaitForward` waits for. */
+ *  bounded connect; and `DEBUG1` so its stderr says when the forward itself is up — the line
+ *  `awaitForward` waits for, which `VERBOSE` never prints. */
 const TUNNEL_SSH_ARGS = [
   ...STRICT_HOST_KEY_ARGS,
   '-o',
@@ -124,17 +124,19 @@ const TUNNEL_SSH_ARGS = [
   '-o',
   `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
   '-o',
-  'LogLevel=VERBOSE',
+  'LogLevel=DEBUG1',
 ];
 
-const AUTHENTICATED_LINE = /^Authenticated to /m;
+/** ssh's own word that the forward is up: `-L`/`-D` once it listens, `-R` once the server accepted
+ *  the remote forward. A refused one exits instead (`ExitOnForwardFailure`), however slow the link. */
+const FORWARD_READY_LINE =
+  /^debug1: (?:Local forwarding listening on |remote forward success for: )/m;
 const FORWARD_POLL_MS = 100;
 
-/** Waits for the tunnel's ssh to authenticate and keep running `TUNNEL_FORWARD_SETTLE_MS` more
- *  (a refused local bind exits at once, a refused remote forward within one round trip), or to
- *  exit, within `TUNNEL_OPEN_WAIT_SEC`. Returns null when the forward is up, else the error its
- *  stderr classifies as (`HOST_KEY_UNKNOWN`, `HOST_KEY_CHANGED`, `AUTH_FAILED`, ...) — that stderr
- *  is read here and discarded, never returned. */
+/** Waits for the tunnel's ssh to say its forward is up (`FORWARD_READY_LINE`), or to exit, within
+ *  `TUNNEL_OPEN_WAIT_SEC`. Returns null when the forward is up, else the error its stderr classifies
+ *  as (`HOST_KEY_UNKNOWN`, `HOST_KEY_CHANGED`, `AUTH_FAILED`, ...) — that stderr is read here and
+ *  discarded, never returned. */
 export async function awaitForward(
   stderrPath: string,
   exited: Promise<unknown>,
@@ -152,7 +154,6 @@ export async function awaitForward(
     }
   };
   const deadline = Date.now() + waitMs;
-  let authenticatedAt: number | null = null;
   while (Date.now() < deadline) {
     await Bun.sleep(FORWARD_POLL_MS);
     if (gone) {
@@ -165,10 +166,7 @@ export async function awaitForward(
       });
       return error ?? errorInfo('SSH_TRANSPORT_ERROR');
     }
-    if (authenticatedAt === null && AUTHENTICATED_LINE.test(readStderr())) {
-      authenticatedAt = Date.now();
-    }
-    if (authenticatedAt !== null && Date.now() - authenticatedAt >= TUNNEL_FORWARD_SETTLE_MS) {
+    if (FORWARD_READY_LINE.test(readStderr())) {
       return null;
     }
   }

@@ -77,6 +77,12 @@ export const MAX_IDENTITY_GAP_CHARS = 8;
  *  an identifier at 63 bytes, and a multi-word type (`timestamp with time zone`) is far shorter, so
  *  64 holds every real one while a long line with no `: "` is never rescanned past it. */
 export const MAX_PSQL_TYPE_NAME_CHARS = 64;
+/** How many assignments deep a value is searched for another one: `CMD="--opt=--password=v"` is
+ *  two, `K8S_ARGS=--set=env=JAVA_OPTS=-Ddb.password=v` four, and a secret query parameter in a URL
+ *  nested in another URL's query (`CB=https://a/?r=https://b/?token=v`) counts each `https:` too.
+ *  8 doubles the deepest real one seen; each level rescans only its own value, so the cost grows
+ *  with the cap, never with the chain (a 200,000-deep `a=b=c=...` chain stays linear). */
+export const MAX_NESTED_ASSIGNMENT_DEPTH = 8;
 /** How far past `user@` the scrubber reads to decide it is a login (`app@web-01`) and not a
  *  version or digest (`app@2.0.0`): 253 is the longest DNS name, and the bound keeps it linear. */
 export const MAX_HOSTNAME_CHARS = 253;
@@ -155,9 +161,6 @@ export const MASTER_HOST_KEY_RECHECK_SEC = 300;
 /** `tunnel open` waits this long for ssh to authenticate and set up the forward, or to exit: the
  *  connect limit plus 5 s for the key exchange and the forward request. */
 export const TUNNEL_OPEN_WAIT_SEC = CONNECT_TIMEOUT_SEC + 5;
-/** After ssh reports it authenticated, how long `tunnel open` watches it before calling the forward
- *  up: a refused local bind exits at once, a refused remote forward within one round trip. */
-export const TUNNEL_FORWARD_SETTLE_MS = 1_000;
 /** Lines a lone private-key END (its BEGIN cut off) looks back for the body lines its own log prefix
  *  wrote, skipping other writers' lines in between: an 8192-bit RSA key is about 100 body lines, and
  *  400 leaves room for three interleaved lines per body line while keeping the pass linear. */

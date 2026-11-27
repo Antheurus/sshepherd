@@ -410,7 +410,9 @@ const hostsTrust: OpSpec<HostsTrustResult> = {
         {
           hint: changed
             ? 'known_hosts holds a key for this host that it no longer presents, and none it presents is the one that was confirmed; find out why before trusting anything.'
-            : 'compare with the fingerprint from the provider console (or ssh-keygen -l on the host itself) and pass the one the host presents; nothing was trusted for this host yet.',
+            : known.length > 0
+              ? 'known_hosts already trusts a key this host presents, so this is a fingerprint that does not match rather than a changed key: compare with the fingerprint from the provider console (or ssh-keygen -l on the host itself) and pass the one the host presents.'
+              : 'compare with the fingerprint from the provider console (or ssh-keygen -l on the host itself) and pass the one the host presents; nothing was trusted for this host yet.',
           next: `sshepherd hosts trust ${ctx.alias} --dry-run`,
         },
       );

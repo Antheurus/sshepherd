@@ -166,7 +166,7 @@ describe('validateOpenParams', () => {
   });
 });
 
-/** Strict host keys, exit when a forward fails, a bounded connect, and the VERBOSE stderr line the
+/** Strict host keys, exit when a forward fails, a bounded connect, and the DEBUG1 stderr line the
  *  open waits for. */
 const TUNNEL_ARGS = [
   '-o',
@@ -176,7 +176,7 @@ const TUNNEL_ARGS = [
   '-o',
   'ConnectTimeout=10',
   '-o',
-  'LogLevel=VERBOSE',
+  'LogLevel=DEBUG1',
 ];
 
 describe('buildSshArgs', () => {
@@ -519,8 +519,11 @@ describe('awaitForward', () => {
     expect((await awaitForward(path, proc.exited))?.code).toBe('SSH_TRANSPORT_ERROR');
   });
 
-  test('authenticated and still running after the settle time: the forward is up', async () => {
-    const { path, proc } = child(AUTHENTICATED, 'exec sleep 5');
+  test('ssh says the forward is listening and keeps running: the forward is up', async () => {
+    const { path, proc } = child(
+      `${AUTHENTICATED}debug1: Local forwarding listening on 127.0.0.1 port 2222.\n`,
+      'exec sleep 5',
+    );
     try {
       expect(await awaitForward(path, proc.exited)).toBeNull();
     } finally {

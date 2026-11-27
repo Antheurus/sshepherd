@@ -413,7 +413,7 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `CONNECT_TIMEOUT` | couldn't reach the host within the connect timeout |
 | `AUTH_FAILED` | SSH authentication failed for this alias |
 | `HOST_KEY_CHANGED` | the host presented a different key than `known_hosts` holds for the alias (a reinstalled server, or someone in the middle); from `hosts trust`, `known_hosts` holds a key the host no longer presents and none it presents matches `--fingerprint` — find out why before trusting anything; `next` is `hosts trust <alias> --dry-run` |
-| `HOST_KEY_FINGERPRINT_MISMATCH` | `hosts trust --fingerprint` named no key the host presents, and nothing was trusted for this host yet: a mistyped or wrong fingerprint, not a changed key; compare with the provider console or `ssh-keygen -l` on the host; exit `2` |
+| `HOST_KEY_FINGERPRINT_MISMATCH` | `hosts trust --fingerprint` named no key the host presents, and `known_hosts` holds no key the host stopped presenting (nothing trusted yet, or a presented key already trusted): a mistyped or wrong fingerprint, not a changed key; compare with the provider console or `ssh-keygen -l` on the host; exit `2` |
 | `KNOWN_HOSTS_UNWRITABLE` | `hosts trust` cannot record the key: the alias's `known_hosts` (or its directory) is not writable, is `/dev/null` or not a regular file, or the write did not read back; nothing was recorded; exit `2` |
 | `HOST_KEY_UNKNOWN` | `known_hosts` has no key for the alias; sshepherd never accepts one on first use — confirm it with `hosts trust` |
 | `SSH_TRANSPORT_ERROR` | ssh failed before the remote command could run, unclassified |
