@@ -185,3 +185,9 @@ export const MAX_FILES_LINE_SPAN = 5_000;
  *  pair now and then, while a `.env` dump holds many; build output that happens to look like
  *  three assignments in a row is masked too, a cost the user accepted. */
 export const ENV_BLOCK_MIN_LINES = 3;
+
+/** PEM marker lines (`-----BEGIN ...-----` / `-----END ...-----`) `files grep` and `files head|tail
+ *  --lines` read from the whole file to tell which returned lines sit inside a private-key block: a
+ *  bundle of a few dozen certificates and keys stays far under it, and past it every returned line
+ *  of that file is masked rather than judged from a partial list. */
+export const MAX_PEM_MARKER_LINES = 256;

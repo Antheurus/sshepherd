@@ -4,7 +4,8 @@ import { parseHumanBytesPair, parsePercent } from '../parsers/bytes.ts';
 import { type PortMapping, parseInspectPorts } from '../parsers/docker-ports.ts';
 import { parseSystemctlShow } from '../parsers/systemctl-show.ts';
 import { shellJoin, shq } from '../quote.ts';
-import type { OpSpec } from '../types.ts';
+import { declaredContainers } from '../targets.ts';
+import type { OpContext, OpSpec } from '../types.ts';
 import { containerEnvSummaryScript, type EnvKeyEntry, parseEnvKeyLines } from './env.ts';
 
 // ---------------------------------------------------------------------------
@@ -197,7 +198,8 @@ interface ServiceInspectDetail extends ServiceEntry {
   networks: NetworkEntry[];
   /** `Config.Cmd`, argument by argument (the scrubber masks a secret-shaped one). */
   cmd: string[];
-  /** `Config.Env` reduced on the host to key names: values never reach this process. */
+  /** `Config.Env` reduced on the host to key names: values never reach this process. Empty unless
+   *  the container is declared for the alias in targets.toml, the gate `env keys --container` has. */
   env: EnvKeyEntry[];
 }
 
@@ -258,13 +260,18 @@ const INSPECT_TEMPLATE = [
 
 const ENV_SECTION_MARKER = '__ENV__';
 
-function inspectScript(container: string): string {
+/** Whether `env keys --container` may read this container on the op's alias. */
+function envDeclared(ctx: OpContext): boolean {
+  return declaredContainers(ctx.alias).includes(reqStr(ctx, 'container'));
+}
+
+/** The env section is read on the host only for a declared container. */
+function inspectScript(container: string, withEnv: boolean): string {
   return [
     `c=${shq(container)}`,
     'command -v docker >/dev/null 2>&1 || exit 127',
     `docker inspect --type container --format ${shq(`${INSPECT_TEMPLATE}{{"\\n"}}`)} -- "$c" || exit $?`,
-    `echo ${ENV_SECTION_MARKER}`,
-    containerEnvSummaryScript('"$c"'),
+    ...(withEnv ? [`echo ${ENV_SECTION_MARKER}`, containerEnvSummaryScript('"$c"')] : []),
   ].join('; ');
 }
 
@@ -288,10 +295,11 @@ const servicesInspect: OpSpec<ServiceInspectDetail[]> = {
   exposes: 'metadata',
   timeoutSec: SERVICES_TIMEOUT_SEC,
   output: { parse: parseInspectOutput },
-  buildRemote: (ctx) => shellJoin(['sh', '-c', inspectScript(reqStr(ctx, 'container'))]),
-  shape: (parsed) => {
+  buildRemote: (ctx) =>
+    shellJoin(['sh', '-c', inspectScript(reqStr(ctx, 'container'), envDeclared(ctx))]),
+  shape: (parsed, ctx) => {
     const { inspect, env } = parsed as ReturnType<typeof parseInspectOutput>;
-    const detail = shapeInspectDetail(inspect, env);
+    const detail = shapeInspectDetail(inspect, envDeclared(ctx) ? env : []);
     return detail === null ? [] : [detail];
   },
 };

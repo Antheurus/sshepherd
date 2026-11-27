@@ -652,7 +652,8 @@ describe('setup db-target ro-role and discover', () => {
     expect(outcome.sql).toContain(
       'CREATE ROLE sshepherd_ro WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;',
     );
-    expect(outcome.sql).toContain('GRANT pg_read_all_data TO sshepherd_ro;');
+    expect(outcome.sql).toContain('GRANT SELECT ON ALL TABLES IN SCHEMA public TO sshepherd_ro;');
+    expect(outcome.sql).not.toContain('GRANT pg_read_all_data');
     expect(outcome.sql).toContain("SET temp_file_limit = '256MB'");
     expect(roRole('prod', { printSql: false }, path)).toMatchObject({
       error: { code: 'INVALID_ARGS' },
@@ -785,23 +786,32 @@ describe('db query: the caller SQL cannot leave the row-limit wrapper', () => {
   }
 });
 
-describe('setup db-target ro-role --tables-only', () => {
-  test('names the pg_authid exposure by default and grants only app tables with --tables-only', () => {
+describe('setup db-target ro-role: tables only by default, --all-data opt-in', () => {
+  test('grants only app tables by default (--tables-only is the same SQL); --all-data names the pg_authid exposure', () => {
     const path = join(scratch, 'ro-role-targets.toml');
     writeFileSync(
       path,
-      '[prod]\nalias = "web-1"\ncontainer = "db"\nuser = "app"\ndatabase = "app"\n',
+      '[prod]\nalias = "web-1"\ncontainer = "db"\nuser = "app"\ndatabase = "app"\n[envonly]\nalias = "web-1"\ncontainers = ["app_1"]\n',
     );
-    const full = roRole('prod', { printSql: true }, path);
-    const tables = roRole('prod', { printSql: true, tablesOnly: true }, path);
-    if (!('sql' in full) || !('sql' in tables)) {
+    const full = roRole('prod', { printSql: true, allData: true }, path);
+    const tables = roRole('prod', { printSql: true }, path);
+    const alias = roRole('prod', { printSql: true, tablesOnly: true }, path);
+    if (!('sql' in full) || !('sql' in tables) || !('sql' in alias)) {
       throw new Error('expected SQL');
     }
+    expect(alias.sql).toBe(tables.sql);
     expect(full.sql).toContain('pg_authid');
     expect(full.sql).toContain('GRANT pg_read_all_data TO sshepherd_ro;');
+    expect(full.sql).toContain('substr, encode, replace of rolpassword) comes back NOT masked');
     expect(full.sql).toContain(
       "has_table_privilege('sshepherd_ro', 'pg_authid', 'SELECT'); -- expect: t",
     );
+    expect(roRole('prod', { printSql: true, allData: true, tablesOnly: true }, path)).toMatchObject(
+      { error: { code: 'INVALID_ARGS' } },
+    );
+    expect(roRole('envonly', { printSql: true }, path)).toMatchObject({
+      error: { code: 'VALIDATION_ERROR' },
+    });
     expect(tables.sql).not.toContain('GRANT pg_read_all_data');
     expect(tables.sql).toContain('GRANT USAGE ON SCHEMA public TO sshepherd_ro;');
     expect(tables.sql).toContain('GRANT SELECT ON ALL TABLES IN SCHEMA public TO sshepherd_ro;');

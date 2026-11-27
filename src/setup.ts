@@ -70,7 +70,7 @@ const SETUP_ACTION_FLAGS: Record<string, string[]> = {
   'ssh-alias register': ['host', 'user', 'port', 'overwrite'],
   'ssh-alias update': ['host', 'user', 'port'],
   'db-target scaffold': ['alias', 'user', 'database', 'compose-file', 'service', 'container'],
-  'db-target ro-role': ['print-sql', 'role', 'tables-only'],
+  'db-target ro-role': ['print-sql', 'role', 'all-data', 'tables-only'],
   'db-target discover': [],
   'config-allowlist scaffold': ['paths'],
   'files-allowlist scaffold': ['paths'],
@@ -247,15 +247,16 @@ async function runSshAliasAction(action: string, argTail: string[]): Promise<voi
   process.exitCode = setupExitCode(result);
 }
 
-/** `setup db-target ro-role <target> --print-sql [--role <name>] [--tables-only]`: the SQL is the whole output
+/** `setup db-target ro-role <target> --print-sql [--role <name>] [--all-data]`: the SQL is the whole output
  *  (plain text a human pipes into psql); only a refusal prints a setup result. */
 function runDbTargetRoRole(argTail: string[]): void {
   const { positionals, flags } = parseArgv(argTail);
   const printSql = getFlag(flags, 'print-sql');
+  const allData = getFlag(flags, 'all-data');
   const tablesOnly = getFlag(flags, 'tables-only');
-  // `--print-sql <target>` / `--tables-only <target>`: neither flag takes a value, so a word after
-  // one is the target.
-  for (const value of [printSql, tablesOnly]) {
+  // `--print-sql <target>` / `--all-data <target>` / `--tables-only <target>`: no flag takes a
+  // value, so a word after one is the target.
+  for (const value of [printSql, allData, tablesOnly]) {
     if (value !== undefined && value !== 'true') {
       positionals.unshift(value);
     }
@@ -277,6 +278,7 @@ function runDbTargetRoRole(argTail: string[]): void {
   const outcome = roRole(target, {
     printSql: printSql !== undefined,
     role: getFlag(flags, 'role'),
+    allData: allData !== undefined,
     tablesOnly: tablesOnly !== undefined,
   });
   if ('sql' in outcome) {
