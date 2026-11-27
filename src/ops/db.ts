@@ -50,6 +50,7 @@ import {
   DB_BACKUP_TIMEOUT_SEC,
   DB_BACKUP_VERIFY_MAX_TABLES,
   DB_BACKUP_VERIFY_TIMEOUT_SEC,
+  DB_EXEC_MAX_COMMAND_BYTES,
   DB_EXEC_MAX_SQL_BYTES,
   DB_EXEC_MAX_STATEMENTS,
   DB_EXEC_MAX_TABLES,
@@ -1209,12 +1210,23 @@ const dbExec: OpSpec<DbExecResult> = {
   buildRemote: (ctx) => {
     const conn = writeConnection(ctx, 'db exec');
     const { statements } = execPlan(ctx);
-    return buildDbExecCommand(
+    const command = buildDbExecCommand(
       conn,
-      boundedSql(ctx, DB_EXEC_TIMEOUT_SEC),
+      budgetSec(ctx, DB_EXEC_TIMEOUT_SEC),
       statements.map((statement) => statement.text),
       !optBool(ctx, 'dry-run', false),
     );
+    const bytes = Buffer.byteLength(command, 'utf8');
+    if (bytes > DB_EXEC_MAX_COMMAND_BYTES) {
+      throw new OpError(
+        'VALIDATION_ERROR',
+        `db exec: the file's ${statements.length} statements make a ${bytes}-byte remote command once quoted; one call carries at most ${DB_EXEC_MAX_COMMAND_BYTES}; nothing ran`,
+        {
+          hint: 'Split the change into smaller files and run them one after the other; many statements and many quotes are what fill it.',
+        },
+      );
+    }
+    return command;
   },
   shapeError: (raw) => ({
     committed: raw.commandStderr.includes(EXEC_TXN_ENDED_MARKER) ? null : false,

@@ -194,20 +194,42 @@ They run on `container` and `host` targets only: a `container-env` URL names its
 strings, quoted names, dollar quotes and comments by the same lexical rules `db query`'s scanner
 uses; each statement becomes its own psql buffer, followed by an `\echo` of psql's `ROW_COUNT`.
 The session gets the bounded-read limits (`statement_timeout` = budget less 15 s, default budget
-300 s; `lock_timeout` 2 s), then `BEGIN`, the statements, and `COMMIT` — or `ROLLBACK` for
-`--dry-run`. `ON_ERROR_STOP` ends psql at the first failing statement and the server rolls the open
-transaction back. Statement output goes to `/dev/null` (`\o`), so a `SELECT` in the file returns
-only its row count.
+300 s; `lock_timeout` 2 s), `idle_in_transaction_session_timeout` and, on Postgres 17+,
+`transaction_timeout` at the same value, then `BEGIN`, the statements, and `COMMIT` — or `ROLLBACK`
+for `--dry-run`. `ON_ERROR_STOP` ends psql at the first failing statement and the server rolls the
+open transaction back. Statement output goes to `/dev/null` (`\o`), so a `SELECT` in the file returns
+only its row count. The whole remote command must fit one 128 KiB shell argument; a file whose
+statements, pins and quoting would not (many statements, many quotes) is refused with its size
+(`VALIDATION_ERROR`, nothing ran) — split it.
 
 The server must end each statement exactly where the splitter did, so the session pins every
 setting the splitter's lexing depends on — `standard_conforming_strings = on`, `client_encoding =
 UTF8`, `backslash_quote = safe_encoding`, `escape_string_warning = on` — and sets the first two
-again in their own buffer before every statement (Postgres lexes a buffer whole before running
-it, so a setting changed out of sight, inside a function or `query_to_xml`, is back before the
-next statement is read). After the last statement it checks that the open transaction is still the
-one it began (its xid, held in a transaction-local setting); if a COMMIT or ROLLBACK ran that the
-splitter never saw, the call fails `COMMAND_FAILED` with `data.committed: null` and a message saying
-what ran may already be committed — never a quiet `committed: false`.
+again in their own buffer before every statement, together with `statement_timeout` and
+`lock_timeout` (Postgres lexes a buffer whole before running it, so a setting changed out of
+sight, inside a function or `query_to_xml`, is back before the next statement is read, and a
+statement's own timer was armed when it started). The idle and transaction timeouts are set once:
+the watchdog below ends the backend at the budget whatever they say.
+
+After the last statement two checks ask whether the open transaction is still the one it began. The
+server compares the xid with a transaction-local copy (this stops a plain hidden `COMMIT` before the
+final `COMMIT` runs); and psql prints the xid right after `BEGIN` and again just before the end, on
+stdout where no statement's output can reach (`\o /dev/null` covers them), and the remote shell
+compares the two lines — a hidden `COMMIT; BEGIN; set_config(...)` can forge the setting, not a
+line already read. If a COMMIT or ROLLBACK ran that the splitter never saw, the call fails
+`COMMAND_FAILED` with `data.committed: null` and a message saying what ran may already be committed
+— never a quiet `committed: false` or `rolled_back`. After a forged one, statements behind it may
+already be committed too.
+
+**The budget ends the backend, not only the ssh session.** Killing the ssh session does not stop a
+psql inside `docker exec`, which would run the rest of a file that outlived its budget and could
+still `COMMIT` after the call had answered `COMMAND_TIMEOUT`. A watchdog in its own session
+(`setsid`, else `nohup`) holds the backend's pid and start time from `BEGIN`; when the call's shell
+is gone or the budget has passed and psql has not finished, it runs `pg_cancel_backend` on that
+backend over a second connection as the write role, waits up to 5 s for it to leave, then
+`pg_terminate_backend`. The pid AND `backend_start` must both match, so a pid reused by another
+session is never signalled. No lock and no partial transaction outlives the budget by more than
+those 5 s.
 
 Refused outright, before any ssh call: transaction control (`BEGIN`, `COMMIT`, `SAVEPOINT`, ...),
 a psql meta-command (a buffer starting with a backslash), `SET`/`RESET` of the role or a timer, any

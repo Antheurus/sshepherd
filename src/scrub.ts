@@ -19,6 +19,7 @@ import {
   MIN_BARE_HOSTNAME_CHARS,
   MIN_MASKED_USER_CHARS,
   SCRUB_MAX_JSON_ESCAPE_LEVELS,
+  SCRUB_MAX_PERCENT_DECODE_LEVELS,
 } from './limits.ts';
 
 export const MASK = '***';
@@ -238,7 +239,7 @@ const KEYED_CALL_ARG = new RegExp(
  *  literal — an arrow function `token => token.trim()` is code, not a secret. A quoted key starts a
  *  pair whatever stands before its quote (`aaa"token":"x"`). */
 const KEYED_INLINE = new RegExp(
-  String.raw`(?:${RUN_START}|(?=["']))(["']?)(-*${RUN_KEY_NAME})\1([ \t]*(?:=>[ \t]*(?=["'\d])|[=:][ \t]*))("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s"',;&<>)}\]]+)`,
+  String.raw`(?:${RUN_START}|(?=["']))(["']?)(-*${RUN_KEY_NAME})\1([ \t]*(?:=>[ \t]*(?=["'\d])|[=:][ \t]*))("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|[^\s"',;&<>)}\]]+|"(?:[^"\\\n]|\\.)*(?=\n|$))`,
   'g',
 );
 
@@ -1182,16 +1183,9 @@ function keyedInlineSecretSpans(text: string, revealKeys: ReadonlySet<string>): 
 
 const PERCENT_ESCAPE = /%([0-9A-Fa-f]{2})/g;
 
-/** `KEYED_INLINE` over the text with its `%XX` escapes decoded one level, so a pair inside a
- *  percent-encoded URL (`redirect=https%3A%2F%2Fb.example.net%2F%3Ftoken%3D<v>`) is found too; each
- *  value it finds is masked at its encoded offsets and the rest of the text is left as written. */
-function maskEncodedKeyedInline(
-  text: string,
-  revealKeys: ReadonlySet<string>,
-): ScrubResult<string> {
-  if (!/%3[Dd]/.test(text)) {
-    return { value: text, count: 0 };
-  }
+/** One level of `%XX` escapes decoded, with each decoded character's offset in `text` and a final
+ *  entry for its end. */
+function percentDecodeOnce(text: string): { decoded: string; offsets: number[] } {
   let decoded = '';
   const offsets: number[] = [];
   let pos = 0;
@@ -1209,27 +1203,70 @@ function maskEncodedKeyedInline(
   }
   keep(text.length);
   offsets.push(text.length);
-  const spans = keyedInlineSecretSpans(decoded, revealKeys);
-  let out = '';
-  let from = 0;
-  for (const span of spans) {
-    const start = offsets[span.start] ?? text.length;
-    out += `${text.slice(from, start)}${MASK}`;
-    from = offsets[span.end] ?? text.length;
-  }
-  return { value: `${out}${text.slice(from)}`, count: spans.length };
+  return { decoded, offsets };
 }
 
-/** One level of JSON string escaping undone (`\"` `\\` `\/` become one character; any other
- *  escape is kept as written), with each decoded character's offset in `text` and a final entry
- *  for its end. */
+/** `KEYED_INLINE` over the text with its `%XX` escapes decoded one level, then again up to
+ *  `SCRUB_MAX_PERCENT_DECODE_LEVELS`, so a pair inside a percent-encoded URL
+ *  (`redirect=https%3A%2F%2Fb.example.net%2F%3Ftoken%3D<v>`) or one encoded twice (`%253D`, a
+ *  redirect inside a redirect) is found too; each value it finds is masked at its encoded offsets
+ *  and the rest of the text is left as written. */
+function maskEncodedKeyedInline(
+  text: string,
+  revealKeys: ReadonlySet<string>,
+): ScrubResult<string> {
+  const encodedEquals = /%(?:25)*3[Dd]/;
+  if (!encodedEquals.test(text)) {
+    return { value: text, count: 0 };
+  }
+  const found: Array<{ start: number; end: number }> = [];
+  let current = text;
+  let toText: number[] | null = null;
+  for (
+    let level = 0;
+    level < SCRUB_MAX_PERCENT_DECODE_LEVELS && encodedEquals.test(current);
+    level += 1
+  ) {
+    const step = percentDecodeOnce(current);
+    const outer = toText;
+    const map: number[] =
+      outer === null ? step.offsets : step.offsets.map((at) => outer[at] ?? text.length);
+    toText = map;
+    current = step.decoded;
+    for (const span of keyedInlineSecretSpans(current, revealKeys)) {
+      found.push({ start: map[span.start] ?? text.length, end: map[span.end] ?? text.length });
+    }
+  }
+  found.sort((a, b) => a.start - b.start);
+  let out = '';
+  let from = 0;
+  let count = 0;
+  for (const span of found) {
+    if (span.start < from) {
+      continue;
+    }
+    out += `${text.slice(from, span.start)}${MASK}`;
+    from = span.end;
+    count += 1;
+  }
+  return { value: `${out}${text.slice(from)}`, count };
+}
+
+/** One level of JSON string escaping undone (`\"` `\\` `\/` and `\uXXXX` become one character;
+ *  any other escape is kept as written), with each decoded character's offset in `text` and a
+ *  final entry for its end. `\u0022` is how System.Text.Json writes a quote by default. */
 function unescapeJsonOnce(text: string): { decoded: string; offsets: number[] } {
   let decoded = '';
   const offsets: number[] = [];
   for (let at = 0; at < text.length; at += 1) {
     const next = text[at + 1];
     offsets.push(at);
-    if (text[at] === '\\' && (next === '"' || next === '\\' || next === '/')) {
+    const unicode =
+      text[at] === '\\' && next === 'u' ? /^[0-9A-Fa-f]{4}/.exec(text.slice(at + 2, at + 6)) : null;
+    if (unicode !== null) {
+      decoded += String.fromCharCode(Number.parseInt(unicode[0], 16));
+      at += 5;
+    } else if (text[at] === '\\' && (next === '"' || next === '\\' || next === '/')) {
       decoded += next;
       at += 1;
     } else {
@@ -1240,9 +1277,9 @@ function unescapeJsonOnce(text: string): { decoded: string; offsets: number[] } 
   return { decoded, offsets };
 }
 
-/** `KEYED_INLINE` over the text with JSON string escaping undone one and then two levels, so a
- *  pair inside a JSON document carried as a string (`{"msg":"{\"password\":\"<v>\"}"}`, and the
- *  same again re-escaped) is found; each value is masked at its escaped offsets, keeping its escaped
+/** `KEYED_INLINE` over the text with JSON string escaping undone one level at a time, up to
+ *  `SCRUB_MAX_JSON_ESCAPE_LEVELS`, so a pair inside a JSON document carried as a string
+ *  (`{"msg":"{\"password\":\"<v>\"}"}`, the same re-escaped, quotes written `\u0022`) is found; each value is masked at its escaped offsets, keeping its escaped
  *  quotes, and the rest of the text is left as written. */
 function maskEscapedKeyedInline(
   text: string,
@@ -1251,7 +1288,12 @@ function maskEscapedKeyedInline(
   const found: Array<{ start: number; end: number; open: string; close: string }> = [];
   let current = text;
   let toText: number[] | null = null;
-  for (let level = 0; level < SCRUB_MAX_JSON_ESCAPE_LEVELS && current.includes('\\"'); level += 1) {
+  const escapedQuote = /\\(?:"|u0022)/i;
+  for (
+    let level = 0;
+    level < SCRUB_MAX_JSON_ESCAPE_LEVELS && escapedQuote.test(current);
+    level += 1
+  ) {
     const step = unescapeJsonOnce(current);
     const outer = toText;
     const map: number[] =

@@ -127,7 +127,8 @@ function writeStubs(): void {
 }
 
 /** The good definitions every case starts from: an enum param run in a declared container, a path
- *  param under one root, a permissive regex param (so only the universal gates can refuse), an int
+ *  param under one root, a permissive regex param handed to the `argv-echo` stub (a program not on
+ *  the data-only list, so its def opts in with allow_shell and only the universal gates refuse), an int
  *  param with a default, and a mutating def taking a container param. */
 function goodDefs(): string {
   return [
@@ -150,6 +151,7 @@ function goodDefs(): string {
     '[echo-word]',
     'argv = ["argv-echo", "{word}", "fixed"]',
     'mutating = false',
+    'allow_shell = true',
     '[echo-word.params.word]',
     'type = "regex"',
     "pattern = '[\\s\\S]*'",
@@ -638,7 +640,7 @@ describe('exec — the CLI shorthand `exec <alias> <name>` picks run or change f
   test('two --param flags both arrive', async () => {
     writeDefs(
       'shell-host',
-      '[two]\nargv = ["argv-echo", "{a}", "{b}"]\nmutating = false\n[two.params.a]\ntype = "int"\nmin = 0\nmax = 9\n[two.params.b]\ntype = "enum"\nvalues = ["x", "y"]\n',
+      '[two]\nargv = ["argv-echo", "{a}", "{b}"]\nmutating = false\nallow_shell = true\n[two.params.a]\ntype = "int"\nmin = 0\nmax = 9\n[two.params.b]\ntype = "enum"\nvalues = ["x", "y"]\n',
     );
     const { envelope } = await cli([
       'exec',

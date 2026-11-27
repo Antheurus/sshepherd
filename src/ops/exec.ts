@@ -100,11 +100,14 @@ const SHELLS = new Set([
   'su',
 ]);
 /** General-purpose interpreters: each runs text it is handed as code, so they are treated exactly
- *  like a shell. `ssh` runs its command in the remote user's shell. */
+ *  like a shell. `ssh` runs its command in the remote user's shell; `script -c` and `watch` run
+ *  theirs through `sh -c`. */
 const INTERPRETERS = new Set([
   'perl',
   'python',
+  'pypy',
   'ruby',
+  'irb',
   'node',
   'nodejs',
   'deno',
@@ -112,10 +115,16 @@ const INTERPRETERS = new Set([
   'lua',
   'tclsh',
   'wish',
+  'expect',
   'awk',
   'gawk',
   'mawk',
   'nawk',
+  'pwsh',
+  'powershell',
+  'Rscript',
+  'script',
+  'watch',
   'ssh',
 ]);
 
@@ -372,15 +381,16 @@ const WRAPPERS: Record<string, Wrapper> = {
   },
 };
 
-/** Why `argv`, read from `start`, ends up running code: the program its wrappers start is a
- *  param (the caller would pick the program), a wrapper starts a shell, or `null`. */
-function wrapperProblem(argv: readonly string[], start: number): string | null {
-  let at = start;
+/** The program `argv`'s wrappers start and its index (`argv.length` when they start none), or
+ *  why the chain runs code: the program is a param (the caller would pick it), or a wrapper
+ *  starts a shell. */
+function wrappedProgram(argv: readonly string[]): { at: number; problem: string | null } {
+  let at = 0;
   for (;;) {
     const program = programName(argv[at] ?? '');
     const wrapper = Object.hasOwn(WRAPPERS, program) ? WRAPPERS[program] : undefined;
     if (wrapper === undefined) {
-      return SLOT.test(argv[at] ?? '') ? 'the program it runs is a param' : null;
+      return { at, problem: SLOT.test(argv[at] ?? '') ? 'the program it runs is a param' : null };
     }
     const name = program;
     at += 1;
@@ -393,7 +403,7 @@ function wrapperProblem(argv: readonly string[], start: number): string | null {
       }
       if (item.startsWith('--')) {
         if (longOptionIn(item, wrapper.shellLong ?? [])) {
-          return `${name} ${item} starts a shell`;
+          return { at, problem: `${name} ${item} starts a shell` };
         }
         at += longOptionIn(item, wrapper.valueLong) && !item.includes('=') ? 2 : 1;
         continue;
@@ -402,7 +412,7 @@ function wrapperProblem(argv: readonly string[], start: number): string | null {
         let step = 1;
         for (const [index, letter] of [...item.slice(1)].entries()) {
           if ((wrapper.shellShort ?? '').includes(letter)) {
-            return `${name} -${letter} starts a shell`;
+            return { at, problem: `${name} -${letter} starts a shell` };
           }
           if (wrapper.valueShort.includes(letter)) {
             step = index === item.length - 2 ? 2 : 1;
@@ -424,14 +434,130 @@ function wrapperProblem(argv: readonly string[], start: number): string | null {
       break;
     }
     if (at >= argv.length) {
-      return wrapper.bareIsShell === true ? `${name} with no program starts a shell` : null;
+      return {
+        at,
+        problem: wrapper.bareIsShell === true ? `${name} with no program starts a shell` : null,
+      };
     }
   }
 }
 
+/** The default-deny list behind which a param may fill an argv slot: programs that read their
+ *  arguments as data and never start a program one of them names. `first` constrains the first
+ *  item after the program when params follow: `literal` (php's script file, which is the code it
+ *  runs) or the subcommands that take only data (`docker exec`, `systemctl link` are not). `find`
+ *  and `sed` are here because RUNS_CODE_WITH already refuses their executing forms. */
+const DATA_PROGRAMS: Record<string, { first?: 'literal' | ReadonlySet<string> }> = {
+  cat: {},
+  tac: {},
+  head: {},
+  tail: {},
+  ls: {},
+  du: {},
+  df: {},
+  stat: {},
+  wc: {},
+  grep: {},
+  egrep: {},
+  fgrep: {},
+  zcat: {},
+  md5sum: {},
+  sha1sum: {},
+  sha256sum: {},
+  readlink: {},
+  realpath: {},
+  echo: {},
+  date: {},
+  id: {},
+  hostname: {},
+  uname: {},
+  uptime: {},
+  free: {},
+  ps: {},
+  touch: {},
+  mkdir: {},
+  rmdir: {},
+  rm: {},
+  cp: {},
+  mv: {},
+  ln: {},
+  chmod: {},
+  chown: {},
+  journalctl: {},
+  find: {},
+  sed: {},
+  php: { first: 'literal' },
+  docker: {
+    first: new Set([
+      'logs',
+      'inspect',
+      'ps',
+      'stats',
+      'top',
+      'port',
+      'diff',
+      'history',
+      'images',
+      'restart',
+      'start',
+      'stop',
+      'kill',
+      'pause',
+      'unpause',
+      'wait',
+    ]),
+  },
+  systemctl: {
+    first: new Set([
+      'status',
+      'show',
+      'cat',
+      'is-active',
+      'is-enabled',
+      'is-failed',
+      'list-units',
+      'list-timers',
+      'start',
+      'stop',
+      'restart',
+      'try-restart',
+      'reload',
+      'reload-or-restart',
+    ]),
+  },
+};
+
+/** Why a param in `argv` could name a program something runs, or `null`. Params may only follow
+ *  the program the wrappers start, never sit inside a wrapper's own arguments, and that program
+ *  must be on DATA_PROGRAMS: anything else (`ionice`, `flock`, `unshare`, `docker exec`, a
+ *  site's own script) may execute an argument, and no list of such programs is ever complete. */
+function paramProblem(argv: readonly string[], at: number): string | null {
+  const slots = argv.flatMap((item, index) => (SLOT.test(item) ? [index] : []));
+  if (slots.length === 0) {
+    return null;
+  }
+  if (slots[0] !== undefined && slots[0] < at) {
+    return `puts ${argv[slots[0]]} among the arguments of the wrapper ${programName(argv[0] ?? '')}`;
+  }
+  const program = programName(argv[at] ?? '');
+  const known = Object.hasOwn(DATA_PROGRAMS, program) ? DATA_PROGRAMS[program] : undefined;
+  if (known === undefined) {
+    return `hands a param to ${program}, which is not a program sshepherd knows to take its arguments only as data`;
+  }
+  const first = argv[at + 1] ?? '';
+  if (known.first === 'literal' && (SLOT.test(first) || first.startsWith('-'))) {
+    return `hands a param to ${program} without a literal script first (${program} runs its first operand)`;
+  }
+  if (known.first instanceof Set && !known.first.has(first)) {
+    return `hands a param to ${program} ${first}, which is not one of its data-only subcommands`;
+  }
+  return null;
+}
+
 /** Why the def's argv runs code it is handed (a shell, an interpreter, a code-running option, a
- *  wrapper around one), or `null`. Every literal element is checked, not only argv[0], so an
- *  interpreter behind a wrapper this list does not know (`docker exec app perl`) is still found. */
+ *  wrapper around one, a param a program could run), or `null`. Every literal element is checked,
+ *  not only argv[0], so an interpreter behind a wrapper this list does not know (`docker exec app
+ *  perl`) is still found. */
 function codeRunner(argv: readonly string[]): string | null {
   for (const [index, item] of argv.entries()) {
     if (SLOT.test(item)) {
@@ -446,7 +572,8 @@ function codeRunner(argv: readonly string[]): string | null {
       return `runs ${programName(item)} with an option that executes code`;
     }
   }
-  return wrapperProblem(argv, 0);
+  const { at, problem } = wrappedProgram(argv);
+  return problem ?? paramProblem(argv, at);
 }
 
 /** Characters a remote shell (or a shell the command itself starts) gives meaning to. Quoting makes
@@ -979,9 +1106,9 @@ function checkPolicy(def: ExecDef, alias: string): void {
     if (problem !== null) {
       throw new OpError(
         'VALIDATION_ERROR',
-        `'${def.name}' ${problem}, which executes code, without allow_shell = true`,
+        `'${def.name}' ${problem}; that can execute code, so it needs allow_shell = true`,
         {
-          hint: `A human either declares the program itself as argv[0], or sets allow_shell = true on [${def.name}] in ${fileLabel(alias)} after reading what it runs; references/exec.md lists every program this covers.`,
+          hint: `A human either declares the program itself as argv[0] (container = "<name>" runs it inside a container), or sets allow_shell = true on [${def.name}] in ${fileLabel(alias)} after reading what it runs; references/exec.md lists every program this covers and the data-only programs a param may follow.`,
         },
       );
     }

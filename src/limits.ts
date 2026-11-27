@@ -351,12 +351,29 @@ export const DB_BACKUP_VERIFY_STALE_SEC = MAX_TIMEOUT_SEC + KILL_AFTER_SEC + 900
 export const DB_VERIFY_DROP_TRIES = 10;
 
 /** Levels of JSON string escaping the scrubber unwraps to find a secret pair (`{"msg":"{\"token\"
- *  :\"v\"}"}` is one, a log line that re-encodes it is two): each level is one more full pass of
- *  the keyed-inline rule, and nothing real nests a payload three deep. */
-export const SCRUB_MAX_JSON_ESCAPE_LEVELS = 2;
+ *  :\"v\"}"}` is one, a log line that re-encodes it is two, a shipper that wraps that line again
+ *  three): each level is one more linear pass of the keyed-inline rule, run only while an escaped
+ *  quote remains, so four costs four passes on the rare text that nests that deep and nothing on
+ *  the rest. */
+export const SCRUB_MAX_JSON_ESCAPE_LEVELS = 4;
 /** Ceiling of a named-exec definition's own `timeout`: half an hour holds a slow one-off migration
  *  or report; a per-call `--timeout` still overrides it up to `MAX_TIMEOUT_SEC`. */
 export const EXEC_DEF_MAX_TIMEOUT_SEC = 1_800;
 /** `path` params one exec definition may declare: each is held open on its own descriptor 3-9 for
  *  the command (`sh` redirects single-digit descriptors only), so seven is the ceiling. */
 export const EXEC_MAX_PATH_PARAMS = 7;
+
+/** Levels of `%XX` encoding the scrubber decodes to find a secret pair in a URL: one is a query
+ *  value, two is a redirect URL carried inside another redirect's query (`%253D`), three leaves one
+ *  more wrap; each level is one linear pass, run only while an encoded `=` remains. */
+export const SCRUB_MAX_PERCENT_DECODE_LEVELS = 3;
+/** Seconds `db exec`'s watchdog waits, polling once a second, between asking a backend still running
+ *  past the budget to cancel and terminating it: a cancelled statement ends in well under a second,
+ *  so five covers a loaded server, and the lock it holds is gone at most five seconds later. */
+export const DB_EXEC_CANCEL_GRACE_SEC = 5;
+/** Bytes `db exec`'s remote command may take: Linux runs it as ONE argument of the login shell,
+ *  capped at 131,072 (`MAX_ARG_STRLEN`), less 1 KiB for the transport's `timeout` prefix. Every
+ *  statement adds its quoted text, its pin and a row-count echo, and each quote in it costs four
+ *  bytes once quoted, so a file under `DB_EXEC_MAX_SQL_BYTES` can still not fit; it is refused
+ *  here with its size instead of failing remotely as "Argument list too long". */
+export const DB_EXEC_MAX_COMMAND_BYTES = 130_048;

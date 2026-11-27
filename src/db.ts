@@ -1,6 +1,7 @@
 import { Parser } from 'node-sql-parser';
 import {
   DB_BACKUP_VERIFY_STALE_SEC,
+  DB_EXEC_CANCEL_GRACE_SEC,
   DB_LOCK_TIMEOUT_SEC,
   DB_STATEMENT_GRACE_SEC,
   DB_VERIFY_DROP_TRIES,
@@ -436,14 +437,14 @@ const ENV_URL_VIA_SCRIPT = [
   'exec docker exec -i -e SSHEPHERD_PGURL "$v" sh -c "$script" sh "$@"',
 ].join('\n');
 
-function envUrlCommand(conn: DbConnection, sql: string[]): string {
+function envUrlArgv(conn: DbConnection, sql: string[]): string[] {
   const envKey = conn.envKey && conn.envKey.length > 0 ? conn.envKey : 'DATABASE_URL';
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(envKey) || conn.container.length === 0) {
     throw new OpError('VALIDATION_ERROR', 'db: a container-env target needs container and env_key');
   }
   const via = conn.psqlContainer ?? '';
   if (via.length === 0 || via === conn.container) {
-    return shellJoin([
+    return [
       'docker',
       'exec',
       '-i',
@@ -453,9 +454,9 @@ function envUrlCommand(conn: DbConnection, sql: string[]): string {
       envUrlPsqlScript(envKey),
       'sh',
       ...commandArgs(sql),
-    ]);
+    ];
   }
-  return shellJoin([
+  return [
     'sh',
     '-c',
     ENV_URL_VIA_SCRIPT,
@@ -465,14 +466,14 @@ function envUrlCommand(conn: DbConnection, sql: string[]): string {
     via,
     envUrlPsqlScript('SSHEPHERD_PGURL'),
     ...commandArgs(sql),
-  ]);
+  ];
 }
 
-function hostCommand(conn: DbConnection, sql: string[]): string {
+function hostArgv(conn: DbConnection, sql: string[]): string[] {
   const sudo = conn.sudoUser && conn.sudoUser.length > 0 ? ['sudo', '-n', '-u', conn.sudoUser] : [];
   const host = conn.pgHost && conn.pgHost.length > 0 ? ['-h', conn.pgHost] : [];
   const port = conn.pgPort && conn.pgPort.length > 0 ? ['-p', conn.pgPort] : [];
-  return shellJoin([
+  return [
     ...sudo,
     'psql',
     ...host,
@@ -483,7 +484,7 @@ function hostCommand(conn: DbConnection, sql: string[]): string {
     conn.database,
     ...PSQL_FLAGS,
     ...commandArgs(sql),
-  ]);
+  ];
 }
 
 /**
@@ -494,13 +495,20 @@ function hostCommand(conn: DbConnection, sql: string[]): string {
  * the SELECT's tuple output), unaligned, tuples-only — one JSON value per call, trivial to parse.
  */
 export function buildPsqlCommand(conn: DbConnection, ...sql: string[]): string {
+  return shellJoin(psqlArgv(conn, sql));
+}
+
+/** `buildPsqlCommand` as an argv, for a script that runs it as `"$@"`: handing the buffers over as
+ *  arguments quotes each once, where embedding the command in the script would quote every quote
+ *  in it a second time. */
+function psqlArgv(conn: DbConnection, sql: string[]): string[] {
   if (conn.kind === 'container-env') {
-    return envUrlCommand(conn, sql);
+    return envUrlArgv(conn, sql);
   }
   if (conn.kind === 'host') {
-    return hostCommand(conn, sql);
+    return hostArgv(conn, sql);
   }
-  return shellJoin([
+  return [
     ...execPrefix(conn),
     'psql',
     '-U',
@@ -509,7 +517,7 @@ export function buildPsqlCommand(conn: DbConnection, ...sql: string[]): string {
     conn.database,
     ...PSQL_FLAGS,
     ...commandArgs(sql),
-  ]);
+  ];
 }
 
 /** The `statement_timeout` for an ssh budget: the budget less `DB_STATEMENT_GRACE_SEC`, or half of
@@ -1285,43 +1293,117 @@ export const EXEC_PARSER_PIN_SQL = "SET standard_conforming_strings=on;SET NAMES
 /** In the error psql prints when the transaction `db exec` opened is no longer the open one at the
  *  end (a COMMIT or ROLLBACK the splitter did not see): what ran may already be committed. */
 export const EXEC_TXN_ENDED_MARKER = 'sshepherd-exec-transaction-ended';
+/** The line psql prints right after `BEGIN`: the transaction's xid, the backend pid and its
+ *  `backend_start` epoch. Printed before `\o /dev/null`, so only sshepherd's own buffers reach
+ *  stdout, and read by the remote relay, never by SQL. */
+export const EXEC_BEGIN_MARKER = '__SSHEPHERD_EXEC_BEGIN__';
+/** The line psql prints just before `COMMIT`/`ROLLBACK`: the xid then open. */
+export const EXEC_END_MARKER = '__SSHEPHERD_EXEC_END__';
+
+/** The pin before every statement: the parser settings and the two timers that bound a running
+ *  or lock-waiting statement, as plain `SET`s (no function a changed `search_path` could shadow),
+ *  in milliseconds so no quote is repeated 500 times. A statement that lifts one where the
+ *  classifier cannot see it lifts it only until the next buffer, and its own timer was armed when
+ *  it started. `idle_in_transaction_session_timeout` and `transaction_timeout` are set once for the
+ *  session instead: the watchdog ends the backend at the budget whatever they say, and the 49 more
+ *  bytes per statement do not fit 500 statements under `MAX_ARG_STRLEN`. */
+function execStatementPin(statementTimeoutSec: number): string {
+  return `${EXEC_PARSER_PIN_SQL};SET statement_timeout=${statementTimeoutSec * 1000};SET lock_timeout=${DB_LOCK_TIMEOUT_SEC * 1000}`;
+}
 
 /**
  * `db exec`: one psql session as the write login (`conn.user`), output of the statements
- * themselves sent to /dev/null (`\o`; `\echo` still reaches stdout), the session limits and
- * `EXEC_SESSION_PIN_SQL`, `BEGIN` and the transaction's xid noted in a transaction-local setting,
- * then per statement `EXEC_PARSER_PIN_SQL`, the statement as its own buffer and an echo of psql's
- * `ROW_COUNT`; then a check that the open transaction still has that xid (an error carrying
- * `EXEC_TXN_ENDED_MARKER` otherwise), and `COMMIT` or (a dry run) `ROLLBACK`. `ON_ERROR_STOP`
- * ends psql at the first failing statement and the server rolls the open transaction back when
- * the connection closes.
+ * themselves sent to /dev/null (`\o`; `\echo` still reaches stdout), the session limits with
+ * `idle_in_transaction_session_timeout`, a `transaction_timeout` where the server has one
+ * (Postgres 17+), `EXEC_SESSION_PIN_SQL`, `BEGIN`
+ * and `EXEC_BEGIN_MARKER` (xid, pid, backend start) on stdout, then per statement the pin (parser
+ * settings and timers), the statement as its own buffer and an echo of psql's `ROW_COUNT`; then a
+ * server-side check that the transaction-local copy of the xid still matches, `EXEC_END_MARKER`
+ * with the open xid, and `COMMIT` or (a dry run) `ROLLBACK`. `ON_ERROR_STOP` ends psql at the first
+ * failing statement and the server rolls the open transaction back when the connection closes.
+ *
+ * psql runs as the `"$@"` of one `sh -c` (its argv handed over as arguments, so each buffer is
+ * quoted once) with two guards no SQL can reach. A relay reads psql's stdout and
+ * fails the run (exit 3, `EXEC_TXN_ENDED_MARKER`) when the xid at the end is not the xid at
+ * BEGIN: a hidden `COMMIT; BEGIN; set_config(...)` can forge the server-side copy, not a line the
+ * relay already holds. A watchdog in its own session (`setsid`, else `nohup`) waits until this
+ * script is gone (the ssh budget's `timeout` kills it, but not a psql inside `docker exec`) or
+ * `budgetSec` passes, then, if psql had not finished, cancels that backend (matched by pid AND
+ * `backend_start`, so a reused pid is never hit) over a second connection, waits up to
+ * `DB_EXEC_CANCEL_GRACE_SEC` for it to leave, and terminates it: no lock outlives the budget.
  */
 export function buildDbExecCommand(
   conn: DbConnection,
-  sessionSql: string,
+  budgetSec: number,
   statements: string[],
   commit: boolean,
 ): string {
+  const statementTimeoutSec = statementTimeoutFor(budgetSec);
+  const pin = execStatementPin(statementTimeoutSec);
   const buffers = [
     '\\o /dev/null',
-    sessionSql,
+    boundedSessionSql(statementTimeoutSec),
+    `SET idle_in_transaction_session_timeout=${statementTimeoutSec * 1000}`,
+    `SELECT pg_catalog.set_config(name, '${statementTimeoutSec * 1000}', false) FROM pg_catalog.pg_settings WHERE name = 'transaction_timeout'`,
     EXEC_SESSION_PIN_SQL,
     'BEGIN',
-    "SELECT set_config('sshepherd.exec_xid', txid_current()::text, true)",
+    '\\o',
+    `SELECT '${EXEC_BEGIN_MARKER} ' || pg_catalog.set_config('sshepherd.exec_xid', pg_catalog.txid_current()::text, true) || ' ' || pid || ' ' || extract(epoch FROM backend_start) FROM pg_catalog.pg_stat_activity WHERE pid = pg_catalog.pg_backend_pid()`,
+    '\\o /dev/null',
   ];
   statements.forEach((statement, index) => {
-    buffers.push(
-      EXEC_PARSER_PIN_SQL,
-      statement,
-      `\\echo ${EXEC_ROWS_MARKER} ${index + 1} :ROW_COUNT`,
-    );
+    buffers.push(pin, statement, `\\echo ${EXEC_ROWS_MARKER} ${index + 1} :ROW_COUNT`);
   });
   buffers.push(
     `SELECT CASE WHEN current_setting('sshepherd.exec_xid', true) = txid_current()::text THEN 1 ELSE ('${EXEC_TXN_ENDED_MARKER} ' || txid_current()::text)::int END`,
+    '\\o',
+    `SELECT '${EXEC_END_MARKER} ' || pg_catalog.txid_current()`,
     commit ? 'COMMIT' : 'ROLLBACK',
     `\\echo ${EXEC_DONE_MARKER} ${commit ? 'committed' : 'rolled_back'}`,
   );
-  return buildPsqlCommand(conn, ...buffers);
+  const signal = buildPsqlCommand(conn);
+  const match =
+    'FROM pg_catalog.pg_stat_activity WHERE pid = $p AND extract(epoch FROM backend_start) = $s';
+  const watchdog = [
+    "trap '' HUP INT TERM PIPE",
+    'i=0',
+    `while [ "$i" -lt ${budgetSec} ] && kill -0 "$1" 2>/dev/null; do i=$((i + 1)); sleep 1; done`,
+    'if [ -s "$2/backend" ]; then',
+    '  read -r p s < "$2/backend"',
+    '  case "$p:$s" in *[!0-9.:]* | :* | *:) p= ;; esac',
+    '  if [ -n "$p" ]; then',
+    `    printf '%s\\n' "SELECT pg_catalog.pg_cancel_backend(pid) ${match};" | ${signal} >/dev/null 2>&1`,
+    '    j=0',
+    `    while [ "$j" -lt ${DB_EXEC_CANCEL_GRACE_SEC} ] && [ "$(printf '%s\\n' "SELECT count(*) ${match};" | ${signal} 2>/dev/null)" != 0 ]; do j=$((j + 1)); sleep 1; done`,
+    `    printf '%s\\n' "SELECT pg_catalog.pg_terminate_backend(pid) ${match};" | ${signal} >/dev/null 2>&1`,
+    '  fi',
+    'fi',
+    'rm -f -- "$2/backend"',
+    'rmdir -- "$2" 2>/dev/null',
+  ].join('\n');
+  const lines = [
+    'umask 077',
+    `t=$(mktemp -d "\${TMPDIR:-/tmp}/sshepherd-exec.XXXXXX") || exit 1`,
+    `w=${shq(watchdog)}`,
+    'if command -v setsid >/dev/null 2>&1; then setsid sh -c "$w" sh "$$" "$t" </dev/null >/dev/null 2>&1 &',
+    'else nohup sh -c "$w" sh "$$" "$t" </dev/null >/dev/null 2>&1 &',
+    'fi',
+    '{ "$@"; echo "__SSHEPHERD_PSQL_EXIT__ $?"; } | {',
+    '  rc=1; b=; e=',
+    '  while IFS= read -r l; do',
+    '    case "$l" in',
+    `      "${EXEC_BEGIN_MARKER} "*) set -- $l; b=$2; printf '%s %s\\n' "$3" "$4" > "$t/backend" ;;`,
+    `      "${EXEC_END_MARKER} "*) e=\${l#* } ;;`,
+    `      "__SSHEPHERD_PSQL_EXIT__ "*) rc=\${l#* } ;;`,
+    '      *) printf \'%s\\n\' "$l" ;;',
+    '    esac',
+    '  done',
+    '  rm -f -- "$t/backend"',
+    `  if [ "$rc" -eq 0 ] && [ "$b" != "$e" ]; then echo "${EXEC_TXN_ENDED_MARKER}: the transaction at the end ($e) is not the one opened at BEGIN ($b)" >&2; exit 3; fi`,
+    '  exit "$rc"',
+    '}',
+  ];
+  return shellJoin(['sh', '-c', lines.join('\n'), 'sh', ...psqlArgv(conn, buffers)]);
 }
 
 /** A Postgres client tool (`pg_dump`, `pg_restore`) run the way the target reaches psql: in the db

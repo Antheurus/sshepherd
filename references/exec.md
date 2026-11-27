@@ -67,7 +67,7 @@ type = "container"
 | `mutating` | yes | `true` sends it through `exec change` (`--yes`, profile `deploy`) |
 | `summary` | no | shown by `exec list` |
 | `container` | no | run inside this container; it must be in the alias's `containers = [...]` in `targets.toml` |
-| `allow_shell` | no | `true` lets argv run a shell or interpreter (the list under [Code runners](#code-runners-need-allow_shell)); off by default |
+| `allow_shell` | no | `true` lets argv run a shell or interpreter (the list under [Code runners](#code-runners-need-allow_shell)), or hand a param to a program not on the [data-only list](#a-param-follows-only-a-data-only-program); off by default |
 | `timeout` | no | this definition's budget in seconds, 1-1800 (default 120); `--timeout <sec>` on the call still overrides it, up to 3600 |
 | `params.<name>` | no | at most 16, at most 7 of them `path`; each one must be used in argv |
 
@@ -99,7 +99,7 @@ as well as `perl -e ...`.
 | Refused | Programs |
 |---|---|
 | always | shells: `sh` `bash` `dash` `zsh` `ksh` `mksh` `ash` `yash` `fish` `csh` `tcsh` `busybox` (any applet, `busybox awk` included) `su` |
-| always | interpreters: `perl` `python` (`python2`, `python3`, `python3.x`) `ruby` `node` `nodejs` `deno` `bun` `lua` `tclsh` `wish` `awk` `gawk` `mawk` `nawk`, and `ssh` (its command runs in the remote shell) |
+| always | interpreters: `perl` `python` (`python2`, `python3`, `python3.x`) `pypy` (`pypy3`) `ruby` `irb` `node` `nodejs` `deno` `bun` `lua` `tclsh` `wish` `expect` `awk` `gawk` `mawk` `nawk` `pwsh` `powershell` `Rscript`; `script` and `watch` (each runs its command through `sh -c`); and `ssh` (its command runs in the remote shell) |
 | with a code option | `php -r`/`-B`/`-R`/`-E` (and `--run`, `--process-begin`, `--process-code`, `--process-end`) before the script; `php artisan ...` runs |
 | | `find` with `-exec`, `-execdir`, `-ok`, `-okdir` or `-delete` |
 | | `git` with `-c` or `--exec-path`/`--config-env` before the subcommand, `--upload-pack`/`--receive-pack`, or any `core.*` argument |
@@ -117,6 +117,32 @@ no program.
 
 A value is refused (`INVALID_ARGS`) when it names a shell or interpreter from the first two rows,
 unless the definition has `allow_shell = true`.
+
+### A param follows only a data-only program
+
+The lists above name programs known to run code; no such list is ever complete (`ionice`,
+`taskset`, `chrt`, `flock`, `runuser`, `setpriv`, `unshare`, `nsenter`, `time`, a site's own
+script all start the program they are given). So a param is default-deny: a definition with a
+param, and without `allow_shell = true`, is refused (`VALIDATION_ERROR`, no ssh call) unless
+
+1. every param comes after the program the wrappers above start — never inside a wrapper's own
+   arguments (`sudo -u {user}`, `timeout {secs}`, `xargs -a {file}` are refused; write the value
+   in the definition), and
+2. that program is one that takes its arguments as data and never starts a program one of them
+   names:
+
+| Data-only programs | Constraint when a param follows |
+|---|---|
+| `cat` `tac` `head` `tail` `ls` `du` `df` `stat` `wc` `grep` `egrep` `fgrep` `zcat` `md5sum` `sha1sum` `sha256sum` `readlink` `realpath` `echo` `date` `id` `hostname` `uname` `uptime` `free` `ps` `touch` `mkdir` `rmdir` `rm` `cp` `mv` `ln` `chmod` `chown` `journalctl` | none |
+| `find`, `sed` | their code-running forms are refused above (`-exec`, a param or `e` sed script) |
+| `php` | the first item after `php` is a literal script, not an option (`php artisan {cmd}`) |
+| `docker` | the first item is one of `logs` `inspect` `ps` `stats` `top` `port` `diff` `history` `images` `restart` `start` `stop` `kill` `pause` `unpause` `wait` (not `exec`, `run`, `compose`) |
+| `systemctl` | the first item is one of `status` `show` `cat` `is-active` `is-enabled` `is-failed` `list-units` `list-timers` `start` `stop` `restart` `try-restart` `reload` `reload-or-restart` (not `link`, `edit`, `set-environment`) |
+
+Every other program with a param needs `allow_shell = true` — `git` included, whose subcommands,
+aliases and `-u`/`--upload-pack` options can run one. A command inside a container is declared
+with `container = "<name>"` and the program itself as `argv[0]`, never as `docker exec <c> ...`.
+A definition with no param is not affected: `["git", "log", "-n", "1"]` runs.
 
 ## What every value passes first
 
