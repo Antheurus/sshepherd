@@ -160,7 +160,10 @@ function checkFunction(condition: Condition): string[] {
         `u=${shq(condition.url)}`,
         'command -v curl >/dev/null 2>&1 || exit 127',
         'check() {',
-        `  st=$(${httpStatusCommand('"$u"', ` --max-time ${WAIT_URL_PROBE_TIMEOUT_SEC} --noproxy '*' --proto '=http,https'`)}) || true`,
+        '  pt=$(( (dl - ($(now_ms) - start) + 999) / 1000 ))',
+        `  if [ "$pt" -gt ${WAIT_URL_PROBE_TIMEOUT_SEC} ]; then pt=${WAIT_URL_PROBE_TIMEOUT_SEC}; fi`,
+        '  if [ "$pt" -lt 1 ]; then pt=1; fi',
+        `  st=$(${httpStatusCommand('"$u"', '"$pt"')}) || true`,
         `  [ "$st" = ${condition.status} ]`,
         '}',
       ];
@@ -171,8 +174,9 @@ function checkFunction(condition: Condition): string[] {
   }
 }
 
-/** One ssh session polls until the condition holds or the deadline (the budget less its reply
- *  grace) passes; milliseconds come from /proc/uptime, which busybox `date` cannot give. */
+/** One ssh session polls until the condition holds or the deadline `dl` (the budget less its reply
+ *  grace) passes; a url probe and the sleep between checks never run past the deadline by more
+ *  than a second. Milliseconds come from /proc/uptime, which busybox `date` cannot give. */
 function waitScript(ctx: OpContext): string {
   const condition = parseCondition(reqStr(ctx, 'until'));
   const since = sinceOf(ctx, condition);
@@ -180,14 +184,17 @@ function waitScript(ctx: OpContext): string {
   const lines = [
     `now_ms() { if [ -r /proc/uptime ]; then awk '{ printf "%d", $1 * 1000 }' /proc/uptime; else echo $(($(date +%s) * 1000)); fi; }`,
     `s=${since === null ? '$(date +%s)' : shq(since)}`,
+    `dl=${deadlineMs}`,
     ...checkFunction(condition),
     'start=$(now_ms); n=0; st=',
     'while :; do',
     '  n=$((n + 1))',
     `  if check; then printf '__WAIT__ ok %s %s %s\\n' "$n" "$(($(now_ms) - start))" "$st"; exit 0; fi`,
     '  el=$(($(now_ms) - start))',
-    `  if [ "$el" -ge ${deadlineMs} ]; then printf '__WAIT__ timeout %s %s %s\\n' "$n" "$el" "$st"; exit ${NOT_MET_EXIT}; fi`,
-    `  sleep ${WAIT_POLL_INTERVAL_SEC}`,
+    `  if [ "$el" -ge "$dl" ]; then printf '__WAIT__ timeout %s %s %s\\n' "$n" "$el" "$st"; exit ${NOT_MET_EXIT}; fi`,
+    '  r=$(( (dl - el + 999) / 1000 ))',
+    `  if [ "$r" -gt ${WAIT_POLL_INTERVAL_SEC} ]; then r=${WAIT_POLL_INTERVAL_SEC}; fi`,
+    '  sleep "$r"',
     'done',
   ];
   return shellJoin(['sh', '-c', lines.join('\n')]);

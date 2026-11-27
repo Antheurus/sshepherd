@@ -309,8 +309,6 @@ async function runHostAction(argTail: string[]): Promise<void> {
   process.exitCode = setupExitCode(result);
 }
 
-/** `setup db-target ro-role <target> --print-sql [--role <name>] [--tables-only]`: the SQL is the whole output
-
 /** `setup db-target ro-role <target> --print-sql [--role <name>] [--all-data]`: the SQL is the whole output
  *  (plain text a human pipes into psql); only a refusal prints a setup result. */
 function runDbTargetRoRole(argTail: string[]): void {

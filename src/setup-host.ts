@@ -232,7 +232,7 @@ export async function hostAdd(
       return stop(
         {
           code: setupCodeOf(trusted.code),
-          message: `${command}: hosts trust: ${trusted.code}: ${trusted.message}`,
+          message: `${command}: hosts trust (${trusted.code}): ${trusted.message}`,
           next: `sshepherd hosts trust ${alias} --dry-run`,
         },
         { fingerprints: await deps.hostKeyFingerprints(alias) },
@@ -242,7 +242,7 @@ export async function hostAdd(
   } else {
     return stop({
       code: 'REMOTE_FAILED',
-      message: `${command}: hosts test: ${before.code}: ${before.message}`,
+      message: `${command}: hosts test (${before.code}): ${before.message}`,
       next: `sshepherd hosts test ${alias} --diagnose`,
     });
   }
@@ -264,7 +264,7 @@ export async function hostAdd(
   if (!after.ok) {
     return stop({
       code: 'REMOTE_FAILED',
-      message: `${command}: hosts test after install: ${after.code}: ${after.message}`,
+      message: `${command}: hosts test after install (${after.code}): ${after.message}`,
       next: `sshepherd hosts test ${alias} --diagnose`,
     });
   }
@@ -516,7 +516,7 @@ async function adoptOne(
  * holds, in-process (the password goes to sshpass on stdin, a key to a 0600 temp file removed
  * after). The host key must already be trusted; one that is not is reported, never accepted. The
  * result is `[{alias, key_installed}]` only: no value from the `.env` reaches the output or the
- * audit log.
+ * audit log. When no host got a key the result is an `INSTALL_FAILED` error carrying that same list.
  */
 export async function adoptEnv(
   projectDir: string,
@@ -575,6 +575,18 @@ export async function adoptEnv(
       errorCode: result.reason,
     });
     adopted.push(result);
+  }
+  if (adopted.every((host) => !host.key_installed)) {
+    const reasons = adopted.map((host) => `${host.alias} (${host.reason ?? 'INSTALL_FAILED'})`);
+    return buildSetupResult({
+      command,
+      data: adopted,
+      error: {
+        code: 'INSTALL_FAILED',
+        message: `${command}: no host got a key installed: ${reasons.join(', ')}`,
+        hint: 'Each entry of data says why and its next step; fix those, then run adopt-env again.',
+      },
+    });
   }
   return buildSetupResult({ command, data: adopted });
 }

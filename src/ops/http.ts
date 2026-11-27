@@ -2,26 +2,80 @@ import { readFileSync } from 'node:fs';
 import { describeError } from '../errors.ts';
 import {
   HTTP_BODY_MAX_BYTES,
-  HTTP_CONNECT_TIMEOUT_SEC,
+  HTTP_BODY_SCRUB_MARGIN_BYTES,
   HTTP_OP_TIMEOUT_SEC,
   HTTP_REQUEST_BODY_MAX_BYTES,
   HTTP_REQUEST_TIMEOUT_SEC,
 } from '../limits.ts';
 import { arg, assertPositional, optStrOrNull, reqStr } from '../op-args.ts';
+import { capLineText } from '../parsers/logs-shape.ts';
 import { shellJoin, shq } from '../quote.ts';
+import { hostCurlCommand } from '../recipes.ts';
 import { didYouMean } from '../suggest.ts';
 import { declaredContainers } from '../targets.ts';
+import { parseTomlFile } from '../toml-parse.ts';
 import { type ErrorInfo, type OpContext, OpError, type OpSpec, Premasked } from '../types.ts';
-import { assertPathAllowed } from './config.ts';
+import { assertPathAllowed, defaultFilesAllowlistPath } from './config.ts';
 
 // The `--auth` credential is read into a shell variable on the host and reaches curl and awk only
 // through stdin and the environment: never an argv, never the wire.
 
 const LOOPBACK_V4 = /^127(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 
+/** One `[<alias>.http] allow` entry: an exact `host:port` or `[v6]:port`, never a pattern. */
+const ALLOW_ENTRY =
+  /^(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?):(\d{1,5})$/;
+
+const ALLOW_HINT =
+  'Each entry of [<alias>.http] allow in files-allowlist.toml is an exact host:port such as "internal.example:443" or "10.0.0.5:8080"; fix it by hand.';
+
+/** The `host:port` pairs `http get|send` may reach on `alias` beyond its loopback, from
+ *  `[<alias>.http] allow` in files-allowlist.toml, each as the WHATWG parser writes its host. A
+ *  human writes them; the agent never widens its own list. */
+export function httpAllowance(alias: string, path: string = defaultFilesAllowlistPath()): string[] {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  const parsed = parseTomlFile(text, 'files-allowlist.toml', ALLOW_HINT);
+  const table = parsed[alias];
+  const http =
+    typeof table === 'object' && table !== null
+      ? (table as Record<string, unknown>).http
+      : undefined;
+  const allow =
+    typeof http === 'object' && http !== null ? (http as Record<string, unknown>).allow : undefined;
+  if (allow === undefined) {
+    return [];
+  }
+  if (!Array.isArray(allow)) {
+    throw new OpError(
+      'CONFIG_PARSE_ERROR',
+      `files-allowlist.toml: [${alias}.http] allow is not a list`,
+      {
+        hint: ALLOW_HINT,
+      },
+    );
+  }
+  return allow.map((entry: unknown) => {
+    const [, host, port] = typeof entry === 'string' ? (ALLOW_ENTRY.exec(entry) ?? []) : [];
+    if (host === undefined || port === undefined || Number(port) < 1 || Number(port) > 65_535) {
+      throw new OpError(
+        'CONFIG_PARSE_ERROR',
+        `files-allowlist.toml: [${alias}.http] allow entry ${JSON.stringify(entry)} is not an exact host:port`,
+        { hint: ALLOW_HINT },
+      );
+    }
+    return `${new URL(`http://${host}/`).hostname}:${Number(port)}`;
+  });
+}
+
 /** The URL as curl will receive it: re-serialised by the WHATWG parser, so curl and this check
- *  read the same host. Only the host's own loopback is reachable — anything else is `INVALID_ARGS`. */
-export function localUrl(raw: string, what: string): string {
+ *  read the same host. Only the host's own loopback, or a `host:port` in `allowed`, is reachable —
+ *  anything else is `INVALID_ARGS`. */
+export function localUrl(raw: string, what: string, allowed: readonly string[] = []): string {
   let url: URL;
   try {
     url = new URL(raw);
@@ -41,6 +95,10 @@ export function localUrl(raw: string, what: string): string {
     });
   }
   const host = url.hostname;
+  const port = url.port === '' ? (url.protocol === 'https:' ? '443' : '80') : url.port;
+  if (allowed.includes(`${host}:${port}`)) {
+    return url.href;
+  }
   if (host !== 'localhost' && host !== '[::1]' && !LOOPBACK_V4.test(host)) {
     throw new OpError(
       'INVALID_ARGS',
@@ -225,24 +283,28 @@ function jsonBody(ctx: OpContext): string | null {
 }
 
 /** The whole request as one remote script: resolve the credential (if any) into `$v`, run curl with
- *  the header on stdin, then print the status line, the header names and the capped, masked body. */
+ *  the header on stdin, then print the status line, the header names and the masked body, read
+ *  `HTTP_BODY_SCRUB_MARGIN_BYTES` past the cap so the scrubber sees a value straddling it whole;
+ *  `capHttpBody` cuts it back once the envelope is scrubbed. */
 export function httpScript(ctx: OpContext, method: string): string {
   const command = `http ${method === 'GET' ? 'get' : 'send'}`;
-  const url = localUrl(reqStr(ctx, 'url'), command);
+  const url = localUrl(reqStr(ctx, 'url'), command, httpAllowance(ctx.alias));
   const auth = authSource(ctx, command);
   const prefix = auth === null ? '' : headerPrefix(ctx, command);
   const body = method === 'GET' ? null : jsonBody(ctx);
-  const curl = [
-    'curl -sS -o "$t/body" -D "$t/head"',
-    `-w ${shq('%{http_code} %{time_total} %{size_download}')}`,
-    `--max-time ${HTTP_REQUEST_TIMEOUT_SEC} --connect-timeout ${HTTP_CONNECT_TIMEOUT_SEC}`,
-    `--noproxy ${shq('*')} --proto ${shq('=http,https')} -X ${shq(method)}`,
-    ...(body === null
-      ? []
-      : [`-H ${shq('Content-Type: application/json')} --data-binary @"$t/req"`]),
-    ...(auth === null ? [] : ['-K -']),
+  const curl = hostCurlCommand(
     '"$u"',
-  ].join(' ');
+    String(HTTP_REQUEST_TIMEOUT_SEC),
+    [
+      '-sS -o "$t/body" -D "$t/head"',
+      `-w ${shq('%{http_code} %{time_total} %{size_download}')}`,
+      `-X ${shq(method)}`,
+      ...(body === null
+        ? []
+        : [`-H ${shq('Content-Type: application/json')} --data-binary @"$t/req"`]),
+      ...(auth === null ? [] : ['-K -']),
+    ].join(' '),
+  );
   const request =
     auth === null
       ? curl
@@ -261,7 +323,7 @@ export function httpScript(ctx: OpContext, method: string): string {
         ]),
     `w=$(${request}) || exit $?`,
     'set -- $w',
-    `head -c ${HTTP_BODY_MAX_BYTES} "$t/body" > "$t/cap"`,
+    `head -c ${HTTP_BODY_MAX_BYTES + HTTP_BODY_SCRUB_MARGIN_BYTES} "$t/body" > "$t/cap"`,
     `a=$(tr -d '\\000' < "$t/cap" | wc -c); b=$(wc -c < "$t/cap")`,
     'bin=0; if [ $((a)) -ne $((b)) ]; then bin=1; fi',
     `nl=0; case "$(tail -c 1 "$t/cap" | od -An -tx1)" in *0a*) nl=1 ;; esac`,
@@ -331,6 +393,27 @@ export function shapeHttp(text: string, ctx: OpContext, command: string): Premas
   );
 }
 
+/** `OpSpec.capLines` for http: the scrubbed body is cut back to `HTTP_BODY_MAX_BYTES`, which
+ *  `body_truncated` already reports. */
+function capHttpBody(data: unknown): { data: unknown; cut: boolean } {
+  const body = (data as { body?: unknown } | null)?.body;
+  if (typeof body !== 'string') {
+    return { data, cut: false };
+  }
+  const capped = capLineText(body, HTTP_BODY_MAX_BYTES);
+  return { data: capped === body ? data : { ...(data as HttpResult), body: capped }, cut: false };
+}
+
+/** `OpSpec.recount` for http: a body the envelope cap (`--max-bytes`) shortened is truncated too. */
+function recountHttpBody(before: unknown, after: unknown): unknown {
+  const body = (after as { body?: unknown } | null)?.body;
+  const original = (before as { body?: unknown } | null)?.body;
+  if (typeof original !== 'string' || typeof body !== 'string' || body === original) {
+    return after;
+  }
+  return { ...(after as HttpResult), body_truncated: true };
+}
+
 /** curl's own exit codes read as what happened, not as a generic `COMMAND_FAILED`. */
 function refineCurlError(_stderr: string, error: ErrorInfo, ctx: OpContext): ErrorInfo | undefined {
   const exit = error.remote_exit;
@@ -378,7 +461,7 @@ const URL_ARG = arg(
   'url',
   'positional',
   true,
-  'URL on the host itself — http(s)://127.0.0.1, ::1 or localhost only; redirects are not followed.',
+  'URL on the host itself — http(s)://127.0.0.1, ::1 or localhost, or a host:port a human listed in [<alias>.http] allow of files-allowlist.toml; redirects are not followed.',
 );
 const AUTH_ARGS = [
   arg(
@@ -423,6 +506,8 @@ const httpGet: OpSpec<HttpResult> = {
   timeoutSec: HTTP_OP_TIMEOUT_SEC,
   output: 'raw',
   refineError: refineCurlError,
+  capLines: capHttpBody,
+  recount: recountHttpBody,
   buildRemote: (ctx) => httpScript(ctx, 'GET'),
   shape: (parsed, ctx) => shapeHttp(parsed as string, ctx, 'http get'),
 };
@@ -448,6 +533,8 @@ const httpSend: OpSpec<HttpResult> = {
   timeoutSec: HTTP_OP_TIMEOUT_SEC,
   output: 'raw',
   refineError: refineCurlError,
+  capLines: capHttpBody,
+  recount: recountHttpBody,
   hiddenArgs: ['json'],
   buildRemote: (ctx) => httpScript(ctx, sendMethod(ctx)),
   shape: (parsed, ctx) => shapeHttp(parsed as string, ctx, 'http send'),

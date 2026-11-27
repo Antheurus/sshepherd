@@ -27,6 +27,11 @@ describe('scrubText — key-named values', () => {
     );
   });
 
+  test('a quoted key glued to the word before it is still a key: a"api_token":"v"', () => {
+    expect(masked(`aaaa"api_token":"${FAKE}"}`)).toBe(`aaaa"api_token":"${MASK}"}`);
+    expect(masked(`id"password": '${FAKE}'`)).toBe(`id"password": '${MASK}'`);
+  });
+
   test('quoted values keep their quotes; the value never survives', () => {
     expect(masked(`SECRET_KEY_BASE="${FAKE} with spaces"`)).toBe(`SECRET_KEY_BASE="${MASK}"`);
     expect(masked(`STRIPE_KEY='${FAKE}'`)).toBe(`STRIPE_KEY='${MASK}'`);

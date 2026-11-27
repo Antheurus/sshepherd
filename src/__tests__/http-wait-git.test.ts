@@ -3,6 +3,11 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../cli.ts';
+import {
+  WAIT_POLL_INTERVAL_SEC,
+  WAIT_REPLY_GRACE_SEC,
+  WAIT_URL_PROBE_TIMEOUT_SEC,
+} from '../limits.ts';
 import { localUrl } from '../ops/http.ts';
 import { parseCondition } from '../ops/wait.ts';
 import { executeOp, getOp } from '../registry.ts';
@@ -410,7 +415,98 @@ describe('http --auth resolves the key on the host only', () => {
   });
 });
 
+describe('http: a per-alias allowance in files-allowlist.toml', () => {
+  const allowlist = (): string => join(scratch, 'files-allowlist.toml');
+  let saved = '';
+
+  beforeEach(() => {
+    saved = readFileSync(allowlist(), 'utf8');
+  });
+
+  afterEach(() => {
+    writeFileSync(allowlist(), saved);
+  });
+
+  function allow(entries: string[]): void {
+    writeFileSync(
+      allowlist(),
+      `${saved}[${ALIAS}.http]\nallow = [${entries.map((entry) => `"${entry}"`).join(', ')}]\n`,
+    );
+  }
+
+  test('an allowed host:port is reached; an unlisted port or host is INVALID_ARGS before ssh', async () => {
+    allow(['internal.example:8443', '10.0.0.5:80']);
+    const fake = scripted('__HTTP__ 200 0.010 2 0 1 0\n__BODY__\nok\n', 0);
+    const allowed = await drive(
+      'http',
+      'get',
+      { url: 'https://internal.example:8443/h' },
+      fake.runner,
+    );
+    expect([allowed.error, fake.calls]).toEqual([null, 1]);
+    const defaultPort = await drive('http', 'get', { url: 'http://10.0.0.5/' }, fake.runner);
+    expect([defaultPort.error, fake.calls]).toEqual([null, 2]);
+    for (const url of [
+      'https://internal.example:9443/h',
+      'http://10.0.0.6/',
+      'http://user:pw@internal.example:8443/',
+    ]) {
+      const refused = await drive('http', 'get', { url }, fake.runner);
+      expect([url, refused.error?.code]).toEqual([url, 'INVALID_ARGS']);
+    }
+    expect(fake.calls).toBe(2);
+  });
+
+  test('a wildcard or port-less entry is a config error, never a wider allowance', async () => {
+    for (const entry of ['*.example:443', 'internal.example']) {
+      allow([entry]);
+      const fake = scripted('', 0);
+      const envelope = await drive('http', 'get', { url: 'http://127.0.0.1/' }, fake.runner);
+      expect([entry, envelope.error?.code, fake.calls]).toEqual([entry, 'CONFIG_PARSE_ERROR', 0]);
+    }
+  });
+
+  test('wait for --until url: stays localhost-only whatever http allows', async () => {
+    allow(['internal.example:8443']);
+    const fake = scripted('', 0);
+    const envelope = await drive(
+      'wait',
+      'for',
+      { until: 'url:https://internal.example:8443/h', timeout: '20' },
+      fake.runner,
+    );
+    expect([envelope.error?.code, fake.calls]).toEqual(['INVALID_ARGS', 0]);
+  });
+});
+
+describe('http: body_truncated follows every cut', () => {
+  test('a body the envelope cap (--max-bytes) shortened reports body_truncated', async () => {
+    const body = 'a'.repeat(3_000);
+    const fake = scripted(`__HTTP__ 200 0.010 ${body.length} 0 0 0\n__BODY__\n${body}`, 0);
+    const envelope = await executeOp(
+      op('http', 'get'),
+      { alias: ALIAS, args: { url: 'http://127.0.0.1/' } },
+      {
+        transport: { runner: fake.runner },
+        sshConfigPath: join(scratch, 'ssh_config'),
+        auditLogPath: join(scratch, 'audit.jsonl'),
+        maxBytes: 1_500,
+      },
+    );
+    const data = envelope.data as { body: string; body_truncated: boolean };
+    expect(envelope.output_truncated).toBe(true);
+    expect(data.body.length).toBeLessThan(body.length);
+    expect(data.body_truncated).toBe(true);
+  });
+});
+
 describe('wait for', () => {
+  test('the reply grace outlasts one url probe plus one poll sleep', () => {
+    expect(WAIT_REPLY_GRACE_SEC).toBeGreaterThanOrEqual(
+      WAIT_URL_PROBE_TIMEOUT_SEC + WAIT_POLL_INTERVAL_SEC,
+    );
+  });
+
   test('conditions parse; a regex keeps its own @ and the url its own port', () => {
     expect(parseCondition('healthy@container=app')).toEqual({ kind: 'healthy', container: 'app' });
     expect(parseCondition('log-contains:ready@v2|up@container=web')).toEqual({
@@ -487,7 +583,7 @@ describe('wait for', () => {
       fake.runner,
     );
     expect(envelope.error?.code).toBe('COMMAND_TIMEOUT');
-    expect(envelope.error?.message).toContain('within 55 s');
+    expect(envelope.error?.message).toContain(`within ${60 - WAIT_REPLY_GRACE_SEC} s`);
     expect(envelope.data).toEqual({
       until: 'healthy@container=app',
       met: false,
@@ -579,7 +675,7 @@ describe('CLI alias-first shorthands', () => {
 
   afterEach(() => {
     process.stdout.write = realWrite;
-    process.exitCode = savedExitCode;
+    process.exitCode = savedExitCode ?? 0;
   });
 
   test('`http <alias> GET <non-localhost>` is http get and refuses with INVALID_ARGS', async () => {

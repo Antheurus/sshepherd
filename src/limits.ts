@@ -215,8 +215,10 @@ export const WAIT_MAX_TIMEOUT_SEC = MAX_TIMEOUT_SEC;
  *  budget under 10 s would leave almost no polling time. */
 export const WAIT_MIN_TIMEOUT_SEC = 10;
 /** The `wait for` poll gives up this long before its ssh budget, so its own "not met" answer (with
- *  attempts and elapsed) gets back instead of the session being cut. */
-export const WAIT_REPLY_GRACE_SEC = 5;
+ *  attempts and elapsed) gets back instead of the session being cut: at least one url probe
+ *  (`WAIT_URL_PROBE_TIMEOUT_SEC`, 5 s) plus one poll sleep (`WAIT_POLL_INTERVAL_SEC`, 2 s), the most
+ *  one loop turn can run past the deadline. */
+export const WAIT_REPLY_GRACE_SEC = 7;
 /** Seconds between two `wait for` checks: a healthcheck or a log line is seen within 2 s, and one
  *  `docker inspect` every 2 s is no load on the host. */
 export const WAIT_POLL_INTERVAL_SEC = 2;
@@ -284,3 +286,11 @@ export const EXEC_MAX_ARGV_ITEMS = 64;
 export const EXEC_MAX_DEF_FILE_BYTES = 262_144;
 /** Definitions one `exec/<alias>.toml` may hold: keeps `exec list` one readable page. */
 export const EXEC_MAX_DEFS = 200;
+
+/** Body bytes `http get|send` reads past `HTTP_BODY_MAX_BYTES` so the scrubber sees a secret that
+ *  straddles the cut whole before the body is cut back: 16 KiB holds a 4096-bit PEM private key
+ *  (about 3.2 KiB) or a large JWT several times over. */
+export const HTTP_BODY_SCRUB_MARGIN_BYTES = 16_384;
+/** curl `--max-time` of one recipe `http-probe` attempt: a health endpoint that has not answered in
+ *  10 s is failing, and the step's `retries` and `interval` decide how long it keeps trying. */
+export const RECIPE_HTTP_PROBE_TIMEOUT_SEC = 10;
