@@ -51,6 +51,7 @@ const BOOLEAN_FLAG_NAMES = new Set([
   'all',
   'diagnose',
   'all-types',
+  'allow-ddl',
 ]);
 
 const GROUPS = [...new Set(listOps().map((op) => op.group))];
@@ -93,7 +94,7 @@ const DEFAULT_FIRST_POSITIONAL_NOTE =
 
 const GLOBAL_FLAGS = [
   '--yes              confirm a mutating op (required — sshepherd never prompts interactively)',
-  '--dry-run          deploy run: print the resolved plan, execute nothing',
+  '--dry-run          deploy run: print the resolved plan, execute nothing; db exec: run, then roll back',
   `--timeout <sec>    any op: seconds the remote command may run (1-${MAX_TIMEOUT_SEC}; each op has its own default)`,
   `--max-bytes <n>   any op: the printed JSON never exceeds n bytes (${MIN_MAX_BYTES}-${CEILING_MAX_BYTES}, default ${DEFAULT_MAX_BYTES}); a cut sets output_truncated`,
   '--fields <a,b.c>   any op: keep only these dot paths of data (a list is walked per item)',
@@ -114,6 +115,7 @@ const USER_ERROR_CODES: ReadonlySet<SshErrorCode> = new Set([
   'CONFIG_PARSE_ERROR',
   'UNKNOWN_ALIAS',
   'CONFIRMATION_REQUIRED',
+  'DDL_REFUSED',
   'PROFILE_DENIED',
   'HOST_KEY_FINGERPRINT_MISMATCH',
   'KNOWN_HOSTS_UNWRITABLE',

@@ -80,6 +80,7 @@ describe('registry — getOp/listOps', () => {
     ['db', 'describe'],
     ['db', 'count'],
     ['db', 'migrations'],
+    ['db', 'backup-verify'],
     ['deploy', 'status'],
     ['deploy', 'logs'],
     ['security', 'ssh-audit'],
@@ -115,6 +116,8 @@ describe('registry — getOp/listOps', () => {
     ['hosts', 'trust'],
     ['http', 'send'],
     ['exec', 'change'],
+    ['db', 'exec'],
+    ['db', 'backup'],
   ];
 
   test('every read-only op declared through Phases 3-5 is registered and flagged mutating:false', () => {

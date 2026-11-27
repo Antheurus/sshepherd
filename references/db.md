@@ -177,6 +177,56 @@ cancels a runaway statement itself and the envelope says `COMMAND_TIMEOUT` with
 `wrapAsJsonAgg` turns zero result rows into SQL `NULL`, which `psql -qAt` prints as an
 empty string — `parseJsonArray` in `registry.ts` normalizes that back to `[]`.
 
+## Governed writes and backups — `db exec`, `db backup`, `db backup-verify`
+
+These three are the only `db` ops that write, and none of them uses the read-only login.
+`db exec` and `db backup-verify` connect as the target's `write_role` (targets.toml); a target
+without one is a `VALIDATION_ERROR` naming the field, and so is a `write_role` equal to `user`.
+They run on `container` and `host` targets only: a `container-env` URL names its own login.
+
+| Op | Shape |
+|---|---|
+| `db exec <target> --file <local.sql> [--dry-run] [--allow-ddl] --yes` | `{ dry_run, committed, sql_sha256, tables, statements: [{index, command, row_count}] }`. A failure mid-file is `COMMAND_FAILED` with `data: {committed: false, statements_ok}` and psql's `sql_error` |
+| `db backup <target> [--keep N] --yes` | `{ path, name, bytes, sha256, table_data_entries, kept, kept_bytes, pruned }` |
+| `db backup-verify <target> [--dump <name>]` | `{ dump, verified, restore_errors, tables_compared, mismatched, throwaway_dropped, tables: [{table, source, restored}] }` |
+
+**`db exec`.** The file (local, at most 64 KiB and 500 statements) is split at every `;` outside
+strings, quoted names, dollar quotes and comments by the same lexical rules `db query`'s scanner
+uses; each statement becomes its own psql buffer, followed by an `\echo` of psql's `ROW_COUNT`.
+The session gets the bounded-read limits (`statement_timeout` = budget less 15 s, default budget
+300 s; `lock_timeout` 2 s), then `BEGIN`, the statements, and `COMMIT` — or `ROLLBACK` for
+`--dry-run`. `ON_ERROR_STOP` ends psql at the first failing statement and the server rolls the open
+transaction back. Statement output goes to `/dev/null` (`\o`), so a `SELECT` in the file returns
+only its row count. Refused outright, before any ssh call: transaction control (`BEGIN`, `COMMIT`,
+`SAVEPOINT`, ...), a psql meta-command (a buffer starting with a backslash), `SET`/`RESET` of the
+role or a timer, `set_config()`, `COPY ... PROGRAM`, and a `BEGIN ATOMIC` function body. DDL —
+`CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `GRANT`, `REVOKE`, `COMMENT`, `DO`, `CALL`, `REINDEX`,
+`CLUSTER`, `REFRESH`, `SECURITY LABEL`, `IMPORT`, `LOAD`, `REASSIGN`, `SELECT ... INTO`, and an
+`EXPLAIN ANALYZE` around any of them — is `DDL_REFUSED` without `--allow-ddl`. These are lexical
+guards; the write role's grants are the boundary, as the read-only login is for reads. A dry run
+still advances sequences and can fire side effects outside the transaction. The real run needs
+`--yes` and the `deploy` profile. Its audit row carries `sql_sha256` and `tables` (names only);
+the scrubbed SQL text is written only to `<state dir>/sql/<sha256>.sql` (0600 in a 0700
+directory), kept 90 days and 200 MB in total, oldest first.
+
+**`db backup`.** `pg_dump -Fc` as the target's `user`, written on the host into `backup_dir`
+(default `.sshepherd/backups` under the ssh login's home) as `sshepherd-<target>-<UTC>.dump`
+under a 077 umask, through a `.partial` file renamed only when the dump exited 0. Then the size,
+sha256 and `pg_restore -l` count of `TABLE DATA` entries, then the prune: this target's dumps
+newest first, each kept while fewer than `--keep` (else `backup_keep`, else 7) are kept and the
+total stays within `backup_max_bytes` (default 5 GiB); the new dump is always kept, and no other
+file in the directory is ever deleted.
+
+**`db backup-verify`.** Gotcha B2: a restore is proven by real per-table counts, never by a hash
+or an exit code. It creates `sshepherd_verify_<random>` as the write role (`CREATEDB`),
+`pg_restore --no-owner --no-privileges` the newest dump (or `--dump <name>`) into it, counts every
+user table with `count(*)` in the source (as the read login) and in the copy, and drops the copy —
+an EXIT trap drops it on every path, and the op reads `pg_database` afterwards to report
+`throwaway_dropped`. `verified` is true only when the restore reported 0 errors and every table's
+counts match. The source is counted now, not at dump time, so a table written since the dump shows
+in `mismatched`; verify right after the backup. It changes nothing the caller keeps, so it needs no
+`--yes`, but it needs the `deploy` profile.
+
 ## `-qAt` and why the transaction doesn't leak noise
 
 `buildPsqlCommand` always passes `-v ON_ERROR_STOP=1 -qAt`: `-q` (quiet) suppresses the

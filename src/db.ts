@@ -780,3 +780,503 @@ export function buildDbSlowCommand(conn: DbConnection): string {
   ].join('\n');
   return shellJoin(['sh', '-c', script]);
 }
+
+/** One lexical token of a `db exec` statement: a word (unquoted name or keyword, upper-cased in
+ *  `upper`), a "quoted" name, a string or dollar-quoted constant, a number, or one punctuation
+ *  character. Comments and whitespace are not tokens. `depth` is the parenthesis depth it sits at. */
+interface SqlToken {
+  kind: 'word' | 'ident' | 'string' | 'number' | 'punct';
+  text: string;
+  upper: string;
+  start: number;
+  depth: number;
+}
+
+function unscannableSql(why: string): OpError {
+  return new OpError('VALIDATION_ERROR', `db exec: ${why}, so it cannot be split into statements`, {
+    hint: 'Close every string, quoted name, dollar quote and /* comment in the file.',
+  });
+}
+
+/** Postgres's lexical rules as `assertSelfContainedSql` reads them (standard strings, E'' escapes
+ *  with their continuation lines, dollar quotes, quoted names, `--` and nested block comments),
+ *  emitting tokens instead of only tracking depth. */
+function scanSql(sql: string): SqlToken[] {
+  const tokens: SqlToken[] = [];
+  let depth = 0;
+  let i = 0;
+  const push = (kind: SqlToken['kind'], start: number, end: number): void => {
+    const text = sql.slice(start, end);
+    tokens.push({ kind, text, upper: text.toUpperCase(), start, depth });
+  };
+  while (i < sql.length) {
+    const c = sql[i] as string;
+    const start = i;
+    if (c === '-' && sql[i + 1] === '-') {
+      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') {
+        i += 1;
+      }
+    } else if (c === '/' && sql[i + 1] === '*') {
+      i = closingComment(sql, i);
+      if (i === -1) {
+        throw unscannableSql('the SQL ends inside a /* comment');
+      }
+    } else if (c === "'" || c === '"') {
+      i = closingQuote(sql, i + 1, c, false);
+      if (i === -1) {
+        throw unscannableSql(`the SQL leaves a ${c === '"' ? 'quoted name' : 'string'} open`);
+      }
+      push(c === '"' ? 'ident' : 'string', start, i);
+    } else if (IDENT_START.test(c)) {
+      while (i < sql.length && IDENT_CONT.test(sql[i] as string)) {
+        i += 1;
+      }
+      if (i - start === 1 && (c === 'e' || c === 'E') && sql[i] === "'") {
+        i = closingEString(sql, i + 1);
+        if (i === -1) {
+          throw unscannableSql('the SQL leaves a string open');
+        }
+        push('string', start, i);
+      } else {
+        push('word', start, i);
+      }
+    } else if (c === '$' && DOLLAR_TAG.test(sql.slice(i))) {
+      const tag = DOLLAR_TAG.exec(sql.slice(i))?.[0] ?? '$$';
+      const end = sql.indexOf(tag, i + tag.length);
+      if (end === -1) {
+        throw unscannableSql('the SQL leaves a dollar-quoted string open');
+      }
+      i = end + tag.length;
+      push('string', start, i);
+    } else if (/[0-9]/.test(c)) {
+      while (i < sql.length && /[0-9.]/.test(sql[i] as string)) {
+        i += 1;
+      }
+      push('number', start, i);
+    } else if (/\s/.test(c)) {
+      i += 1;
+    } else {
+      if (c === ')') {
+        depth = Math.max(0, depth - 1);
+      }
+      push('punct', start, i + 1);
+      if (c === '(') {
+        depth += 1;
+      }
+      i += 1;
+    }
+  }
+  return tokens;
+}
+
+/** One statement of a `db exec` file: its text exactly as written (trimmed), and its tokens. */
+export interface SqlStatement {
+  text: string;
+  tokens: SqlToken[];
+}
+
+/** Splits a change file at every `;` outside strings, quoted names, dollar quotes and comments.
+ *  A piece holding only comments or whitespace is not a statement. */
+export function splitSqlStatements(sql: string): SqlStatement[] {
+  const statements: SqlStatement[] = [];
+  let pieceStart = 0;
+  let pieceTokens: SqlToken[] = [];
+  const close = (end: number): void => {
+    if (pieceTokens.length > 0) {
+      statements.push({ text: sql.slice(pieceStart, end).trim(), tokens: pieceTokens });
+    }
+    pieceTokens = [];
+  };
+  for (const token of scanSql(sql)) {
+    if (token.kind === 'punct' && token.text === ';') {
+      close(token.start);
+      pieceStart = token.start + 1;
+    } else {
+      pieceTokens.push(token);
+    }
+  }
+  close(sql.length);
+  return statements;
+}
+
+/** Statements that change the schema, privileges or run opaque code, refused without --allow-ddl. */
+const DDL_VERBS = new Set([
+  'CREATE',
+  'ALTER',
+  'DROP',
+  'TRUNCATE',
+  'DO',
+  'CALL',
+  'GRANT',
+  'REVOKE',
+  'COMMENT',
+  'SECURITY',
+  'REINDEX',
+  'CLUSTER',
+  'REFRESH',
+  'IMPORT',
+  'LOAD',
+  'REASSIGN',
+]);
+
+/** Transaction control: `db exec` owns the one transaction, so a file never opens, ends or splits it. */
+const TRANSACTION_VERBS = new Set([
+  'BEGIN',
+  'START',
+  'COMMIT',
+  'END',
+  'ROLLBACK',
+  'ABORT',
+  'SAVEPOINT',
+  'RELEASE',
+]);
+
+/** Session settings the file must not change: the login role, and the timers sshepherd set. */
+const GUARDED_SETTINGS = new Set([
+  'ROLE',
+  'SESSION',
+  'ALL',
+  'STATEMENT_TIMEOUT',
+  'LOCK_TIMEOUT',
+  'IDLE_IN_TRANSACTION_SESSION_TIMEOUT',
+  'TRANSACTION_TIMEOUT',
+]);
+
+const TABLE_KEYWORDS = new Set(['FROM', 'JOIN', 'INTO', 'UPDATE', 'TABLE', 'TRUNCATE', 'USING']);
+const LIST_KEYWORDS = new Set(['FROM', 'TABLE', 'TRUNCATE']);
+const SKIP_BEFORE_NAME = new Set(['ONLY', 'IF', 'NOT', 'EXISTS', 'TABLE']);
+const NOT_A_TABLE = new Set(['SELECT', 'VALUES', 'LATERAL', 'WITH', 'TABLE', 'ROWS', 'ALL']);
+
+/** What `classifySqlStatement` reads off one statement. */
+export interface StatementInfo {
+  /** The statement's verb (`INSERT`, `UPDATE`, `DROP`, ...), after any `EXPLAIN [options]`. */
+  command: string;
+  /** Changes the schema or privileges, or runs opaque code: needs `--allow-ddl`. */
+  ddl: boolean;
+  /** Why `db exec` refuses it outright, whatever the flags; null when it may run. */
+  refused: string | null;
+  /** Tables it names, as `schema.table` or `table` (unquoted parts lower-cased). */
+  tables: string[];
+}
+
+const nameText = (token: SqlToken): string =>
+  token.kind === 'ident' ? token.text : token.text.toLowerCase();
+
+/** The table names after FROM/JOIN/INTO/UPDATE/TABLE/TRUNCATE/USING (and a comma list after
+ *  FROM/TABLE/TRUNCATE); a name followed by `(` after FROM/JOIN/USING is a function, not a table. */
+function tablesOf(tokens: SqlToken[]): string[] {
+  const tables: string[] = [];
+  const isName = (token: SqlToken | undefined): token is SqlToken =>
+    token !== undefined &&
+    (token.kind === 'ident' || (token.kind === 'word' && !NOT_A_TABLE.has(token.upper)));
+  for (let i = 0; i < tokens.length; i += 1) {
+    const keyword = tokens[i] as SqlToken;
+    if (keyword.kind !== 'word' || !TABLE_KEYWORDS.has(keyword.upper)) {
+      continue;
+    }
+    let j = i + 1;
+    for (;;) {
+      while (tokens[j]?.kind === 'word' && SKIP_BEFORE_NAME.has(tokens[j]?.upper ?? '')) {
+        j += 1;
+      }
+      const first = tokens[j];
+      if (!isName(first)) {
+        break;
+      }
+      const parts = [nameText(first)];
+      j += 1;
+      while (tokens[j]?.text === '.' && isName(tokens[j + 1])) {
+        parts.push(nameText(tokens[j + 1] as SqlToken));
+        j += 2;
+      }
+      const functionCall =
+        tokens[j]?.text === '(' && !['INTO', 'UPDATE', 'TABLE'].includes(keyword.upper);
+      if (!functionCall) {
+        tables.push(parts.join('.'));
+      }
+      if (!LIST_KEYWORDS.has(keyword.upper)) {
+        break;
+      }
+      if (tokens[j]?.upper === 'AS') {
+        j += 2;
+      } else if (tokens[j]?.kind === 'word' && tokens[j + 1]?.text === ',') {
+        j += 1;
+      }
+      if (tokens[j]?.text !== ',') {
+        break;
+      }
+      j += 1;
+    }
+  }
+  return tables;
+}
+
+/**
+ * The verb, the DDL flag, a refusal and the table names of one `db exec` statement, read lexically
+ * (the parser cannot be trusted with a statement it does not understand). DDL is a DDL verb, an
+ * `EXPLAIN [ANALYZE]` around one, or `SELECT ... INTO new_table`. Refused outright: a psql
+ * meta-command (a buffer starting with a backslash would run as one), transaction control, a
+ * `SET`/`RESET` of the role or a timer, `set_config()`, `COPY ... PROGRAM`, and an SQL-standard
+ * `BEGIN ATOMIC` body (its inner `;` cannot be split on).
+ */
+export function classifySqlStatement(statement: SqlStatement): StatementInfo {
+  const { text, tokens } = statement;
+  const words = tokens.filter((token) => token.kind === 'word');
+  let v = 0;
+  while (words[v]?.upper === 'EXPLAIN') {
+    v += 1;
+    while (['ANALYZE', 'ANALYSE', 'VERBOSE'].includes(words[v]?.upper ?? '')) {
+      v += 1;
+    }
+  }
+  let verbToken = words[v];
+  if (v > 0 && verbToken !== undefined) {
+    const firstAfterOptions = tokens.findIndex(
+      (token) =>
+        token.depth === 0 && token.start > (words[v - 1]?.start ?? 0) && token.kind !== 'punct',
+    );
+    verbToken = tokens[firstAfterOptions]?.kind === 'word' ? tokens[firstAfterOptions] : verbToken;
+  }
+  const command = verbToken?.upper ?? '';
+  const topWords = words.filter((token) => token.depth === 0);
+  const refuse = (why: string): StatementInfo => ({
+    command,
+    ddl: false,
+    refused: why,
+    tables: tablesOf(tokens),
+  });
+
+  if (text.startsWith('\\')) {
+    return refuse('a psql meta-command (\\...) is not SQL');
+  }
+  if (TRANSACTION_VERBS.has(command)) {
+    return refuse(
+      `${command} is transaction control; db exec runs the whole file in its own one transaction`,
+    );
+  }
+  if (command === 'PREPARE' && words[v + 1]?.upper === 'TRANSACTION') {
+    return refuse('PREPARE TRANSACTION is transaction control');
+  }
+  if (command === 'SET' || command === 'RESET') {
+    let s = words.indexOf(verbToken as SqlToken) + 1;
+    while (
+      ['SESSION', 'LOCAL'].includes(words[s]?.upper ?? '') &&
+      words[s + 1]?.upper !== 'AUTHORIZATION'
+    ) {
+      s += 1;
+    }
+    const setting = words[s]?.upper ?? '';
+    if (GUARDED_SETTINGS.has(setting)) {
+      return refuse(`${command} ${setting} would change the login role or a timer db exec set`);
+    }
+  }
+  const setConfig = tokens.findIndex(
+    (token, index) => token.upper === 'SET_CONFIG' && tokens[index + 1]?.text === '(',
+  );
+  if (setConfig !== -1) {
+    return refuse('set_config() could change the login role or a timer db exec set');
+  }
+  if (command === 'COPY' && topWords.some((token) => token.upper === 'PROGRAM')) {
+    return refuse('COPY ... PROGRAM runs a shell command on the database server');
+  }
+  if (
+    topWords.some(
+      (token, index) => token.upper === 'BEGIN' && topWords[index + 1]?.upper === 'ATOMIC',
+    )
+  ) {
+    return refuse(
+      'a BEGIN ATOMIC function body is not supported; write the body dollar-quoted ($$ ... $$)',
+    );
+  }
+  const selectInto = topWords.some(
+    (token, index) =>
+      token.upper === 'INTO' && !['INSERT', 'MERGE'].includes(topWords[index - 1]?.upper ?? ''),
+  );
+  return {
+    command,
+    ddl: DDL_VERBS.has(command) || selectInto,
+    refused: null,
+    tables: tablesOf(tokens),
+  };
+}
+
+export const EXEC_ROWS_MARKER = '__SSHEPHERD_ROWS__';
+export const EXEC_DONE_MARKER = '__SSHEPHERD_DONE__';
+
+/**
+ * `db exec`: one psql session as the write login (`conn.user`), output of the statements
+ * themselves sent to /dev/null (`\o`; `\echo` still reaches stdout), the session limits, `BEGIN`,
+ * each statement as its own buffer followed by an echo of psql's `ROW_COUNT`, then `COMMIT` or (a
+ * dry run) `ROLLBACK`. `ON_ERROR_STOP` ends psql at the first failing statement and the server
+ * rolls the open transaction back when the connection closes.
+ */
+export function buildDbExecCommand(
+  conn: DbConnection,
+  sessionSql: string,
+  statements: string[],
+  commit: boolean,
+): string {
+  const buffers = ['\\o /dev/null', sessionSql, 'BEGIN'];
+  statements.forEach((statement, index) => {
+    buffers.push(statement, `\\echo ${EXEC_ROWS_MARKER} ${index + 1} :ROW_COUNT`);
+  });
+  buffers.push(
+    commit ? 'COMMIT' : 'ROLLBACK',
+    `\\echo ${EXEC_DONE_MARKER} ${commit ? 'committed' : 'rolled_back'}`,
+  );
+  return buildPsqlCommand(conn, ...buffers);
+}
+
+/** A Postgres client tool (`pg_dump`, `pg_restore`) run the way the target reaches psql: in the db
+ *  container, or on the host (as `sudo_user`, at `pg_host`/`pg_port`). `connect` adds `-U`/`-d`. */
+export function pgToolCommand(
+  conn: DbConnection,
+  tool: 'pg_dump' | 'pg_restore',
+  toolArgs: string[],
+  connect: { user: string; database: string } | null,
+): string {
+  const login = connect === null ? [] : ['-U', connect.user, '-d', connect.database];
+  if (conn.kind === 'host') {
+    const sudo =
+      conn.sudoUser && conn.sudoUser.length > 0 ? ['sudo', '-n', '-u', conn.sudoUser] : [];
+    const host =
+      connect !== null && conn.pgHost && conn.pgHost.length > 0 ? ['-h', conn.pgHost] : [];
+    const port =
+      connect !== null && conn.pgPort && conn.pgPort.length > 0 ? ['-p', conn.pgPort] : [];
+    return shellJoin([...sudo, tool, ...host, ...port, ...login, ...toolArgs]);
+  }
+  return shellJoin([...execPrefix(conn), tool, ...login, ...toolArgs]);
+}
+
+/** Dump file names `db backup` writes and prunes, for one target: anything else in the directory is
+ *  never touched. */
+export function backupNamePattern(prefix: string): string {
+  return `^${prefix}[0-9]{8}T[0-9]{6}Z\\.dump$`;
+}
+
+export interface BackupPlan {
+  dir: string;
+  prefix: string;
+  name: string;
+  keep: number;
+  maxBytes: number;
+}
+
+/**
+ * `db backup`: `pg_dump -Fc` into `<dir>/.<name>.partial` (0600 under a 0700 umask), renamed into
+ * place only when the dump exited 0; then its size, sha256 and `TABLE DATA` entry count (from
+ * `pg_restore -l`), then the prune: this target's dumps newest first, each kept while fewer than
+ * `keep` are kept and the total stays within `maxBytes`, the new dump always kept. Only names
+ * matching `backupNamePattern` inside `dir` are ever deleted.
+ */
+export function buildDbBackupScript(conn: DbConnection, plan: BackupPlan): string {
+  const dump = pgToolCommand(conn, 'pg_dump', ['-Fc'], {
+    user: conn.user,
+    database: conn.database,
+  });
+  const list = pgToolCommand(conn, 'pg_restore', ['-l'], null);
+  const lines = [
+    'umask 077',
+    `d=${shq(plan.dir)}`,
+    `n=${shq(plan.name)}`,
+    `keep=${plan.keep}`,
+    `max=${plan.maxBytes}`,
+    'mkdir -p -- "$d" || exit 3',
+    'if [ -e "$d/$n" ]; then echo "sshepherd: $n already exists; run db backup again in a second" >&2; exit 3; fi',
+    't="$d/.$n.partial"',
+    `${dump} > "$t" || { rc=$?; rm -f -- "$t"; exit $rc; }`,
+    'mv -- "$t" "$d/$n" || { rm -f -- "$t"; exit 3; }',
+    'f="$d/$n"',
+    'bytes=$(wc -c < "$f" | tr -d \' \')',
+    'sha=$( (sha256sum "$f" 2>/dev/null || shasum -a 256 "$f") | cut -d \' \' -f 1)',
+    `listing=$(${list} < "$f") || { echo "sshepherd: pg_restore -l could not read the new dump" >&2; exit 4; }`,
+    "entries=$(printf '%s\\n' \"$listing\" | grep -c ' TABLE DATA ' || true)",
+    'kept=0',
+    'total=0',
+    `for x in $(ls -1 -- "$d" | grep -E ${shq(backupNamePattern(plan.prefix))} | sort -r); do`,
+    '  sz=$(wc -c < "$d/$x" | tr -d \' \')',
+    '  if [ "$x" != "$n" ] && { [ "$kept" -ge "$keep" ] || [ $((total + sz)) -gt "$max" ]; }; then',
+    '    rm -f -- "$d/$x" && echo "__PRUNED__ $x"',
+    '  else',
+    '    kept=$((kept + 1)); total=$((total + sz))',
+    '  fi',
+    'done',
+    'echo "__BACKUP__ $n $bytes $sha $entries $kept $total"',
+  ];
+  return shellJoin(['sh', '-c', lines.join('\n')]);
+}
+
+/** Every user table with its exact `count(*)`, as one JSON array sorted by name, at most `limit + 1`
+ *  tables (one more says the database has too many). `query_to_xml` runs each count inside this
+ *  one SELECT, so it stays a read in a read-only transaction. */
+export function tableCountsSql(limit: number): string {
+  return (
+    "SELECT coalesce(json_agg(json_build_object('table', c.name, 'count', c.n) ORDER BY c.name), '[]'::json) FROM (" +
+    "SELECT format('%I.%I', schemaname, tablename) AS name, " +
+    "(xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I', schemaname, tablename), false, true, '')))[1]::text::bigint AS n " +
+    "FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') " +
+    `ORDER BY 1 LIMIT ${limit + 1}) c`
+  );
+}
+
+export interface VerifyPlan {
+  dir: string;
+  prefix: string;
+  /** A dump name to verify; null = the newest of this target's dumps. */
+  dump: string | null;
+  /** The throwaway database name (`sshepherd_verify_<hex>`). */
+  throwaway: string;
+  writeRole: string;
+  sessionSql: string;
+  maxTables: number;
+}
+
+/**
+ * `db backup-verify`: create the throwaway database as the write login, `pg_restore` the dump into
+ * it (`--no-owner --no-privileges`; non-fatal errors counted from "errors ignored on restore: N",
+ * their text never printed), count every table on the source (as the read login) and in the
+ * throwaway, then drop it — on every exit path through the EXIT trap — and report whether it is
+ * gone. Marker lines carry each part back.
+ */
+export function buildDbBackupVerifyScript(conn: DbConnection, plan: VerifyPlan): string {
+  const writer: DbConnection = { ...conn, user: plan.writeRole };
+  const quotedDb = `"${plan.throwaway}"`;
+  const onTarget = (sql: string): string => buildPsqlCommand(writer, sql);
+  const counts = wrapReadOnlyTxn(tableCountsSql(plan.maxTables));
+  const restore = pgToolCommand(conn, 'pg_restore', ['--no-owner', '--no-privileges'], {
+    user: plan.writeRole,
+    database: plan.throwaway,
+  });
+  const pick =
+    plan.dump === null
+      ? `f=$(ls -1 -- "$d" 2>/dev/null | grep -E ${shq(backupNamePattern(plan.prefix))} | sort | tail -n 1)`
+      : `f=${shq(plan.dump)}`;
+  const lines = [
+    `d=${shq(plan.dir)}`,
+    pick,
+    'if [ -z "$f" ] || [ ! -f "$d/$f" ]; then echo __NO_DUMP__; exit 0; fi',
+    `e="$d/.${plan.throwaway}.err"`,
+    `cleanup() { ${onTarget(`DROP DATABASE IF EXISTS ${quotedDb}`)} >/dev/null 2>&1; rm -f -- "$e"; }`,
+    'trap cleanup EXIT',
+    "trap 'exit 129' HUP",
+    "trap 'exit 130' INT",
+    "trap 'exit 143' TERM",
+    `${onTarget(`CREATE DATABASE ${quotedDb}`)} >/dev/null || exit $?`,
+    `${restore} < "$d/$f" 2> "$e"`,
+    'rrc=$?',
+    'nerr=$(sed -n \'s/.*errors ignored on restore: \\([0-9][0-9]*\\).*/\\1/p\' "$e" | tail -n 1)',
+    'if [ "$rrc" -ne 0 ] && [ -z "$nerr" ]; then echo "sshepherd: pg_restore failed before restoring anything (exit $rrc)" >&2; exit "$rrc"; fi',
+    '[ -n "$nerr" ] || nerr=0',
+    'echo "__DUMP__ $f"',
+    'echo "__RESTORE_ERRORS__ $nerr"',
+    `src=$(${buildPsqlCommand(conn, plan.sessionSql, counts)}) || exit $?`,
+    'printf \'__SOURCE__ %s\\n\' "$src"',
+    `dst=$(${buildPsqlCommand({ ...writer, database: plan.throwaway }, plan.sessionSql, counts)}) || exit $?`,
+    'printf \'__RESTORED__ %s\\n\' "$dst"',
+    'cleanup',
+    'trap - EXIT',
+    `left=$(${onTarget(`SELECT count(*) FROM pg_database WHERE datname = ${quoteLiteral(plan.throwaway)}`)}) || exit $?`,
+    'echo "__LEFTOVER__ $left"',
+  ];
+  return shellJoin(['sh', '-c', lines.join('\n')]);
+}

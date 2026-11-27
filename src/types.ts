@@ -65,6 +65,7 @@ export type SshErrorCode =
   | 'AUDIT_WRITE_FAILED'
   | 'OUTPUT_TOO_LARGE'
   | 'PROFILE_DENIED'
+  | 'DDL_REFUSED'
   | 'INTERNAL_ERROR';
 
 /**
@@ -168,6 +169,13 @@ export interface RawResult {
  *  (file text, log lines, query rows). `executeOp` scrubs `metadata` and `content` output. */
 export type Exposure = 'none' | 'metadata' | 'content';
 
+/** Extra fields an op adds to its audit row (`db exec`: the SQL's sha256 and the tables it names —
+ *  never the SQL itself). */
+export interface AuditExtra {
+  sqlSha256?: string;
+  tables?: string[];
+}
+
 export type OutputMode = 'native-json' | 'ndjson' | 'raw' | { parse: (stdout: string) => unknown };
 
 export interface OpContext {
@@ -261,4 +269,7 @@ export interface OpSpec<T = unknown> {
   runLocal?: (ctx: OpContext, sshConfigPath: string, transport?: TransportDeps) => T | Promise<T>;
   /** Optional: one or more allowlist gates `executeOp` enforces before `buildRemote`. */
   allowlist?: AllowlistPolicy[];
+  /** Optional: fields for this op's audit row, called once when the row is written; `stateDir` is
+   *  the audit log's directory, where the op may keep a private side file the fields point at. */
+  auditFields?: (ctx: OpContext, stateDir: string) => AuditExtra | undefined;
 }

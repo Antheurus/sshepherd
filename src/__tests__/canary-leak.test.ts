@@ -273,6 +273,14 @@ function explicitDrives(alias: string): Record<string, Record<string, string | b
     'git head': [{ path: CANARY_REPO }],
     'git log': [{ path: CANARY_REPO }],
     'git diff-stat': [{ path: CANARY_REPO }],
+    'db exec': [
+      { target: alias, file: join(scratch, 'exec-read.sql'), 'dry-run': true },
+      { target: alias, file: join(scratch, 'exec-noop.sql') },
+      { target: alias, file: join(scratch, 'exec-unique.sql'), 'dry-run': true },
+      { target: alias, file: join(scratch, 'exec-cast.sql'), 'dry-run': true },
+    ],
+    'db backup': [{ target: alias }],
+    'db backup-verify': [{ target: alias }],
     'db migrations': [
       ...(argValues(alias).target ?? []).map((target) => ({ target })),
       { target: alias, table: 'schema_migrations' },
@@ -280,6 +288,16 @@ function explicitDrives(alias: string): Record<string, Record<string, string | b
     ],
   };
 }
+
+/** `db exec` change files: a dry run reading every canary column, a committed no-op (so the audit
+ *  row and its SQL side file are written), and two that fail on the planted row with psql's
+ *  value-quoting error texts. */
+const CANARY_EXEC_SQL: Record<string, string> = {
+  'exec-read.sql': 'UPDATE canary_users SET email = email;\nSELECT * FROM canary_users;\n',
+  'exec-noop.sql': 'UPDATE canary_users SET email = email WHERE false;\n',
+  'exec-unique.sql': 'UPDATE canary_users SET email = email;\nSELECT canary_unique_violation();\n',
+  'exec-cast.sql': 'SELECT email, password::int FROM canary_users;\n',
+};
 
 interface Drive {
   label: string;
@@ -431,13 +449,16 @@ function writeFixtureConfig(): void {
   const aliases = VARIANTS.map((variant) => `smoke-${variant}`);
   const targets = aliases
     .flatMap((alias) => [
-      `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\ncontainers = ["${CANARY_CONTAINER}", "${CANARY_APP}"]\n`,
+      `[${alias}]\nalias = "${alias}"\ncontainer = "${PREFIX}-postgres"\nuser = "sshepherd_ro"\ndatabase = "fixture"\nwrite_role = "postgres"\ncontainers = ["${CANARY_CONTAINER}", "${CANARY_APP}"]\n`,
       `[${pgConnectTarget(alias)}]\nalias = "${alias}"\ncontainer = "${PREFIX}-canary-pg"\nuser = "sshepherd_ro"\ndatabase = "fixture"\n`,
       `[${envUrlTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\n`,
       `[${envViaTarget(alias)}]\nalias = "${alias}"\nkind = "container-env"\ncontainer = "${ENV_URL_CONTAINER}"\nenv_key = "DATABASE_URL"\npsql_container = "${PREFIX}-postgres"\n`,
     ])
     .join('\n');
   writeFileSync(join(scratch, 'targets.toml'), targets);
+  for (const [name, sql] of Object.entries(CANARY_EXEC_SQL)) {
+    writeFileSync(join(scratch, name), sql);
+  }
   const paths = ['/opt/canary', CANARY_REPO, ...CANARY_FILES].map((path) => `"${path}"`).join(', ');
   const allowlist = aliases.map((alias) => `[${alias}]\npaths = [${paths}]\n`).join('\n');
   writeFileSync(join(scratch, 'files-allowlist.toml'), allowlist);

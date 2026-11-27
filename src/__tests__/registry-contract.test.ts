@@ -27,6 +27,8 @@ const failingRunner: SshRunner = async () => FAILING_OUTCOME;
 const AUDITED_MUTATING_OPS = [
   'config put',
   'config reload',
+  'db backup',
+  'db exec',
   'deploy migrate',
   'deploy rollback',
   'deploy run',
@@ -45,6 +47,13 @@ const AUDITED_MUTATING_OPS = [
 ];
 
 const UNAUDITED_MUTATING_OPS: string[] = [];
+
+/** Read-only ops that still need more than `read`, each with the reason a reviewer accepted:
+ *  they change nothing the caller keeps, but act on the server while they run. */
+const READ_ONLY_ABOVE_READ: Record<string, string> = {
+  'db backup-verify':
+    'creates, restores into and drops a throwaway database as the write login; disk and load on the database server',
+};
 
 const EXPOSURES = ['none', 'metadata', 'content'];
 const FAKE_SECRET = 'fake-secret-value-1';
@@ -65,6 +74,7 @@ beforeAll(() => {
     `[contract-db]\nalias = "${ALIAS}"\ncontainer = "app-db"\nuser = "ro"\ndatabase = "app"\ncontainers = ["app"]\n`,
   );
   writeFileSync(join(scratch, 'source.txt'), 'content\n');
+  writeFileSync(join(scratch, 'change.sql'), "UPDATE app SET note = 'x';\n");
   writeFileSync(join(scratch, 'ssh_config'), `Host ${ALIAS}\n  HostName 10.0.0.9\n`);
   process.env.SSHEPHERD_FILES_ALLOWLIST_PATH = join(scratch, 'files-allowlist.toml');
   process.env.SSHEPHERD_CONFIG_ALLOWLIST_PATH = join(scratch, 'config-allowlist.toml');
@@ -123,6 +133,10 @@ function argsFor(op: OpSpec): Record<string, string | boolean> {
   if (op.group === 'db') {
     args.db_user = 'app';
     args.db_name = 'app';
+    args.write_role = 'app_rw';
+  }
+  if (op.group === 'db' && op.name === 'exec') {
+    args.file = join(scratch, 'change.sql');
   }
   if (op.group === 'env' && op.name === 'keys') {
     args.container = 'app';
@@ -386,9 +400,10 @@ describe('permission profiles — every op declares one, SSHEPHERD_PROFILE gates
     expect(Object.keys(OP_PROFILES).sort()).toEqual([...names].sort());
   });
 
-  test('every mutating op needs more than read; every read-only op needs exactly read', () => {
+  test('every mutating op needs more than read; every read-only op needs exactly read, except the reviewed list', () => {
     for (const op of ops) {
-      const expected = op.mutating ? ['deploy', 'admin'] : ['read'];
+      const aboveRead = op.mutating || READ_ONLY_ABOVE_READ[nameOf(op)] !== undefined;
+      const expected = aboveRead ? ['deploy', 'admin'] : ['read'];
       expect({ op: nameOf(op), ok: expected.includes(OP_PROFILES[nameOf(op)] ?? '') }).toEqual({
         op: nameOf(op),
         ok: true,

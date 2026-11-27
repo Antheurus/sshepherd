@@ -36,6 +36,7 @@ const ERROR_MESSAGES: Record<SshErrorCode, string> = {
   OUTPUT_TOO_LARGE:
     'The command printed more than sshepherd reads and its output could not be parsed',
   PROFILE_DENIED: 'This op needs a higher SSHEPHERD_PROFILE than the caller holds',
+  DDL_REFUSED: 'The SQL changes the schema or privileges and --allow-ddl was not given',
   INTERNAL_ERROR: 'sshepherd failed while running the op',
 };
 
@@ -128,6 +129,10 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
   },
   PROFILE_DENIED: {
     hint: 'A human raises the profile (SSHEPHERD_PROFILE=read|deploy|admin, unset means admin) and a target max_profile in targets.toml; the agent never raises its own.',
+    retryable: false,
+  },
+  DDL_REFUSED: {
+    hint: 'Nothing ran. Once a human has approved the schema change, run the same command again with --allow-ddl; review it first with --dry-run --allow-ddl.',
     retryable: false,
   },
   INTERNAL_ERROR: {
