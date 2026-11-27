@@ -12,6 +12,9 @@
 #   noisy        - prints 5 MiB of log lines once, then idles: the output-cap check (`logs docker`).
 #   stderr-writer - writes one line to stderr and one to stdout, then idles: `logs docker` must
 #                  return both (the stderr-merge check).
+#   sshd-pw      - a password-auth sshd (user deploy, Dockerfile.password) for `setup host add`,
+#                  `setup ssh-alias adopt-env` and `doctor hosts`; always on an ephemeral host port
+#                  unless SSHEPHERD_SMOKE_PW_PORT names one, its password set per run by smoke.sh.
 #
 # scripts/smoke.sh sets SSHEPHERD_SMOKE_KEYDIR (an ephemeral generated keypair), the container-name
 # prefix SSHEPHERD_SMOKE_CONTAINER_PREFIX and the two host ports (SSHEPHERD_SMOKE_DEBIAN_PORT 8413,
@@ -90,3 +93,11 @@ services:
       - app
       - noisy
       - stderr-writer
+
+  sshd-pw:
+    build:
+      context: .
+      dockerfile: Dockerfile.password
+    container_name: ${SSHEPHERD_SMOKE_CONTAINER_PREFIX:-sshepherd-fixture}-sshd-pw
+    ports:
+      - '127.0.0.1:${SSHEPHERD_SMOKE_PW_PORT-}:22'

@@ -37,6 +37,8 @@ else
   DEBIAN_PORT=""
   ALPINE_PORT=""
 fi
+# The password-auth sshd (sshd-pw) is ephemeral in every project unless this names a port.
+PW_PORT="${SSHEPHERD_SMOKE_PW_PORT:-}"
 KEYDIR="$STATE/keys"
 # The pid of the `smoke`/`canary-gate` run holding the project; `down` leaves a live holder alone.
 HOLDER_FILE="$STATE/holder.pid"
@@ -64,6 +66,7 @@ compose() {
   (cd "$FIXTURE_DIR" && SSHEPHERD_SMOKE_KEYDIR="$KEYDIR" \
     SSHEPHERD_SMOKE_PROJECT="$COMPOSE_PROJECT" SSHEPHERD_SMOKE_CONTAINER_PREFIX="$PREFIX" \
     SSHEPHERD_SMOKE_DEBIAN_PORT="$DEBIAN_PORT" SSHEPHERD_SMOKE_ALPINE_PORT="$ALPINE_PORT" \
+    SSHEPHERD_SMOKE_PW_PORT="$PW_PORT" \
     docker compose -p "$COMPOSE_PROJECT" "$@")
 }
 
@@ -71,7 +74,11 @@ compose() {
 # picked, read back from the running project.
 port_for() {
   local fixed
-  if [[ "$1" == debian ]]; then fixed="$DEBIAN_PORT"; else fixed="$ALPINE_PORT"; fi
+  case "$1" in
+    debian) fixed="$DEBIAN_PORT" ;;
+    alpine) fixed="$ALPINE_PORT" ;;
+    *) fixed="$PW_PORT" ;;
+  esac
   if [[ -n "$fixed" ]]; then
     echo "$fixed"
     return
@@ -180,6 +187,33 @@ fixture_up() {
   done
   [[ "$noisy_ready" == true ]] || fail "noisy fixture never finished printing"
   pass "noisy fixture printed 5 MiB and is idle"
+
+  # The onboarding tests (setup host add, adopt-env, doctor hosts) read pw_port, pw_password and
+  # pw_host_keys.pub from the state dir: the password reaches the container on stdin only, and the
+  # host keys are the out-of-band copy a human would compare a fingerprint against. Its host key is
+  # deliberately NOT put in known_hosts: those tests prove the trust step themselves.
+  step "set a fresh login password on the password-auth sshd (sshd-pw)"
+  local pw_password pw_port pw_ready=false
+  pw_password="canary-pw-$(openssl rand -hex 12)"
+  printf 'deploy:%s\n' "$pw_password" | docker exec -i "$PREFIX-sshd-pw" chpasswd
+  pw_port="$(port_for pw)"
+  (
+    umask 077
+    printf '%s' "$pw_password" >"$STATE/pw_password"
+    printf '%s\n' "$pw_port" >"$STATE/pw_port"
+    host_keys pw >"$STATE/pw_host_keys.pub"
+  )
+  for _ in $(seq 1 60); do
+    if python3 -c 'import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 2)
+sys.exit(0 if s.recv(64).startswith(b"SSH-") else 1)' "$pw_port" 2>/dev/null; then
+      pw_ready=true
+      break
+    fi
+    sleep 1
+  done
+  [[ "$pw_ready" == true ]] || fail "password-auth sshd never sent an ssh banner on port $pw_port"
+  pass "password-auth sshd up on $pw_port, password and host keys in $STATE"
 }
 
 fixture_down() {

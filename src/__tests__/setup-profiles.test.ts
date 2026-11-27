@@ -17,6 +17,8 @@ const WRITING_ARGS: Record<string, string[]> = {
   'ssh-alias remove': ['app1', '--yes'],
   'ssh-alias install': ['app1', '--yes'],
   'ssh-alias update': ['app1', '--host', '203.0.113.11', '--yes'],
+  'ssh-alias adopt-env': ['/srv/app-project', '--yes'],
+  'host add': ['app2', '--host', '203.0.113.12', '--user', 'deploy', '--yes'],
   'db-target scaffold': [
     'app1-db',
     '--alias',

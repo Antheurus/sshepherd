@@ -58,6 +58,9 @@ export interface RemoveData {
 
 export interface InstallOptions {
   yes: boolean;
+  /** Connect through the alias in `configPath` under strict host-key checking (the host key was
+   *  trusted first); `setup host add` sets it. */
+  strictHostKey?: boolean;
 }
 
 export interface InstallData {
@@ -117,7 +120,7 @@ function markerLine(alias: string): string {
   return `${MANAGED_MARKER_PREFIX}${alias}`;
 }
 
-function keyPathFor(alias: string, configPath: string): string {
+export function keyPathFor(alias: string, configPath: string): string {
   return join(dirname(configPath), `sshepherd_${alias}_ed25519`);
 }
 
@@ -526,7 +529,11 @@ export async function install(
     });
   }
 
-  const target: InstallTarget = { alias, ...connection };
+  const target: InstallTarget = {
+    alias,
+    ...connection,
+    ...(options.strictHostKey === true ? { sshConfigPath: configPath } : {}),
+  };
   const deps: InstallServerDeps = { ...defaultInstallServerDeps(), ...serverDeps };
 
   let outcome: InstallOutcome;

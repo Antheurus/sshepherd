@@ -25,6 +25,10 @@ export interface InstallTarget {
   user: string;
   port: number;
   publicKeyPath: string;
+  /** Set by `setup host add` and `setup ssh-alias adopt-env`, which trust the host key through
+   *  `hosts trust` first: every connection then goes `ssh -F <path> <alias>` under strict host-key
+   *  checking. Unset (plain `install`), it goes to `user@host` with accept-new as before. */
+  sshConfigPath?: string;
 }
 
 export type InstallOutcome =
@@ -122,10 +126,41 @@ export interface InstallServerDeps {
 
 /** Base64-embeds the public key so the remote shell command never has to escape raw
  *  ssh-key content (which can contain `/` and `+` but never quotes) — decoded back to a
- *  real line on the remote side before being appended. */
+ *  real line on the remote side before being appended. The line ends in a newline, and a file
+ *  whose last line has none gets one first: without both, the next key appended (by this or by
+ *  anything else) lands on the same line and neither key works. */
 function buildRemoteInstallCommand(publicKey: string): string {
-  const publicKeyB64 = Buffer.from(publicKey, 'utf8').toString('base64');
-  return `mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${publicKeyB64}' | base64 -d >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys`;
+  const publicKeyB64 = Buffer.from(`${publicKey}\n`, 'utf8').toString('base64');
+  return `mkdir -p ~/.ssh && chmod 700 ~/.ssh && f=~/.ssh/authorized_keys && { [ ! -s "$f" ] || [ -z "$(tail -c 1 "$f")" ] || echo >> "$f"; } && echo '${publicKeyB64}' | base64 -d >> "$f" && chmod 600 "$f"`;
+}
+
+/** Where an install connection goes and how it treats the host key: the alias in its own config,
+ *  strictly, when the target names a config; else `user@host` under `firstUsePolicy`. */
+function destinationArgs(
+  target: InstallTarget,
+  connectTimeoutS: number,
+  firstUsePolicy: string | null,
+): string[] {
+  if (target.sshConfigPath !== undefined) {
+    return [
+      '-F',
+      target.sshConfigPath,
+      '-o',
+      'StrictHostKeyChecking=yes',
+      '-o',
+      `ConnectTimeout=${connectTimeoutS}`,
+      target.alias,
+    ];
+  }
+  const policy = firstUsePolicy === null ? [] : ['-o', `StrictHostKeyChecking=${firstUsePolicy}`];
+  return [
+    ...policy,
+    '-o',
+    `ConnectTimeout=${connectTimeoutS}`,
+    '-p',
+    String(target.port),
+    `${target.user}@${target.host}`,
+  ];
 }
 
 /** Pure, no password argument at all — proves by construction that the password never
@@ -137,13 +172,7 @@ export function buildSshpassArgs(target: InstallTarget, remoteCmd: string): stri
     '-f',
     '/dev/stdin',
     'ssh',
-    '-o',
-    'StrictHostKeyChecking=accept-new',
-    '-o',
-    `ConnectTimeout=${INSTALL_CONNECT_TIMEOUT_S}`,
-    '-p',
-    String(target.port),
-    `${target.user}@${target.host}`,
+    ...destinationArgs(target, INSTALL_CONNECT_TIMEOUT_S, 'accept-new'),
     remoteCmd,
   ];
 }
@@ -195,13 +224,7 @@ function buildSshKeyArgs(keyPath: string, target: InstallTarget, remoteCmd: stri
     keyPath,
     '-o',
     'BatchMode=yes',
-    '-o',
-    'StrictHostKeyChecking=accept-new',
-    '-o',
-    `ConnectTimeout=${INSTALL_CONNECT_TIMEOUT_S}`,
-    '-p',
-    String(target.port),
-    `${target.user}@${target.host}`,
+    ...destinationArgs(target, INSTALL_CONNECT_TIMEOUT_S, 'accept-new'),
     remoteCmd,
   ];
 }
@@ -388,11 +411,7 @@ async function probeAlreadyTrusted(target: InstallTarget): Promise<boolean> {
     'ssh',
     '-o',
     'BatchMode=yes',
-    '-o',
-    `ConnectTimeout=${PROBE_CONNECT_TIMEOUT_S}`,
-    '-p',
-    String(target.port),
-    `${target.user}@${target.host}`,
+    ...destinationArgs(target, PROBE_CONNECT_TIMEOUT_S, null),
     '--',
     'echo sshepherd-ok',
   ];
@@ -418,8 +437,13 @@ async function probeAlreadyTrusted(target: InstallTarget): Promise<boolean> {
   return !timedOut && code === 0;
 }
 
+/** `SSHEPHERD_INSTALL_NO_BROWSER=1` prints the URL only, never opening a browser: a headless
+ *  machine, or a test harness that submits the form itself. */
 function defaultAnnounceUrl(url: string): void {
   process.stdout.write(`Open this URL in your browser to install the key: ${url}\n`);
+  if (process.env.SSHEPHERD_INSTALL_NO_BROWSER === '1') {
+    return;
+  }
   try {
     const command =
       process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
@@ -640,11 +664,13 @@ export async function runInstallServer(
   const url = `http://127.0.0.1:${handle.port}/${token}`;
   deps.announceUrl(url);
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<InstallOutcome>((resolve) => {
-    setTimeout(() => resolve({ kind: 'timed_out' }), deps.timeoutMs);
+    timer = setTimeout(() => resolve({ kind: 'timed_out' }), deps.timeoutMs);
   });
 
   const outcome = await Promise.race([submittedPromise, timeoutPromise]);
+  clearTimeout(timer);
   settle(outcome);
   handle.stop();
 

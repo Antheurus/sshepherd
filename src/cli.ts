@@ -13,8 +13,15 @@ import {
 } from './limits.ts';
 import { buildEnvelope, parseFieldPaths, printJson, printPretty } from './output.ts';
 import { buildDeployOpContext } from './recipes.ts';
-import { type ExecuteDeps, executeOp, getOp, listOps, runDoctor } from './registry.ts';
-import { scrubLocalOutput } from './scrub.ts';
+import {
+  type ExecuteDeps,
+  executeOp,
+  getOp,
+  listOps,
+  runDoctor,
+  runDoctorHosts,
+} from './registry.ts';
+import { scrub, scrubLocalOutput } from './scrub.ts';
 import { runSetup } from './setup.ts';
 import { didYouMean, didYouMeanOrAll } from './suggest.ts';
 import { buildDbOpContext } from './targets.ts';
@@ -108,8 +115,13 @@ const USER_ERROR_CODES: ReadonlySet<SshErrorCode> = new Set([
 
 /** Prints an envelope the CLI built itself (doctor, an argument error, the catch-all), which never
  *  went through `executeOp`'s scrub pass. */
-function printLocalEnvelope(envelope: Envelope<unknown>): void {
-  const { value, count } = scrubLocalOutput(envelope);
+/** `revealKeys` names a field whose values are not secret even though its name says `password`
+ *  (`doctor hosts`' alias list); the text and address rules still run over them. */
+function printLocalEnvelope(envelope: Envelope<unknown>, revealKeys?: Set<string>): void {
+  const { value, count } =
+    revealKeys === undefined
+      ? scrubLocalOutput(envelope)
+      : scrub(envelope, { maskAddresses: true, revealKeys });
   printJson({ ...value, scrubbed: value.scrubbed + count });
 }
 
@@ -375,6 +387,7 @@ function formatTopHelp(): string {
     ...GROUPS.map((group) => `  ${group}`),
     '  setup             human-only — writes local config, see `sshepherd setup --help`',
     '  doctor            report drift: installed vs built binary, SKILL.md vs registry, db targets without a read-only role',
+    '  doctor hosts      ssh aliases whose server still accepts password login (names only)',
     '',
     'Run `sshepherd <group> --help` to see actions + args for a group.',
     'Run `sshepherd <group> <action> --help` to see one action.',
@@ -480,6 +493,21 @@ export async function run(argv: string[], baseDeps: ExecuteDeps = {}): Promise<v
 
   if (first === 'setup') {
     await runSetup(rest);
+    return;
+  }
+
+  if (first === 'doctor' && rest[0] === 'hosts') {
+    const startedAtMs = Date.now();
+    printLocalEnvelope(
+      buildEnvelope({
+        alias: '',
+        command: 'doctor hosts',
+        startedAtMs,
+        data: await runDoctorHosts(),
+        error: null,
+      }),
+      new Set(['password_auth_targets']),
+    );
     return;
   }
 

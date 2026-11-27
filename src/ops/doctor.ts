@@ -2,8 +2,17 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import {
+  CONNECT_TIMEOUT_SEC,
+  DOCTOR_HOSTS_CONCURRENCY,
+  DOCTOR_HOSTS_MAX_ALIASES,
+  DOCTOR_HOSTS_PROBE_TIMEOUT_SEC,
+} from '../limits.ts';
+import { listHostAliases } from '../parsers/ssh-config.ts';
 import { listOps } from '../registry.ts';
+import { defaultSshConfigPath } from '../setup-ssh-alias.ts';
 import { defaultTargetsPath, loadTargets } from '../targets.ts';
+import { classify, defaultRunner, type SshRunner, STRICT_HOST_KEY_ARGS } from '../transport.ts';
 
 export interface DoctorReport {
   installed_sha: string | null;
@@ -110,6 +119,117 @@ export function runDoctor(): DoctorReport {
     pg_ro_role_next:
       withoutRoRole !== null && withoutRoRole.length > 0
         ? 'sshepherd setup db-target ro-role <target> --print-sql'
+        : null,
+  };
+}
+
+export interface DoctorHostsReport {
+  /** Aliases whose sshd still offers password (or keyboard-interactive) login: names only. */
+  password_auth_targets: string[];
+  /** How many aliases answered with their list of auth methods. */
+  checked: number;
+  /** Aliases that could not be asked, with the transport code (a host key not trusted yet, a
+   *  timeout), or `NOT_PROBED` past `DOCTOR_HOSTS_MAX_ALIASES`. */
+  unchecked: Array<{ alias: string; code: string }>;
+  next: string | null;
+}
+
+type HostAuthVerdict =
+  | { kind: 'password' }
+  | { kind: 'key_only' }
+  | { kind: 'unchecked'; code: string };
+
+/** One key exchange under strict host-key checking that offers no authentication at all, so the
+ *  server answers with the methods it would accept (`Permission denied (publickey,password)`) and
+ *  nothing runs; no credential is read or sent. A host that lets `none` through (Tailscale SSH)
+ *  needs no password either. */
+async function probeHostAuth(alias: string, runner: SshRunner): Promise<HostAuthVerdict> {
+  const outcome = await runner(
+    [
+      ...STRICT_HOST_KEY_ARGS,
+      '-T',
+      '-o',
+      'BatchMode=yes',
+      '-o',
+      `ConnectTimeout=${CONNECT_TIMEOUT_SEC}`,
+      '-o',
+      'LogLevel=ERROR',
+      '-o',
+      'ControlMaster=no',
+      '-o',
+      'ControlPath=none',
+      '-o',
+      'PreferredAuthentications=none',
+      alias,
+      'true',
+    ],
+    DOCTOR_HOSTS_PROBE_TIMEOUT_SEC * 1_000,
+  );
+  if (outcome.timedOut) {
+    return { kind: 'unchecked', code: 'CONNECT_TIMEOUT' };
+  }
+  const methods = /permission denied \(([^)]*)\)/i.exec(outcome.stderr)?.[1];
+  if (methods !== undefined) {
+    const offered = methods.split(',').map((method) => method.trim());
+    return offered.includes('password') || offered.includes('keyboard-interactive')
+      ? { kind: 'password' }
+      : { kind: 'key_only' };
+  }
+  if (outcome.code === 0) {
+    return { kind: 'key_only' };
+  }
+  const error = classify({
+    code: outcome.code,
+    stdout: '',
+    transportStderr: outcome.stderr,
+    commandStderr: '',
+    timedOut: false,
+  });
+  return { kind: 'unchecked', code: error?.code ?? 'SSH_TRANSPORT_ERROR' };
+}
+
+/** `doctor hosts`: every alias in the ssh config whose server still accepts password login, which
+ *  `security harden <alias> --keep-session=false` turns off once key login works. */
+export async function runDoctorHosts(
+  runner: SshRunner = defaultRunner,
+  configPath: string = defaultSshConfigPath(),
+): Promise<DoctorHostsReport> {
+  const aliases = listHostAliases(configPath);
+  const probed = aliases.slice(0, DOCTOR_HOSTS_MAX_ALIASES);
+  const verdicts: HostAuthVerdict[] = new Array(probed.length);
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < probed.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      verdicts[index] = await probeHostAuth(probed[index] ?? '', runner);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(DOCTOR_HOSTS_CONCURRENCY, probed.length) }, worker),
+  );
+
+  const passwordTargets: string[] = [];
+  const unchecked: Array<{ alias: string; code: string }> = [];
+  probed.forEach((alias, index) => {
+    const verdict = verdicts[index];
+    if (verdict?.kind === 'password') {
+      passwordTargets.push(alias);
+    } else if (verdict?.kind === 'unchecked') {
+      unchecked.push({ alias, code: verdict.code });
+    }
+  });
+  for (const alias of aliases.slice(DOCTOR_HOSTS_MAX_ALIASES)) {
+    unchecked.push({ alias, code: 'NOT_PROBED' });
+  }
+  passwordTargets.sort();
+  return {
+    password_auth_targets: passwordTargets,
+    checked: probed.length - unchecked.filter((entry) => entry.code !== 'NOT_PROBED').length,
+    unchecked,
+    next:
+      passwordTargets.length > 0
+        ? 'sshepherd hosts test <alias> (key login works), then sshepherd security harden <alias> --keep-session=false --yes'
         : null,
   };
 }

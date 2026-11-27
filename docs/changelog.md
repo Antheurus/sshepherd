@@ -1,5 +1,13 @@
 # sshepherd Changelog
 
+## v0.4.0-rc.19 — Add a server in one command
+
+- `sshepherd setup host add <alias> --host <ip> --user <user> --yes` now does the whole onboarding: it registers the alias, creates its key, checks the server's host key, opens the one-time browser form where you type the password, and confirms key login works. The result lists each step it took.
+- If the server's host key is not known yet, it stops and shows the fingerprints. Compare one with your provider's console, then run the same command again with `--fingerprint SHA256:...`.
+- `sshepherd setup ssh-alias adopt-env <project-dir> --yes` reads the `SSH_*` settings in a project's `.env`, creates an alias per server and installs a key using the password or key already there. It only reports which aliases got a key, never any value from the file. After it, rotate those passwords.
+- `sshepherd doctor hosts` lists the aliases whose server still accepts password login, by name only, so you know which ones to harden.
+- Fixed: after a successful key install, the command no longer sits waiting until the form's timeout before exiting.
+
 ## v0.4.0-rc.11 — Probe local services, wait for a condition, read git state
 
 - New `sshepherd http get <alias> <url>` (or `http <alias> GET <url>`) calls a service on the server itself, from the server: only `127.0.0.1`, `::1` and `localhost` URLs are allowed. It returns the status, the time taken, the response header names (never their values) and the body, capped at 64 KiB with secrets masked.
