@@ -349,3 +349,14 @@ export const DB_BACKUP_VERIFY_STALE_SEC = MAX_TIMEOUT_SEC + KILL_AFTER_SEC + 900
 /** Attempts, 1 s apart, to drop a throwaway database: the restore's own connection takes a moment
  *  to end after `pg_terminate_backend`, and DROP fails while it is still there. */
 export const DB_VERIFY_DROP_TRIES = 10;
+
+/** Levels of JSON string escaping the scrubber unwraps to find a secret pair (`{"msg":"{\"token\"
+ *  :\"v\"}"}` is one, a log line that re-encodes it is two): each level is one more full pass of
+ *  the keyed-inline rule, and nothing real nests a payload three deep. */
+export const SCRUB_MAX_JSON_ESCAPE_LEVELS = 2;
+/** Ceiling of a named-exec definition's own `timeout`: half an hour holds a slow one-off migration
+ *  or report; a per-call `--timeout` still overrides it up to `MAX_TIMEOUT_SEC`. */
+export const EXEC_DEF_MAX_TIMEOUT_SEC = 1_800;
+/** `path` params one exec definition may declare: each is held open on its own descriptor 3-9 for
+ *  the command (`sh` redirects single-digit descriptors only), so seven is the ceiling. */
+export const EXEC_MAX_PATH_PARAMS = 7;

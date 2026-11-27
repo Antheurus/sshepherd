@@ -39,6 +39,17 @@ export interface AuditDeps {
 
 const PROFILES = new Set(['read', 'deploy', 'admin']);
 
+/** `exec run|change` rows name the definition that ran, as deploy rows name the recipe: a declared
+ *  name is an identifier, and anything not shaped like one stays only in the args hash. */
+function execDefName(input: AuditEntryInput): string | undefined {
+  const name = input.argsSummary.name;
+  return input.command.startsWith('exec ') &&
+    typeof name === 'string' &&
+    /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name)
+    ? name
+    : undefined;
+}
+
 /** Read on every call, never at import: a compiled binary must not freeze the build machine's
  *  environment, and tests redirect it through `SSHEPHERD_STATE_DIR` (`SSHEPHERD_AUDIT_PATH`
  *  names the file itself). */
@@ -147,6 +158,7 @@ export function auditMutating(
     alias: input.alias,
     command: input.command,
     ...input.identifiers,
+    exec_def: execDefName(input),
     args_hash: hashArgs(input.argsSummary),
     args_sha256: sha256Args(input.argsSummary),
     outcome: input.outcome,

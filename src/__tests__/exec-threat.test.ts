@@ -575,7 +575,8 @@ describe('exec — mutating defs: --yes, profile and audit', () => {
       .split('\n')
       .map((line) => JSON.parse(line));
     expect(rows.map((row) => [row.command, row.outcome])).toEqual([['exec change', 'ok']]);
-    expect(text).not.toContain('worker');
+    expect(rows[0].exec_def).toBe('restart-worker');
+    expect(text.replaceAll('restart-worker', '')).not.toContain('worker');
   });
 
   test('SSHEPHERD_PROFILE=read refuses a mutating def (PROFILE_DENIED) and still runs a read-only one', async () => {

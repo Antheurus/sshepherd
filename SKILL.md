@@ -284,6 +284,7 @@ sshepherd git diff-stat web-01 /opt/myapp
 sshepherd exec list web-01                                                        # names, params, mutating
 sshepherd exec run web-01 app-artisan --param cmd=migrate:status                  # shorthand: exec web-01 app-artisan ...
 sshepherd exec change web-01 restart-worker --param c=worker --yes                # mutating = true: --yes, profile deploy
+# a def whose argv runs a shell or interpreter (perl, python, node, awk, find -exec, env perl, ...) needs allow_shell = true
 
 # setup — agent-invocable; install's credential boundary is the one exception (see Gotchas #9)
 sshepherd setup ssh-alias register myserver --host 1.2.3.4 --user deploy --yes
@@ -330,7 +331,9 @@ sshepherd setup ssh-alias adopt-env ./my-project --yes                 # SSH_* /
 3. **No raw exec, ever.** There is no `sshepherd exec "<any command>"`. A genuinely novel
    need is a named, typed definition a human writes in `~/.config/sshepherd/exec/<alias>.toml`
    (`exec run`/`exec change`, `references/exec.md`) or a recipe step (`references/recipes.md`) —
-   reviewable, never a free-text shell escape hatch. `plain ssh <alias>` remains the
+   reviewable, never a free-text shell escape hatch. A definition whose argv runs a shell or any
+   general-purpose interpreter (directly, versioned, or behind `env`/`sudo`/`timeout`/...) is
+   refused unless the human set `allow_shell = true`. `plain ssh <alias>` remains the
    intentional human break-glass for one-off exploration.
 4. **`deploy rollback` refuses without a `[rollback]` block.** A recipe that doesn't
    declare one has no inferred rollback — sshepherd never guesses.

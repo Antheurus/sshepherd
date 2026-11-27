@@ -232,6 +232,9 @@ export interface OpSpec<T = unknown> {
    *  every value masked, whatever its key (`ScrubOptions.maskEnvBlocks`). */
   maskEnvBlocks?: true;
   timeoutSec: number;
+  /** Optional: the default budget for this call when it depends on what the call names (an exec
+   *  definition's own `timeout`); `--timeout` still overrides it. */
+  timeoutSecFor?: (ctx: OpContext) => number;
   /** Which end of an over-long payload survives a byte cap: `tail` for output whose last lines
    *  decide the outcome (deploy steps); default `head`. */
   truncateKeeps?: 'head' | 'tail';
