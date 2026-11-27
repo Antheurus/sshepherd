@@ -90,7 +90,9 @@ function skillMatchesRegistry(skill: string): boolean | null {
 function targetsWithoutReadOnlyRole(): string[] {
   const targets = loadTargets();
   return Object.entries(targets)
-    .filter(([, target]) => !READ_ONLY_ROLE_PATTERN.test(target.user))
+    .filter(
+      ([, target]) => target.containersOnly !== true && !READ_ONLY_ROLE_PATTERN.test(target.user),
+    )
     .map(([name]) => name)
     .sort();
 }

@@ -179,3 +179,8 @@ export const DIAGNOSE_MASTER_CHECK_TIMEOUT_SEC = 3;
 export const DB_MIGRATIONS_COMPARE_MAX = 10_000;
 /** `files head|tail|cat --lines A:B`: the widest range one call returns, the same as `MAX_HEAD_LINES`. */
 export const MAX_FILES_LINE_SPAN = 5_000;
+/** PEM marker lines (`-----BEGIN ...-----` / `-----END ...-----`) `files grep` and `files head|tail
+ *  --lines` read from the whole file to tell which returned lines sit inside a private-key block: a
+ *  bundle of a few dozen certificates and keys stays far under it, and past it every returned line
+ *  of that file is masked rather than judged from a partial list. */
+export const MAX_PEM_MARKER_LINES = 256;

@@ -9,7 +9,7 @@ import { shellJoin } from './quote.ts';
 import { appendBlock, readTextOrEmpty, writeTextSecure } from './setup-file-io.ts';
 import { buildSetupResult, type SetupResult } from './setup-types.ts';
 import { didYouMean } from './suggest.ts';
-import { defaultTargetsPath, loadTargets } from './targets.ts';
+import { defaultTargetsPath, loadTargets, pgTargetNames } from './targets.ts';
 import { tomlQuote } from './toml-quote.ts';
 import { run, type TransportDeps } from './transport.ts';
 
@@ -161,7 +161,10 @@ export function scaffold(
 export interface RoRoleOptions {
   printSql: boolean;
   role?: string;
-  /** `--tables-only`: SELECT on the app's tables instead of `pg_read_all_data`. */
+  /** `--all-data`: `pg_read_all_data` (every table, pg_authid included) instead of the default
+   *  SELECT on the app's tables. */
+  allData?: boolean;
+  /** `--tables-only`: the default shape, still accepted so older calls keep working. */
   tablesOnly?: boolean;
 }
 
@@ -174,11 +177,12 @@ const ROLE_NAME_PATTERN = /^[a-z_][a-z0-9_]{0,62}$/;
  * login role is the only boundary untrusted SQL cannot leave, because `RESET ROLE` and
  * `set_config('role', ...)` inside a query return to it.
  */
-export function roRoleSql(target: string, role: string, tablesOnly = false): string {
+export function roRoleSql(target: string, role: string, allData = false): string {
+  const tablesOnly = !allData;
   const grants = tablesOnly
     ? [
-        '-- --tables-only: SELECT on the tables of schema public and nothing else (no system catalog',
-        '-- such as pg_authid). Repeat the three lines below for every other schema the app uses. The',
+        '-- SELECT on the tables of schema public and nothing else (no system catalog such as',
+        '-- pg_authid). Repeat the three lines below for every other schema the app uses. The',
         '-- DEFAULT PRIVILEGES line covers tables created later by the role that runs it; run it as the',
         '-- role that owns the app tables, or add FOR ROLE <owner>.',
         `GRANT USAGE ON SCHEMA public TO ${role};`,
@@ -186,10 +190,11 @@ export function roRoleSql(target: string, role: string, tablesOnly = false): str
         `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ${role};`,
       ]
     : [
-        '-- pg_read_all_data reads every table, the system catalogs included: pg_authid holds every',
-        "-- role's password verifier, and this role can SELECT it. sshepherd db query masks the",
-        '-- rolpassword and passwd columns by name (deny_columns in targets.toml), but the role itself',
-        '-- can still read them; --tables-only prints a variant that grants only the app tables.',
+        '-- --all-data: pg_read_all_data reads every table, the system catalogs included: pg_authid',
+        "-- holds every role's password verifier, and this role can SELECT it. sshepherd db query masks",
+        '-- the rolpassword and passwd columns by name (deny_columns in targets.toml), but a value read',
+        '-- through a function (substr, encode, replace of rolpassword) comes back NOT masked, and the',
+        '-- role itself can always read them. Without --all-data this prints a grant of the app tables only.',
         `GRANT pg_read_all_data TO ${role};`,
       ];
   return [
@@ -224,7 +229,7 @@ export function roRoleSql(target: string, role: string, tablesOnly = false): str
   ].join('\n');
 }
 
-/** `setup db-target ro-role <target> --print-sql [--tables-only]`: the SQL text, or a setup error when the call
+/** `setup db-target ro-role <target> --print-sql [--all-data]`: the SQL text, or a setup error when the call
  *  is incomplete. Reads targets.toml only to refuse a target that is not declared. */
 export function roRole(
   target: string,
@@ -252,19 +257,32 @@ export function roRole(
       },
     });
   }
+  if (options.allData === true && options.tablesOnly === true) {
+    return buildSetupResult({
+      command,
+      error: {
+        code: 'INVALID_ARGS',
+        message: `${command}: --all-data and --tables-only ask for two different grants; pass one (the default is tables only)`,
+      },
+    });
+  }
   const targets = loadTargets(path);
-  if (!(target in targets)) {
+  const names = pgTargetNames(path);
+  if (!names.includes(target)) {
     return buildSetupResult({
       command,
       error: {
         code: 'VALIDATION_ERROR',
-        message: `pg-target '${target}' is not declared in targets.toml`,
+        message:
+          target in targets
+            ? `targets.toml entry '${target}' declares only containers; a read-only role needs a pg-target with user and database`
+            : `pg-target '${target}' is not declared in targets.toml`,
         next: 'sshepherd db list',
-        did_you_mean: didYouMean(target, Object.keys(targets)),
+        did_you_mean: didYouMean(target, names),
       },
     });
   }
-  return { sql: roRoleSql(target, role, options.tablesOnly === true) };
+  return { sql: roRoleSql(target, role, options.allData === true) };
 }
 
 export interface DiscoveredPostgres {

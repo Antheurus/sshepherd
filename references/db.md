@@ -49,12 +49,19 @@ database = "app"
 ```
 
 `setup db-target ro-role <target> --print-sql` prints the SQL that creates a read-only LOGIN role
-(`pg_read_all_data`, `default_transaction_read_only`, statement/lock/temp-file limits) and the
-checks that prove it; a human applies it, sshepherd never does. `pg_read_all_data` also reads the
-system catalogs, `pg_authid` (every role's password verifier) included, and the printed SQL says
-so; `--tables-only` prints the variant that grants `USAGE` on schema `public`, `SELECT` on its
-tables and the matching default privileges instead, so `pg_authid` stays out of reach. `doctor` lists the targets whose
-`user` does not name such a role under `pg_targets_without_ro_role`.
+(`USAGE` on schema `public`, `SELECT` on its tables and the matching default privileges,
+`default_transaction_read_only`, statement/lock/temp-file limits) and the checks that prove it; a
+human applies it, sshepherd never does. That default keeps `pg_authid` (every role's password
+verifier) out of reach. `--all-data` prints the `pg_read_all_data` variant instead, which reads every
+table, the system catalogs and `pg_authid` included; its SQL says so, and says that `db query`
+masks `rolpassword`/`passwd` only by column name, so a function-wrapped read (`substr`, `encode`,
+`replace` of `rolpassword`) comes back unmasked. `--tables-only` is still accepted and means the
+default. `doctor` lists the targets whose `user` does not name such a role under
+`pg_targets_without_ro_role`.
+
+A table with only `alias` and `containers` is not a pg-target: it declares the containers whose env
+key names `env keys --container` and `services inspect` may read. `db list` leaves it out, and a db
+op (or `ro-role`) naming it is refused with `VALIDATION_ERROR`.
 
 Two optional fields work on every kind:
 
@@ -99,7 +106,8 @@ Postgres usually has none, and running remotely means one never needs to open on
    should be a role with SELECT-only grants:
    ```sql
    CREATE ROLE sshepherd_ro WITH LOGIN;
-   GRANT pg_read_all_data TO sshepherd_ro;                    -- PG14+
+   GRANT USAGE ON SCHEMA public TO sshepherd_ro;
+   GRANT SELECT ON ALL TABLES IN SCHEMA public TO sshepherd_ro;
    ALTER ROLE sshepherd_ro SET default_transaction_read_only = on;
    ```
    This is the layer that actually catches a writable CTE (`WITH x AS (INSERT ...)
@@ -131,13 +139,16 @@ A legitimate single ad hoc SELECT never needs a `;`, so rejecting it outright is
 `SELECT json_agg(t) FROM (\nSELECT * FROM (\n<sql>\n) sshepherd_q LIMIT n\n) t`, each wrapper
 part on its own line so a trailing `--` comment ends at the newline after the caller's text. The
 guard scans the text with Postgres's lexical rules — `'...'` strings (doubled quotes), `E'...'`
-(backslash escapes), dollar quotes, `"quoted"` names, `--` comments ending at `\n` or `\r`, nested
+(backslash escapes, also in every `'...'` segment that continues it after a newline), dollar quotes, `"quoted"` names, `--` comments ending at `\n` or `\r`, nested
 `/* */` comments — and refuses (`VALIDATION_ERROR`, no ssh call) a statement that closes a
 parenthesis it never opened (`... FROM big) sshepherd_q) t, (SELECT (SELECT 1` would otherwise
 aggregate every row past the limit) or leaves a string, quoted name, dollar quote, `/*` comment or
 parenthesis open for the wrapper's tail to fall into. The session buffer pins
 `standard_conforming_strings = on`, so a backslash inside a plain string means the same to the
-server as to the scan.
+server as to the scan. The row cap still rests on that scan: a `FETCH n` from a cursor would cap
+rows without it, but `db query` returns one `json_agg` value, and a cursor's rows cannot be
+aggregated back into one in plain SQL, so moving to it changes the op's output path. The
+read-only transaction does not rest on the scan at all (`;` is refused outright).
 
 ## Output shapes per op
 

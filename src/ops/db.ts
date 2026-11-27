@@ -35,9 +35,9 @@ import { MASK } from '../scrub.ts';
 import {
   DEFAULT_DENY_COLUMNS,
   defaultTargetsPath,
-  loadTargets,
   PG_TARGET_KINDS,
   type PgTargetKind,
+  pgTargetNames,
 } from '../targets.ts';
 import { type ErrorInfo, type OpContext, OpError, type OpSpec, Premasked } from '../types.ts';
 
@@ -193,7 +193,7 @@ const dbList: OpSpec<DbListResult> = {
   output: 'raw',
   buildRemote: () => null,
   shape: (parsed) => parsed as DbListResult,
-  runLocal: () => ({ targets: Object.keys(loadTargets(defaultTargetsPath())) }),
+  runLocal: () => ({ targets: pgTargetNames(defaultTargetsPath()) }),
 };
 
 interface DbTableEntry {

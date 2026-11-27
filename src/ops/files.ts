@@ -10,6 +10,7 @@ import {
   MAX_GREP_CONTEXT_LINES,
   MAX_GREP_MATCH_LINES,
   MAX_HEAD_LINES,
+  MAX_PEM_MARKER_LINES,
 } from '../limits.ts';
 import {
   arg,
@@ -149,12 +150,83 @@ function rangeLines(
     : lines;
 }
 
+/** Every PEM marker of a whole file with up to 16 characters after it (what `maskPemLines` reads to
+ *  tell a block's opening from prose), as `grep -no` prints them: `12:-----BEGIN ...-----MIIE`. */
+const PEM_MARKER_ERE = '-----(BEGIN|END) [A-Z0-9 ]+-----.{0,16}';
+
+/** Shell text printing the PEM markers of the file `fileRef` names, at most one past the cap. */
+function pemMarkersScript(fileRef: string): string {
+  return `grep -InoE -e ${shq(PEM_MARKER_ERE)} -- ${fileRef} 2>/dev/null | head -n ${MAX_PEM_MARKER_LINES + 1}`;
+}
+
+interface NumberedLine {
+  n: number;
+  text: string;
+}
+
+/** `lines` (numbered as in their file) masked as `maskPemLines` masks the whole file: the file's own
+ *  PEM markers, read from all of it, are merged in by line number, so a body line is masked whether
+ *  or not its BEGIN came back with it. `markers` null (cut off) or past the cap masks every line. */
+function maskPemByFile(lines: readonly NumberedLine[], markers: string | null): string[] {
+  const found = (markers ?? '')
+    .split('\n')
+    .map((line) => /^(\d+):(.*)$/s.exec(line))
+    .filter((match): match is RegExpExecArray => match !== null);
+  if (markers === null || found.length > MAX_PEM_MARKER_LINES) {
+    return lines.map(() => MASK);
+  }
+  const returned = new Set(lines.map((line) => line.n));
+  const merged = lines.map((line, at) => ({ n: line.n, text: line.text, at }));
+  for (const match of found) {
+    const n = Number(match[1]);
+    if (!returned.has(n)) {
+      merged.push({ n, text: match[2] ?? '', at: -1 });
+    }
+  }
+  merged.sort((a, b) => a.n - b.n);
+  const masked = maskPemLines(merged.map((entry) => entry.text));
+  const out = lines.map((line) => line.text);
+  merged.forEach((entry, index) => {
+    if (entry.at >= 0) {
+      out[entry.at] = masked[index] ?? MASK;
+    }
+  });
+  return out;
+}
+
+/** Which side of the NUL the PEM markers sit on: the side a too-long stream keeps (`tail` keeps
+ *  its end, `head` its start), so a cut can drop range lines but never part of the markers. */
+type MarkerSide = 'first' | 'last';
+
 /** The remote read for `--lines` on head/tail: an env-shaped file from line 1 to B (its masking
- *  needs every value from its start), any other file only lines A to B. */
-function rangeCommand(path: string, range: LineRange): string {
-  return isEnvFile(path)
-    ? shellJoin(['head', '-n', String(range.end), '--', path])
-    : shellJoin(['sed', '-n', `${range.start},${range.end}p;${range.end}q`, '--', path]);
+ *  needs every value from its start), any other file only lines A to B plus the whole file's PEM
+ *  markers, a NUL between them. The exit status is the range read's. */
+function rangeCommand(path: string, range: LineRange, markers: MarkerSide): string {
+  if (isEnvFile(path)) {
+    return shellJoin(['head', '-n', String(range.end), '--', path]);
+  }
+  const read = `sed -n ${shq(`${range.start},${range.end}p;${range.end}q`)} -- "$p"`;
+  const pem = pemMarkersScript('"$p"');
+  const script =
+    markers === 'first'
+      ? [`p=${shq(path)}`, pem, "printf '\\0'", read].join('; ')
+      : [`p=${shq(path)}`, read, 'rc=$?', "printf '\\0'", pem, 'exit $rc'].join('; ');
+  return shellJoin(['sh', '-c', script]);
+}
+
+/** `--lines` output of a plain file split into the range and its markers (null when the NUL was cut
+ *  off with them). */
+function splitRangeMarkers(
+  text: string,
+  markers: MarkerSide,
+): { body: string; markers: string | null } {
+  const at = markers === 'first' ? text.indexOf('\0') : text.lastIndexOf('\0');
+  if (at === -1) {
+    return { body: text, markers: null };
+  }
+  return markers === 'first'
+    ? { body: text.slice(at + 1), markers: text.slice(0, at) }
+    : { body: text.slice(0, at), markers: text.slice(at + 1) };
 }
 
 interface FilesCatResult {
@@ -233,7 +305,7 @@ const filesCat: OpSpec<FilesCatResult> = {
     if (range !== null) {
       const lines = shouldMask
         ? rangeLines(text, path, range, revealKeysOf(ctx, 'reveal'))
-        : text.split('\n').slice(range.start - 1, range.end);
+        : maskPemLines(text.split('\n')).slice(range.start - 1, range.end);
       const content = lines.join('\n');
       return {
         found: true,
@@ -259,12 +331,26 @@ interface FilesTailResult {
 }
 
 /** The lines of a file read by `tail`/`head`: env-shaped files masked whole, then PEM lines. With
- *  `--lines`, the range `rangeLines` cuts out of what the host sent. */
+ *  `--lines`, the range `rangeLines` cuts out of what the host sent; a plain file's range is masked
+ *  against the PEM markers of the whole file, which came with it. */
 function shapeTextLines(
   text: string,
   path: string,
   range: LineRange | null,
+  markers: MarkerSide,
 ): Premasked<FilesTailResult> {
+  if (range !== null && !isEnvFile(path)) {
+    const split = splitRangeMarkers(text, markers);
+    const raw = rangeLines(split.body, path, range).map((line) => line.trimEnd());
+    const pem = maskPemByFile(
+      raw.map((line, index) => ({ n: range.start + index, text: line })),
+      split.markers,
+    );
+    const kept = raw.flatMap((line, index) => (line.length > 0 ? [index] : []));
+    const lines = kept.map((index) => pem[index] ?? MASK);
+    const masked = kept.filter((index) => pem[index] !== raw[index]).length;
+    return new Premasked({ lines, lines_returned: lines.length }, masked);
+  }
   const unmasked = (
     range === null
       ? (isEnvFile(path) ? maskEnvContent(text, new Set()) : text).split('\n')
@@ -297,7 +383,7 @@ const filesTail: OpSpec<FilesTailResult> = {
   buildRemote: (ctx) => {
     const range = lineRangeOf(ctx);
     if (range !== null) {
-      return rangeCommand(reqStr(ctx, 'path'), range);
+      return rangeCommand(reqStr(ctx, 'path'), range, 'last');
     }
     return shellJoin([
       'tail',
@@ -307,7 +393,8 @@ const filesTail: OpSpec<FilesTailResult> = {
       reqStr(ctx, 'path'),
     ]);
   },
-  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path'), lineRangeOf(ctx)),
+  shape: (parsed, ctx) =>
+    shapeTextLines(parsed as string, reqStr(ctx, 'path'), lineRangeOf(ctx), 'last'),
 };
 
 function boundedLineCount(ctx: OpContext, name: string, fallback: number, max: number): number {
@@ -344,7 +431,7 @@ const filesHead: OpSpec<FilesTailResult> = {
   buildRemote: (ctx) => {
     const range = lineRangeOf(ctx);
     if (range !== null) {
-      return rangeCommand(reqStr(ctx, 'path'), range);
+      return rangeCommand(reqStr(ctx, 'path'), range, 'first');
     }
     return shellJoin([
       'head',
@@ -354,7 +441,8 @@ const filesHead: OpSpec<FilesTailResult> = {
       reqStr(ctx, 'path'),
     ]);
   },
-  shape: (parsed, ctx) => shapeTextLines(parsed as string, reqStr(ctx, 'path'), lineRangeOf(ctx)),
+  shape: (parsed, ctx) =>
+    shapeTextLines(parsed as string, reqStr(ctx, 'path'), lineRangeOf(ctx), 'first'),
 };
 
 /** Private-key-shaped file names `files grep` never reads, however the pattern matches. */
@@ -418,10 +506,12 @@ interface FilesGrepResult {
 const ENV_FILE_CASE = '*.env*|*.vars|*.secrets|credentials*|*.pem|id_*';
 
 /** Run per file, so every block of grep output arrives behind the path it came from (`path NUL
- *  lines NUL whole NUL`) and nothing has to split a path out of a line: `$1` is the pattern, the
- *  rest are files. `whole` is empty except for an env-shaped file, where it is the file itself (its
- *  first `FILE_CAT_MAX_BYTES`, base64 on one line): a matched line inside a multi-line value can only
- *  be masked knowing every line above it. A NUL never occurs in a path or, with -I, in a text line. */
+ *  lines NUL whole NUL markers NUL`) and nothing has to split a path out of a line: `$1` is the
+ *  pattern, the rest are files. `whole` is empty except for an env-shaped file, where it is the file
+ *  itself (its first `FILE_CAT_MAX_BYTES`, base64 on one line): a matched line inside a multi-line
+ *  value can only be masked knowing every line above it. `markers` are the PEM markers of the whole
+ *  file, so a matched key body line is masked whether or not its BEGIN matched too. A NUL never
+ *  occurs in a path or, with -I, in a text line. */
 function grepPerFileScript(flags: string[]): string {
   return [
     'p=$1',
@@ -430,7 +520,8 @@ function grepPerFileScript(flags: string[]): string {
       `for f do out=$(grep ${shellJoin(flags)} -e "$p" -- "$f" | head -n ${MAX_GREP_MATCH_LINES + 1})`,
       '[ -n "$out" ] || continue',
       `case "$(printf '%s' "\${f##*/}" | tr 'A-Z' 'a-z')" in ${ENV_FILE_CASE}) whole=$(head -c ${FILE_CAT_MAX_BYTES} -- "$f" | base64 | tr -d '\\n') ;; *) whole='' ;; esac`,
-      `printf '%s\\0%s\\n\\0%s\\0' "$f" "$out" "$whole"`,
+      `pem=$(${pemMarkersScript('"$f"')})`,
+      `printf '%s\\0%s\\n\\0%s\\0%s\\n\\0' "$f" "$out" "$whole" "$pem"`,
       'done',
     ].join('; '),
   ].join('; ');
@@ -449,8 +540,8 @@ function grepBlockLines(block: string): (RegExpExecArray | null)[] {
 
 /** One file's lines back in `path:12:text` form, masked: an env-shaped file line by line as
  *  `maskEnvLines` masks the whole file (a line past what arrived of it is masked whole), then PEM
- *  bodies for every file. */
-function maskGrepGroup(path: string, block: string, whole: string): string[] {
+ *  bodies for every file, judged against that file's own markers. */
+function maskGrepGroup(path: string, block: string, whole: string, markers: string): string[] {
   const parsed = grepBlockLines(block);
   const envLines = isEnvFile(path)
     ? maskEnvLines(Buffer.from(whole, 'base64').toString('utf8').split('\n'), new Set())
@@ -462,7 +553,14 @@ function maskGrepGroup(path: string, block: string, whole: string): string[] {
     }
     return envLines[Number(match[1]) - 1] ?? MASK;
   });
-  const masked = maskPemLines(texts);
+  const numbered = parsed.flatMap((match, index) =>
+    match === null ? [] : [{ n: Number(match[1]), text: texts[index] ?? '', index }],
+  );
+  const pem = maskPemByFile(numbered, markers);
+  const masked = [...texts];
+  numbered.forEach((line, at) => {
+    masked[line.index] = pem[at] ?? MASK;
+  });
   return parsed.map((match, index) =>
     match === null ? '--' : `${path}${match[2]}${match[1]}${match[2]}${masked[index]}`,
   );
@@ -474,10 +572,10 @@ function grepLines(text: string): { lines: string[]; unmasked: string[] } {
   const parts = text.split('\0');
   const lines: string[] = [];
   const unmasked: string[] = [];
-  for (let i = 0; i + 1 < parts.length; i += 3) {
+  for (let i = 0; i + 1 < parts.length; i += 4) {
     const path = parts[i] ?? '';
     const block = parts[i + 1] ?? '';
-    lines.push(...maskGrepGroup(path, block, parts[i + 2] ?? ''));
+    lines.push(...maskGrepGroup(path, block, parts[i + 2] ?? '', parts[i + 3] ?? ''));
     unmasked.push(
       ...grepBlockLines(block).map((match) =>
         match === null ? '--' : `${path}${match[2]}${match[1]}${match[2]}${match[3]}`,

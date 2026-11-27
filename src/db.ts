@@ -121,6 +121,44 @@ function closingQuote(sql: string, from: number, quote: string, backslash: boole
   return -1;
 }
 
+/** Index of the quote that continues a string constant ending just before `from`, or -1. This is
+ *  Postgres's `quotecontinue`: whitespace holding at least one newline (`\n` or `\r`), where a `--`
+ *  comment counts as whitespace up to its newline, and then a quote. A block comment does not. */
+function continuationQuote(sql: string, from: number): number {
+  let newline = false;
+  let i = from;
+  while (i < sql.length) {
+    const c = sql[i];
+    if (c === '\n' || c === '\r') {
+      newline = true;
+      i += 1;
+    } else if (c === ' ' || c === '\t' || c === '\f' || c === '\v') {
+      i += 1;
+    } else if (c === '-' && sql[i + 1] === '-') {
+      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') {
+        i += 1;
+      }
+    } else {
+      break;
+    }
+  }
+  return newline && sql[i] === "'" ? i : -1;
+}
+
+/** Index just past an E'' string opened before `from`, or -1 when it never closes. A segment that
+ *  continues it on a later line is still an E'' segment to Postgres, backslash escapes included. */
+function closingEString(sql: string, from: number): number {
+  let end = closingQuote(sql, from, "'", true);
+  while (end !== -1) {
+    const next = continuationQuote(sql, end);
+    if (next === -1) {
+      return end;
+    }
+    end = closingQuote(sql, next + 1, "'", true);
+  }
+  return -1;
+}
+
 /** Index just past the `*\/` that closes the block comment opened at `from`; -1 when it never
  *  closes. Postgres nests block comments. */
 function closingComment(sql: string, from: number): number {
@@ -158,8 +196,9 @@ function unwrappableSql(why: string): OpError {
  * (`FROM (\n<sql>\n) sshepherd_q LIMIT n`), so it must not be able to close that wrapper's
  * parenthesis itself (`... FROM big) sshepherd_q) t, (SELECT (SELECT 1` aggregates every row past
  * the limit) or leave a string or comment open for the wrapper's tail to fall into. Scanned with
- * Postgres's lexical rules (standard strings, E'' escapes, dollar quotes, quoted identifiers,
- * `--` comments ending at \n or \r, nested block comments), every parenthesis outside them must
+ * Postgres's lexical rules (standard strings, E'' escapes carried into the segments that continue
+ * an E'' string on later lines, dollar quotes, quoted identifiers, `--` comments ending at \n or
+ * \r, nested block comments), every parenthesis outside them must
  * close inside the caller's text. `boundedSessionSql` pins `standard_conforming_strings` on, so a
  * backslash in a plain '' string is a character to the server exactly as it is here.
  */
@@ -188,7 +227,7 @@ export function assertSelfContainedSql(sql: string): void {
         i += 1;
       }
       if (i - start === 1 && (c === 'e' || c === 'E') && sql[i] === "'") {
-        i = closingQuote(sql, i + 1, "'", true);
+        i = closingEString(sql, i + 1);
         if (i === -1) {
           throw unwrappableSql('the SQL leaves a string open');
         }

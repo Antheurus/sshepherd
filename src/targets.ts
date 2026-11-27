@@ -48,7 +48,13 @@ export interface PgTarget {
   denyColumns: string[];
   /** Containers on this target's alias whose env key names `env keys --container` may read. */
   containers: string[];
+  /** A table with only `alias` and `containers`: it gates `env keys --container` and `services
+   *  inspect`'s env, and is no pg-target — a db op naming it is refused. */
+  containersOnly?: boolean;
 }
+
+/** The fields a containers-only table holds; any other field makes it a pg-target again. */
+const CONTAINERS_ONLY_FIELDS = new Set(['alias', 'containers']);
 
 /** `db query` masks a column whose name matches one of these, unless the target declares its own
  *  `deny_columns`: secrets by name, plus Postgres's own `rolpassword` (pg_authid, readable through
@@ -187,6 +193,13 @@ function readTarget(name: string, raw: unknown): PgTarget {
     throw targetsError(`targets.toml: target '${name}' is missing 'alias'`);
   }
 
+  if (
+    containers.length > 0 &&
+    Object.keys(record).every((key) => CONTAINERS_ONLY_FIELDS.has(key))
+  ) {
+    return { ...base, containersOnly: true };
+  }
+
   if (kind === 'container-env') {
     const envKey = str(record, 'env_key') ?? 'DATABASE_URL';
     if (container === null) {
@@ -266,6 +279,13 @@ export function declaredContainers(alias: string, path?: string): string[] {
   return [...declared].sort();
 }
 
+/** Target names a db op may use: every table except a containers-only one. */
+export function pgTargetNames(path?: string): string[] {
+  return Object.entries(loadTargets(path))
+    .filter(([, target]) => target.containersOnly !== true)
+    .map(([name]) => name);
+}
+
 export function resolveTarget(name: string, path?: string): PgTarget {
   const targets = loadTargets(path);
   const target = targets[name];
@@ -273,8 +293,18 @@ export function resolveTarget(name: string, path?: string): PgTarget {
     throw new OpError('VALIDATION_ERROR', `pg-target '${name}' is not declared in targets.toml`, {
       hint: 'Use a declared target name, or add this one with setup db-target scaffold.',
       next: 'sshepherd db list',
-      did_you_mean: didYouMean(name, Object.keys(targets)),
+      did_you_mean: didYouMean(name, pgTargetNames(path)),
     });
+  }
+  if (target.containersOnly === true) {
+    throw new OpError(
+      'VALIDATION_ERROR',
+      `targets.toml entry '${name}' declares only containers (for env keys --container and services inspect); a db op needs 'user', 'database' and how to reach psql (container, or compose_file + service, or kind)`,
+      {
+        hint: 'Pick a pg-target from db list, or have a human add the connection fields to this entry.',
+        next: 'sshepherd db list',
+      },
+    );
   }
   return target;
 }

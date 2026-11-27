@@ -16,13 +16,14 @@
 #   1. Read-only DB role (recommended, engine-side boundary): the `user` below should be
 #      a role with SELECT-only grants, e.g.
 #        CREATE ROLE sshepherd_ro WITH LOGIN;
-#        GRANT pg_read_all_data TO sshepherd_ro;            -- PG14+
+#        GRANT USAGE ON SCHEMA public TO sshepherd_ro;
+#        GRANT SELECT ON ALL TABLES IN SCHEMA public TO sshepherd_ro;
 #        ALTER ROLE sshepherd_ro SET default_transaction_read_only = on;
 #      This is the real boundary — it catches writable CTEs and volatile functions that
 #      no client-side parser can reliably detect. `setup db-target ro-role <target>
-#      --print-sql` prints the full SQL; pg_read_all_data also reads pg_authid (every
-#      role's password verifier), and `--tables-only` prints a variant granting only the
-#      app's tables instead.
+#      --print-sql` prints the full SQL, granting only the app's tables; `--all-data`
+#      prints the pg_read_all_data variant, which also reads pg_authid (every role's
+#      password verifier).
 #   2. sshepherd wraps every query in `BEGIN TRANSACTION READ ONLY; ...; ROLLBACK;`
 #      (defense in depth, not a substitute for #1 — a session can revoke read-only on
 #      itself).
@@ -55,6 +56,13 @@ deny_columns = ["pass(word)?|secret|token|api_?key|private_?key|credential|salt|
 containers = ["staging_app_1"]               # optional: containers on this alias whose env key
                                              # names `env keys --container` may read (values
                                              # never leave the host); any other is refused
+
+# Containers only — no Postgres on this alias, just the containers whose env key names
+# `env keys --container` (and `services inspect`'s env) may read. A table with nothing but
+# alias and containers is no pg-target: db list leaves it out and a db op naming it is refused.
+[web-env]
+alias = "web-02"
+containers = ["myapp_worker_1", "myapp_web_1"]
 
 # URL held in an app container's env — the container's env var (env_key, default
 # DATABASE_URL) holds postgres://user:password@host/db; it is decoded into PG* variables

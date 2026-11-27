@@ -194,12 +194,13 @@ const envKeys: OpSpec<EnvKeyEntry[]> = {
   },
 };
 
-/** Key names a local `.env.example`-style file defines: the part before `=` on a `KEY=...` line.
- *  The value half of every line is dropped here, never held past this function. */
+/** Key names a local `.env.example`-style file defines, read by the same `DOTENV_AWK` the host runs
+ *  on the remote file (multi-line quoted values, escaped quotes, `export`, CRLF, comments,
+ *  `KEY = value`), so both sides of the diff agree on what a key is. Only the key column is kept. */
 export function readAgainstKeys(localPath: string): Set<string> {
-  let text: string;
+  let text: Buffer;
   try {
-    text = readFileSync(localPath, 'utf8');
+    text = readFileSync(localPath);
   } catch {
     throw new OpError(
       'VALIDATION_ERROR',
@@ -207,14 +208,17 @@ export function readAgainstKeys(localPath: string): Set<string> {
       { hint: '--against names a LOCAL file such as ./.env.example.' },
     );
   }
-  const keys = new Set<string>();
-  for (const line of text.split('\n')) {
-    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
-    if (match?.[1] !== undefined) {
-      keys.add(match[1]);
-    }
+  const awk = Bun.spawnSync(['awk', DOTENV_AWK], { stdin: text, stdout: 'pipe', stderr: 'pipe' });
+  if (awk.exitCode !== 0) {
+    throw new OpError(
+      'COMMAND_FAILED',
+      `env diff: reading the key names of local file '${localPath}' with awk failed (exit ${awk.exitCode})`,
+      {
+        hint: 'env diff needs a POSIX awk on PATH locally, the same one the host uses for the remote file.',
+      },
+    );
   }
-  return keys;
+  return new Set(parseEnvKeyLines(awk.stdout.toString()).map((entry) => entry.key));
 }
 
 interface EnvDiffResult {
