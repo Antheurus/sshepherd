@@ -157,15 +157,22 @@ export function capLines(data: unknown): { data: unknown; cut: boolean } {
  *  left, `truncated` turns true (more lines exist than were returned) and `next_since` is the last
  *  returned line's instant plus 1 ns, so paging from it repeats nothing. A `kept: 'oldest'` page was
  *  cut from its front by `--limit`/`--max-bytes` (both keep the tail of a log op); the same number
- *  of lines is taken from its start instead, so paging forward from `next_since` skips nothing. Only
- *  fields still present (after `--fields`) are rewritten. */
-export function recountLines(before: unknown, after: unknown, sourceCut: boolean): unknown {
+ *  of lines is taken from its start instead, so paging forward from `next_since` skips nothing.
+ *  `kept` is read from `unselected` (the data before `--fields`), so dropping it from the output
+ *  never turns a `--since` page into a newest-kept one. Only fields still present (after
+ *  `--fields`) are rewritten. */
+export function recountLines(
+  before: unknown,
+  after: unknown,
+  sourceCut: boolean,
+  unselected: unknown = before,
+): unknown {
   if (!isRecord(after) || !Array.isArray(after.lines)) {
     return after;
   }
   const beforeLines: unknown[] =
     isRecord(before) && Array.isArray(before.lines) ? before.lines : [];
-  const kept = after.kept ?? (isRecord(before) ? before.kept : undefined);
+  const kept = isRecord(unselected) ? unselected.kept : undefined;
   const lines: unknown[] =
     kept === 'oldest' && beforeLines.length > after.lines.length
       ? beforeLines.slice(0, after.lines.length)

@@ -2,10 +2,11 @@ import {
   AUDIT_IDENTIFIER_ARGS,
   type AuditIdentifier,
   type AuditOutcome,
+  AuditWriteError,
   auditMutating,
   confirmGate,
 } from './audit.ts';
-import { describeError, errorInfo, fillNext } from './errors.ts';
+import { auditUnwritableWarning, describeError, errorInfo, fillNext } from './errors.ts';
 import {
   DEFAULT_MAX_BYTES,
   MAX_PARTIAL_STDOUT_CHARS,
@@ -102,6 +103,7 @@ function scrubOptionsFor(op: OpSpec, ctx: OpContext): ScrubOptions {
     revealKeys: reveal ? revealKeysOf(ctx, reveal.argName) : new Set(),
     extraPatterns: loadScrubExtraPatterns(ctx.alias),
     maskAddresses: !loadRevealAddresses(ctx.alias),
+    maskEnvBlocks: op.maskEnvBlocks === true,
   };
 }
 
@@ -250,6 +252,7 @@ function shapeOutput(
     shaped = { ...shaped, data: capped.data };
     cut = cut || capped.cut;
   }
+  const unselected = shaped.data;
   if (deps.fields !== undefined) {
     const { data, unmatched } = selectFields(shaped.data, deps.fields);
     shaped = { ...shaped, data, ...(unmatched.length > 0 ? { fields_unmatched: unmatched } : {}) };
@@ -271,7 +274,10 @@ function shapeOutput(
     op.recount && capped.output_truncated && round < RECOUNT_MAX_ROUNDS;
     round++
   ) {
-    const recounted = { ...capped, data: op.recount(selected, capped.data, cutAtTransport) };
+    const recounted = {
+      ...capped,
+      data: op.recount(selected, capped.data, cutAtTransport, unselected),
+    };
     if (Buffer.byteLength(serializeJson(recounted)) <= maxBytes) {
       return recounted;
     }
@@ -315,8 +321,9 @@ interface OpResult {
  * resolves into `deps.yes`) and always writes exactly one audit line once the op has ended,
  * whether it succeeded, failed, was refused, or threw. Nothing escapes as an exception: a throw
  * becomes an `INVALID_ARGS`/`VALIDATION_ERROR` envelope (the caller's input) or an
- * `INTERNAL_ERROR` one (ours), and an audit line that cannot be written becomes
- * `AUDIT_WRITE_FAILED` carrying the op's own result. The CLI is the only intended caller in production; tests call
+ * `INTERNAL_ERROR` one (ours). An audit line that cannot be written leaves a mutating op's own
+ * envelope standing with an `AUDIT_UNWRITABLE` warning (the op already ran), and turns a content
+ * read into `AUDIT_WRITE_FAILED` carrying its result. The CLI is the only intended caller in production; tests call
  * this directly with a scripted transport so no real ssh/network is ever touched.
  */
 export async function executeOp(
@@ -362,8 +369,17 @@ export async function executeOp(
   }
   try {
     auditFor(deps, op, ctx.alias, command, ctx, outcome, envelope);
-  } catch {
-    return unauditedEnvelope(envelope, command, outcome);
+  } catch (err) {
+    if (!requiresConfirm) {
+      return unauditedEnvelope(envelope, command, outcome);
+    }
+    const { role, errno } =
+      err instanceof AuditWriteError ? err : { role: 'audit_file' as const, errno: undefined };
+    const warned = {
+      ...envelope,
+      warnings: [...(envelope.warnings ?? []), auditUnwritableWarning(role, errno)],
+    };
+    return capEnvelope(warned, deps.maxBytes ?? DEFAULT_MAX_BYTES, op.truncateKeeps ?? 'head');
   }
   return envelope;
 }

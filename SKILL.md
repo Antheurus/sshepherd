@@ -77,7 +77,8 @@ exception noted below.
   path not pre-declared for that alias in `~/.config/sshepherd/files-allowlist.toml` —
   fail-closed, same rule as `config get`/`put`/`validate` and `config-allowlist.toml`. See
   Gotchas #11. `logs compose`'s project directory is checked against the same file (on, or
-  under, a declared entry).
+  under, a declared entry), and must hold its own `compose.yaml`/`compose.yml`/`docker-compose.y(a)ml`:
+  without one the op fails (`no configuration file provided`) instead of reading a parent's.
 - Secret-shaped files — a basename containing `.env` (`.env`, `.env.local`, `prod.env`), ending
   `.vars`/`.secrets`, `credentials*`, `*.pem`, `id_*` — are masked by default
   (`KEY=***MASKED***`, `export` and quoted/continued values included) in `files cat`, `files tail`,
@@ -140,7 +141,9 @@ Output is JSON to stdout by default (one `Envelope` per call — see `references
 Every op output that can carry remote text passes one scrubber before it is printed: secret-named
 values (`DB_PASSWORD=`, `token:`, `"api_key":`), JWTs, `sk-`/`ghp_`/`xox?-` tokens, AWS key ids,
 PEM private keys, the password in `scheme://user:pass@` and `Bearer` tokens become `***`;
-`PORT=3000` or `DB_HOST=…` stay visible. The envelope's `scrubbed` is how many values were masked
+`PORT=3000` or `DB_HOST=…` stay visible — except in `deploy run` output, where 3 or more `KEY=value` /
+`KEY = value` lines in a row (a step printing a `.env`) have every value masked whatever the key; a
+lone `BUILD_ID=123` stays. The envelope's `scrubbed` is how many values were masked
 (a count, never the originals). A per-alias `[<alias>.scrub] extra_patterns = ["regex"]` table in
 `reveal-allowlist.toml` masks anything else that is secret for that host. A command that ran and
 failed (any exit but ssh's own 255) carries `error.stderr_tail` — its last 20 lines / 2 KB of
@@ -424,7 +427,7 @@ sshepherd setup reveal-allowlist scaffold myserver --keys NODE_ENV,APP_REGION --
 | `UNKNOWN_SUBGROUP` | an unknown group, action or setup sub-group (`did_you_mean` lists the valid names) |
 | `VALIDATION_ERROR` | an argument or config value the op refuses locally: an unknown pg-target or recipe (`did_you_mean` lists near names), a path not on its allowlist, a non-SELECT query |
 | `CONFIG_PARSE_ERROR` | a sshepherd config file is malformed: the message names the file (`targets.toml`) and the line, never the line's content |
-| `AUDIT_WRITE_FAILED` | a mutating op finished but its audit line could not be written; `data` keeps the op's result, `error.op_outcome` says how it ended (`ok`/`error` ran, `refused` did not) and `error.op_error` holds its own error — do not re-run it just to record it |
+| `AUDIT_WRITE_FAILED` | a content read (`logs *`, `files cat`, …) finished but its audit line could not be written; `data` keeps the op's result, `error.op_outcome` says how it ended (`ok`/`error` ran, `refused` did not) and `error.op_error` holds its own error. A mutating op is never failed for this: it keeps its own envelope plus a `warnings[]` entry `AUDIT_UNWRITABLE` (`path_role` `state_dir`/`audit_archive`/`audit_file`, `errno`, a `hint` naming the fix) — do not re-run either just to record it |
 | `INTERNAL_ERROR` | sshepherd failed while running the op (a bug or an unparseable reply from the host); the message names only the error class |
 | `CONFIRMATION_REQUIRED` | a mutating op ran without `--yes` — refused before any ssh call |
 | `PROFILE_DENIED` | the op needs a higher `SSHEPHERD_PROFILE` than the caller holds (or a target's `max_profile` caps it, or the profile value is unknown) — refused before any ssh call |

@@ -19,8 +19,22 @@ interface Envelope<T> {
   duration_ms: number;
   data: T | null;
   error: ErrorInfo | null;
+  warnings?: EnvelopeWarning[]; // present only when something beside the op itself failed
+}
+
+interface EnvelopeWarning {
+  code: 'AUDIT_UNWRITABLE';     // a mutating op ran, its audit line was not written
+  message: string;
+  hint: string;                 // how to make the audit log writable again
+  path_role: 'state_dir' | 'audit_archive' | 'audit_file'; // which part refused — never the path
+  errno?: string;               // EACCES, ENOSPC, EROFS, ENOTDIR
 }
 ```
+
+`warnings` never changes `ok`, `data` or `error`: they are still the op's own result. A mutating
+op whose audit line cannot be written keeps running and carries `AUDIT_UNWRITABLE` (the user chose
+run-and-warn over fail-closed); a content read in the same spot still fails with
+`AUDIT_WRITE_FAILED`.
 
 `ok` is `error === null` — the two fields are always consistent, never independently
 false/set. `data` and `error` are mutually exclusive: a successful op has `data` populated

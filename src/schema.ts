@@ -54,6 +54,20 @@ const ENVELOPE_FIELDS: Record<keyof Envelope<unknown>, JsonSchema> = {
     items: { type: 'string' },
     description: '--fields paths that matched nothing.',
   },
+  warnings: {
+    type: 'array',
+    items: {
+      type: 'object',
+      properties: {
+        code: { const: 'AUDIT_UNWRITABLE' },
+        message: { type: 'string' },
+        hint: { type: 'string' },
+        path_role: { enum: ['state_dir', 'audit_archive', 'audit_file'] },
+        errno: { type: 'string' },
+      },
+    },
+    description: 'Present only when something beside the op failed; the op result still stands.',
+  },
 };
 
 const REQUIRED_ENVELOPE_FIELDS = [

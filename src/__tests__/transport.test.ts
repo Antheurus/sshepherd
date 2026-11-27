@@ -714,7 +714,7 @@ describe('run — Include, wildcard Host and Match blocks are followed like ssh 
 });
 
 describe('executeOp — an audit line that cannot be written keeps the op result', () => {
-  test('scripted success + audit path under a regular file -> AUDIT_WRITE_FAILED envelope, data kept, no throw', async () => {
+  test('scripted success + audit path under a regular file -> ok envelope with an AUDIT_UNWRITABLE warning, data kept, no throw', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sshepherd-audit-fail-'));
     const notADir = join(dir, 'state-file');
     writeFileSync(notADir, '');
@@ -741,11 +741,13 @@ describe('executeOp — an audit line that cannot be written keeps the op result
     );
 
     expect(calls).toBe(3);
-    expect(envelope.ok).toBe(false);
+    expect(envelope.ok).toBe(true);
     expect(envelope.alias).toBe('web-01');
-    expect(envelope.error?.code).toBe('AUDIT_WRITE_FAILED');
-    expect(envelope.error?.op_outcome).toBe('ok');
-    expect(envelope.error?.message).not.toContain(dir);
+    expect(envelope.error).toBeNull();
+    expect(envelope.warnings?.map((warning) => [warning.code, warning.path_role])).toEqual([
+      ['AUDIT_UNWRITABLE', 'state_dir'],
+    ]);
+    expect(JSON.stringify(envelope)).not.toContain(dir);
     expect(envelope.data).toEqual({ container: 'web', restarted: true });
   });
 });

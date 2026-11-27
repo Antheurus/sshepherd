@@ -14,6 +14,7 @@ import { parseComposeLogLines } from '../parsers/compose-log.ts';
 import { parseDockerLogLines } from '../parsers/docker-log.ts';
 import { type LogLine, parseJournalLines, shapeJournalEntry } from '../parsers/journal.ts';
 import { buildLogsResult, capLines, type LogsResult, recountLines } from '../parsers/logs-shape.ts';
+import { shellJoin } from '../quote.ts';
 import { maskPemBodyChunks, maskPemLines } from '../scrub.ts';
 import { didYouMeanOrAll } from '../suggest.ts';
 import { type OpContext, OpError, type OpSpec, Premasked, type RawResult } from '../types.ts';
@@ -172,17 +173,27 @@ const logsDocker: OpSpec<ReturnType<typeof buildLogsResult>> = {
   },
 };
 
-function buildLogsCompose(ctx: OpContext): string {
-  const query = readLogQuery(ctx);
-  const parts = [
-    'docker',
-    'compose',
-    '--project-directory',
-    reqStr(ctx, 'project_dir'),
-    'logs',
-    '--no-color',
-    '--timestamps',
-  ];
+/** The file names `docker compose` looks for in a project directory, in its own order. */
+const COMPOSE_FILE_NAMES = [
+  'compose.yaml',
+  'compose.yml',
+  'docker-compose.yaml',
+  'docker-compose.yml',
+];
+
+/** Runs `$2` only when the project directory `$1` holds a compose file itself: without one,
+ *  `docker compose --project-directory` walks up to a parent's compose file, which can sit outside
+ *  the allowlisted directory. The refusal uses compose's own wording. One `sh -c`, so the
+ *  transport's remote `timeout` covers the logs command too. */
+const COMPOSE_FILE_GUARD = [
+  `for f in ${COMPOSE_FILE_NAMES.join(' ')}; do`,
+  '  if [ -f "$1/$f" ]; then exec sh -c "$2"; fi',
+  'done',
+  `echo "no configuration file provided: not found in the project directory (${COMPOSE_FILE_NAMES.join(', ')}); a parent directory's compose file is never read" >&2`,
+  'exit 1',
+].join('\n');
+
+function composeLogsCommand(query: LogQuery, parts: string[]): string {
   if (!isWindowed(query)) {
     parts.push('--tail', String(query.scanLines));
     return query.grep === null
@@ -201,6 +212,21 @@ function buildLogsCompose(ctx: OpContext): string {
     order: true,
     newestMax: query.grep === null ? query.scanLines : query.maxLines,
   });
+}
+
+function buildLogsCompose(ctx: OpContext): string {
+  const query = readLogQuery(ctx);
+  const dir = reqStr(ctx, 'project_dir');
+  const parts = [
+    'docker',
+    'compose',
+    '--project-directory',
+    dir,
+    'logs',
+    '--no-color',
+    '--timestamps',
+  ];
+  return shellJoin(['sh', '-c', COMPOSE_FILE_GUARD, 'sh', dir, composeLogsCommand(query, parts)]);
 }
 
 /** Compose prints one container after another, so the lines are put in time order before the

@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, renameSync, rmSync, statSync } f
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { AUDIT_KEEP_FILES, AUDIT_ROTATE_BYTES, MAX_SESSION_ID_CHARS } from './limits.ts';
+import type { AuditPathRole } from './types.ts';
 
 export type AuditOutcome = 'ok' | 'error' | 'refused';
 
@@ -93,17 +94,47 @@ function rotateIfFull(logPath: string, rotateBytes: number, keepFiles: number): 
   renameSync(logPath, newest);
 }
 
+/** What `auditMutating` throws when the log cannot be written: which part refused and the
+ *  filesystem's error code, never the fs message (it quotes the path). */
+export class AuditWriteError extends Error {
+  constructor(
+    public readonly role: AuditPathRole,
+    public readonly errno: string | undefined,
+  ) {
+    super(`the audit log ${role} could not be written${errno === undefined ? '' : ` (${errno})`}`);
+    this.name = 'AuditWriteError';
+  }
+}
+
+function errnoOf(err: unknown): string | undefined {
+  return err instanceof Error && 'code' in err && typeof err.code === 'string'
+    ? err.code
+    : undefined;
+}
+
+function writeStep(role: AuditPathRole, write: () => void): void {
+  try {
+    write();
+  } catch (err) {
+    throw new AuditWriteError(role, errnoOf(err));
+  }
+}
+
 /** Appends one JSON line per audited op (mutating, or exposing content) to the audit log,
  *  creating a private 0700 dir if missing and rotating the file at `AUDIT_ROTATE_BYTES`. */
 export function auditMutating(
   input: AuditEntryInput,
   deps: AuditDeps = { logPath: auditLogPath() },
 ): void {
-  mkdirSync(dirname(deps.logPath), { recursive: true, mode: 0o700 });
-  rotateIfFull(
-    deps.logPath,
-    deps.rotateBytes ?? AUDIT_ROTATE_BYTES,
-    deps.keepFiles ?? AUDIT_KEEP_FILES,
+  writeStep('state_dir', () => {
+    mkdirSync(dirname(deps.logPath), { recursive: true, mode: 0o700 });
+  });
+  writeStep('audit_archive', () =>
+    rotateIfFull(
+      deps.logPath,
+      deps.rotateBytes ?? AUDIT_ROTATE_BYTES,
+      deps.keepFiles ?? AUDIT_KEEP_FILES,
+    ),
   );
   const profile = process.env.SSHEPHERD_PROFILE;
   const sessionId = process.env.SSHEPHERD_SESSION_ID;
@@ -125,7 +156,9 @@ export function auditMutating(
         ? sessionId.slice(0, MAX_SESSION_ID_CHARS)
         : undefined,
   };
-  appendFileSync(deps.logPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  writeStep('audit_file', () =>
+    appendFileSync(deps.logPath, `${JSON.stringify(entry)}\n`, { mode: 0o600 }),
+  );
 }
 
 /** Pure gate: a mutating op needs `--yes` before it runs; the CLI wires the actual prompt. */

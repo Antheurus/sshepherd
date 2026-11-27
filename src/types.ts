@@ -24,6 +24,25 @@ export interface Envelope<T> {
   output_truncated?: true;
   /** `--fields` paths that matched nothing in `data`; present only when some did not. */
   fields_unmatched?: string[];
+  /** Present only when something beside the op itself failed; `ok`, `data` and `error` are still
+   *  the op's own result. */
+  warnings?: EnvelopeWarning[];
+}
+
+/** The part of the audit log a write failed on: its directory, the rotation into an archive, or
+ *  the append to the log file itself. */
+export type AuditPathRole = 'state_dir' | 'audit_archive' | 'audit_file';
+
+/** `AUDIT_UNWRITABLE`: a mutating op ran, but its audit line could not be written. */
+export interface EnvelopeWarning {
+  code: 'AUDIT_UNWRITABLE';
+  message: string;
+  /** How to make the audit log writable again. */
+  hint: string;
+  /** Which part of the audit log refused the write — a role, never the path. */
+  path_role: AuditPathRole;
+  /** The filesystem's error code (`EACCES`, `ENOSPC`, `EROFS`, `ENOTDIR`), when it gave one. */
+  errno?: string;
 }
 
 export type SshErrorCode =
@@ -201,6 +220,9 @@ export interface OpSpec<T = unknown> {
   /** Default true: a non-255 failure carries `error.stderr_tail`. False where stderr can echo the
    *  very content the op masks (`files cat`, `config get`). */
   exposeStderr?: boolean;
+  /** Output that can hold a printed env file (`deploy run` steps): a run of env-file lines has
+   *  every value masked, whatever its key (`ScrubOptions.maskEnvBlocks`). */
+  maskEnvBlocks?: true;
   timeoutSec: number;
   /** Which end of an over-long payload survives a byte cap: `tail` for output whose last lines
    *  decide the outcome (deploy steps); default `head`. */
@@ -213,8 +235,9 @@ export interface OpSpec<T = unknown> {
   /** Line-shaped output: holds every line to `MAX_LINE_BYTES`, after the scrubber has seen it whole. */
   capLines?: (data: unknown) => { data: unknown; cut: boolean };
   /** Re-derives the counters in `data` (`lines_returned`, `truncated`, `next_since`) once
-   *  `--limit`/`--max-bytes` cut it; `sourceCut` says the transport already stopped reading early. */
-  recount?: (before: unknown, after: unknown, sourceCut: boolean) => unknown;
+   *  `--limit`/`--max-bytes` cut it; `sourceCut` says the transport already stopped reading early,
+   *  and `unselected` is `data` before `--fields` (a field the caller dropped can still decide). */
+  recount?: (before: unknown, after: unknown, sourceCut: boolean, unselected: unknown) => unknown;
   output: OutputMode;
   buildRemote: (ctx: OpContext) => string | null;
   shape: (parsed: unknown, ctx: OpContext) => T | Premasked<T>;

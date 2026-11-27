@@ -179,3 +179,9 @@ export const DIAGNOSE_MASTER_CHECK_TIMEOUT_SEC = 3;
 export const DB_MIGRATIONS_COMPARE_MAX = 10_000;
 /** `files head|tail|cat --lines A:B`: the widest range one call returns, the same as `MAX_HEAD_LINES`. */
 export const MAX_FILES_LINE_SPAN = 5_000;
+/** `deploy run` output: this many `KEY=value` / `KEY = value` lines in a row (comment and blank
+ *  lines between them allowed) read as an env file a step printed, and every value in the run is
+ *  masked whatever its key is called. Three, because a build prints a lone `BUILD_ID=123` or a
+ *  pair now and then, while a `.env` dump holds many; build output that happens to look like
+ *  three assignments in a row is masked too, a cost the user accepted. */
+export const ENV_BLOCK_MIN_LINES = 3;

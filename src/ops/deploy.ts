@@ -54,6 +54,7 @@ const deployRun: OpSpec<DeployPlan | { output: string }> = {
   exposes: 'content',
   timeoutSec: DEPLOY_TIMEOUT_SEC,
   truncateKeeps: 'tail',
+  maskEnvBlocks: true,
   output: 'raw',
   buildRemote: (ctx) => {
     if (optBool(ctx, 'dry-run', false)) {

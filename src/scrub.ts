@@ -9,6 +9,7 @@
  */
 
 import {
+  ENV_BLOCK_MIN_LINES,
   MAX_HOSTNAME_CHARS,
   MAX_IDENTITY_GAP_CHARS,
   MAX_LABEL_HEX_TAIL_CHARS,
@@ -398,7 +399,9 @@ const PSQL_DATA_ECHO_RULES: PsqlEchoRule[] = [
 /** A stored password verifier, whatever column or key holds it (`SELECT rolpassword AS h FROM
  *  pg_authid` comes back under `h`): Postgres SCRAM-SHA-256 and `md5` + 32 hex as a whole value,
  *  bcrypt `$2a$`/`$2b$`/`$2y$`, argon2, and crypt(3) `$1$`/`$5$`/`$6$` and yescrypt `$y$` (the
- *  `/etc/shadow` default on Debian 11+ and Ubuntu 22.04+, added beside the listed crypt forms). */
+ *  `/etc/shadow` default on Debian 11+ and Ubuntu 22.04+, added beside the listed crypt forms).
+ *  A `.` ends the token unless a token character follows it, so a verifier closing a sentence
+ *  is still whole. */
 const PASSWORD_VERIFIER = new RegExp(
   [
     String.raw`SCRAM-SHA-256\$\d+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+`,
@@ -408,7 +411,7 @@ const PASSWORD_VERIFIER = new RegExp(
     String.raw`\$[156]\$(?:rounds=\d+\$)?[./A-Za-z0-9]{0,16}\$[./A-Za-z0-9]{22,86}`,
     String.raw`\$y\$[./A-Za-z0-9]+\$[./A-Za-z0-9]{1,86}\$[./A-Za-z0-9]{43}`,
   ]
-    .map((shape) => String.raw`(?<![\w$])${shape}(?![\w$./+=])`)
+    .map((shape) => String.raw`(?<![\w$])${shape}(?![\w$/+=]|\.[\w$./+=])`)
     .join('|'),
   'g',
 );
@@ -527,6 +530,9 @@ export interface ScrubOptions {
   literals?: string[];
   /** Masked as `<host>`/`<user>`/`<port>` wherever it appears; no per-alias setting turns it off. */
   identity?: ConnectionIdentity;
+  /** A run of `ENV_BLOCK_MIN_LINES` or more env-file lines has every value masked, whatever its key
+   *  (`deploy run`, whose steps can print a `.env`). */
+  maskEnvBlocks?: boolean;
   /** Every other non-loopback, specified IP literal becomes `<ip-N>`, numbered per `scrub` call.
    *  Only the envelope pass sets it (`[<alias>.scrub] reveal_addresses = true` clears it): a file
    *  `files download` writes to disk is the user's own bytes and keeps its addresses. */
@@ -636,14 +642,15 @@ const HOST_SEP = `["']?(?:${GAP}[=:]${GAP}|[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}})[
 /** Options between `ssh` and its destination (`ssh -l opsuser -p 2222 web1`): a dashed flag and, when
  *  the next word does not start with a dash, its value. Eight is more than any real command line. */
 const SSH_OPTIONS = `(?:[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}}-\\w+(?:[ \\t]{1,${MAX_IDENTITY_GAP_CHARS}}[^\\s-]\\S*)?){0,8}`;
-/** A syslog line's own host field: after a BSD (`Nov 27 10:00:00`) or RFC 3339 timestamp at line start. */
-const SYSLOG_STAMP = String.raw`^(?:[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d|\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:?\d\d)) `;
+/** A syslog line's own host field: after a BSD (`Nov 27 10:00:00`) or RFC 3339 timestamp at line
+ *  start, the RFC 3339 one optionally behind an RFC 5424 `<PRI>VERSION ` header (`<34>1 `). */
+const SYSLOG_STAMP = String.raw`^(?:[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d|(?:<\d{1,3}>\d{1,2} )?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:?\d\d)) `;
 
 /** The alias hostname. An IPv6 one is compared by value, so its expanded and compressed forms are
  *  both `<host>`. A dotless one under `MIN_BARE_HOSTNAME_CHARS` (`web1`, `db`) is masked only in a
  *  host context — `host X`, `hostname X`, `to X`, `ssh [options] X`, `@X`, `X:<port>`, `[X]:<port>`,
- *  a syslog line's host field — and everywhere else stays, being too common a word; any longer or
- *  dotted one is masked wherever it stands. */
+ *  an scp/rsync remote path `X:/path` or `X:~/path`, a syslog line's host field — and everywhere
+ *  else stays, being too common a word; any longer or dotted one is masked wherever it stands. */
 function hostnameRule(hostname: string): IdentityRule | null {
   const escaped = escapeRegExp(hostname);
   if (IPV4_EXACT.test(hostname)) {
@@ -676,7 +683,7 @@ function hostnameRule(hostname: string): IdentityRule | null {
   if (!hostname.includes('.') && hostname.length < MIN_BARE_HOSTNAME_CHARS) {
     return {
       pattern: new RegExp(
-        String.raw`((?:^|[^\w-])(?:host(?:name)?|to|ssh${SSH_OPTIONS})${HOST_SEP}|@|${SYSLOG_STAMP})${escaped}(?![\w-]|\.[\w-])|(?<![\w.-])${escaped}(?=:\d{1,5}(?![\d.]))|(?<=\[)${escaped}(?=\]:\d{1,5}(?!\d))`,
+        String.raw`((?:^|[^\w-])(?:host(?:name)?|to|ssh${SSH_OPTIONS})${HOST_SEP}|@|${SYSLOG_STAMP})${escaped}(?![\w-]|\.[\w-])|(?<![\w.-])${escaped}(?=:\d{1,5}(?![\d.])|:[/~])|(?<=\[)${escaped}(?=\]:\d{1,5}(?!\d))`,
         'gim',
       ),
       mask: leadThen(HOST_MASK),
@@ -1054,6 +1061,44 @@ function hidesSecret(
   return scrubTextWith(decoded, options, addresses).count > 0;
 }
 
+/** One env-file assignment as a whole line: `[export ]KEY=value`, blanks allowed around `=`. */
+const ENV_BLOCK_LINE = new RegExp(
+  String.raw`^([ \t]*(?:export[ \t]+)?${KEY_NAME}[ \t]*=[ \t]*)(.*)$`,
+);
+/** Lines an env file holds between its assignments, which do not end a run. */
+const ENV_BLOCK_FILLER = /^[ \t]*(?:#.*)?$/;
+
+/** Every value in a run of at least `ENV_BLOCK_MIN_LINES` assignment lines, whatever its key: the
+ *  key-name rules alone leave `SPACED = value` readable, and in a printed `.env` any key can hold
+ *  a secret. A shorter run is left to those rules. */
+function maskEnvBlocks(text: string): ScrubResult<string> {
+  const lines = text.split('\n');
+  let count = 0;
+  let run: number[] = [];
+  const flush = (): void => {
+    if (run.length >= ENV_BLOCK_MIN_LINES) {
+      for (const index of run) {
+        const match = ENV_BLOCK_LINE.exec(lines[index] ?? '');
+        const value = match?.[2] ?? '';
+        if (match !== null && value.trim().length > 0 && !isMasked(value.trim())) {
+          lines[index] = `${match[1]}${maskedValue(value.trim(), ENV_MASK)}`;
+          count += 1;
+        }
+      }
+    }
+    run = [];
+  };
+  lines.forEach((line, index) => {
+    if (ENV_BLOCK_LINE.test(line)) {
+      run.push(index);
+    } else if (!ENV_BLOCK_FILLER.test(line)) {
+      flush();
+    }
+  });
+  flush();
+  return count === 0 ? { value: text, count } : { value: lines.join('\n'), count };
+}
+
 /** Masks every secret in one string, then its addresses; `count` is how many values were replaced. */
 export function scrubText(text: string, options: ScrubOptions = {}): ScrubResult<string> {
   return scrubTextWith(text, options, createAddressMasker(options));
@@ -1108,6 +1153,11 @@ function scrubTextWith(
       }
       return replaced;
     });
+  }
+  if (options.maskEnvBlocks === true) {
+    const blocks = maskEnvBlocks(out);
+    out = blocks.value;
+    count += blocks.count;
   }
   const [protectedText, kept] = protectRevealedLines(out, revealKeys);
   out = protectedText;

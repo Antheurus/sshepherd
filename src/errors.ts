@@ -1,5 +1,11 @@
 import { MAX_TIMEOUT_SEC } from './limits.ts';
-import type { ErrorExtras, ErrorInfo, SshErrorCode } from './types.ts';
+import type {
+  AuditPathRole,
+  EnvelopeWarning,
+  ErrorExtras,
+  ErrorInfo,
+  SshErrorCode,
+} from './types.ts';
 
 /** Placeholder in a guidance `next` that `fillNext` swaps for the alias the op ran against. */
 const ALIAS_PLACEHOLDER = '<alias>';
@@ -80,7 +86,7 @@ const GUIDANCE: Record<SshErrorCode, Guidance> = {
     next: `sshepherd hosts test ${ALIAS_PLACEHOLDER}`,
   },
   COMMAND_FAILED: {
-    hint: 'The command ran and exited non-zero; read remote_exit and the data payload, then fix the cause before re-running.',
+    hint: 'The command ran and exited non-zero; read remote_exit and error.stderr_tail (and data, when it is not null), then fix the cause before re-running.',
     retryable: false,
   },
   COMMAND_TIMEOUT: {
@@ -181,4 +187,36 @@ export function fillNext(info: ErrorInfo, alias: string): ErrorInfo {
     return rest;
   }
   return { ...info, next: info.next.replace(ALIAS_PLACEHOLDER, alias) };
+}
+
+const AUDIT_PATH_WHAT: Record<AuditPathRole, string> = {
+  state_dir: 'the audit log directory could not be created',
+  audit_archive: 'the full audit log could not be rotated into its archive',
+  audit_file: 'the audit log file could not be appended to',
+};
+
+/** Disk-full errors, whose fix is space rather than permissions. */
+const NO_SPACE_ERRNOS = new Set(['ENOSPC', 'EDQUOT']);
+
+/** The warning a mutating op carries when it ran but its audit line was not written: the op is
+ *  never undone or blocked for it (the user chose run-and-warn over fail-closed). Names the part
+ *  of the audit log that refused and the filesystem code, never the path. */
+export function auditUnwritableWarning(
+  role: AuditPathRole,
+  errno: string | undefined,
+): EnvelopeWarning {
+  const fix =
+    errno !== undefined && NO_SPACE_ERRNOS.has(errno)
+      ? 'Free space on the disk that holds the audit log'
+      : 'Make the audit log directory writable by this user (default ~/.local/state/sshepherd), or point SSHEPHERD_STATE_DIR or SSHEPHERD_AUDIT_PATH at a writable directory';
+  const warning: EnvelopeWarning = {
+    code: 'AUDIT_UNWRITABLE',
+    message: `The op ran, but its audit line was not recorded: ${AUDIT_PATH_WHAT[role]}${errno === undefined ? '' : ` (${errno})`}`,
+    hint: `${fix} before the next mutating op; do not re-run this one just to record it.`,
+    path_role: role,
+  };
+  if (errno !== undefined) {
+    warning.errno = errno;
+  }
+  return warning;
 }

@@ -108,7 +108,9 @@ export function lineLimit(query: LogQuery): number {
  *  as `grep -C` would: matching the raw JSON line instead matched `_SYSTEMD_UNIT`, `__CURSOR` and
  *  every other field. The value is cut out with `index`/`substr` only: mawk and busybox awk read a
  *  backslash inside a bracket expression as an escape, so a `match()` regex for a JSON string never
- *  matched there. A MESSAGE journald stores as a byte array (not UTF-8) never matches. */
+ *  matched there. The key may have blanks around its colon (`"MESSAGE" : "..."`, what systemd
+ *  printed before its JsonVariant writer), and a `"MESSAGE"` with no colon after it is a value,
+ *  not the key. A MESSAGE journald stores as a byte array (not UTF-8) never matches. */
 const JOURNAL_MESSAGE_AWK = String.raw`
 function unescape(s,   out, i, ch, nx) {
   out = ""
@@ -120,10 +122,20 @@ function unescape(s,   out, i, ch, nx) {
   }
   return out
 }
+function skipblanks(s) {
+  while (substr(s, 1, 1) == " " || substr(s, 1, 1) == "\t") s = substr(s, 2)
+  return s
+}
 function message(line,   at, s, out, q, k) {
-  at = index(line, "\"MESSAGE\":\"")
+  s = line
+  while ((at = index(s, "\"MESSAGE\"")) > 0) {
+    s = skipblanks(substr(s, at + 9))
+    if (substr(s, 1, 1) != ":") continue
+    s = skipblanks(substr(s, 2))
+    if (substr(s, 1, 1) == "\"") break
+  }
   if (at == 0) return ""
-  s = substr(line, at + 11); out = ""
+  s = substr(s, 2); out = ""
   while ((q = index(s, "\"")) > 0) {
     k = q - 1
     while (k > 0 && substr(s, k, 1) == "\\") k--
