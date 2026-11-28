@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-28T09:34:24.582Z",
+  "command": "git log",
+  "duration_ms": 30,
+  "scrubbed": 0,
+  "data": {
+    "commits": [
+      {
+        "commit": "d9910403c31ad0c41dd1c91c7e848baa30805d43",
+        "committed_at": "2026-11-27T11:13:33Z",
+        "author": "fixture",
+        "subject": "fixture: first deploy"
+      }
+    ],
+    "truncated": false
+  },
+  "error": null
+}

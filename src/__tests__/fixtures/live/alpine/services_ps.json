@@ -2,13 +2,13 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T18:23:19.466Z",
+  "ran_at": "2026-11-28T09:34:20.561Z",
   "command": "services ps",
-  "duration_ms": 125,
-  "scrubbed": 11,
+  "duration_ms": 298,
+  "scrubbed": 15,
   "data": [
     {
-      "id": "90c05e22befb",
+      "id": "67dcb4a054f3",
       "name": "sshepherd-fixture-sshd-debian",
       "image": "sshepherd-smoke-sshd-debian",
       "state": "running",
@@ -32,7 +32,7 @@
       "compose_service": "sshd-debian"
     },
     {
-      "id": "10edc78ad515",
+      "id": "2ea8f876302a",
       "name": "sshepherd-fixture-sshd-alpine",
       "image": "sshepherd-smoke-sshd-alpine",
       "state": "running",
@@ -56,7 +56,7 @@
       "compose_service": "sshd-alpine"
     },
     {
-      "id": "3c0fc5d2b4e2",
+      "id": "cc23c8abd2ee",
       "name": "sshepherd-fixture-postgres",
       "image": "postgres:16-alpine",
       "state": "running",
@@ -80,7 +80,31 @@
       "compose_service": "postgres"
     },
     {
-      "id": "33ebde8b78ac",
+      "id": "dd8eb8a69edd",
+      "name": "sshepherd-fixture-app",
+      "image": "nginx:alpine",
+      "state": "running",
+      "health": "healthy",
+      "restart_count": 0,
+      "oom_killed": false,
+      "exit_code": 0,
+      "mem_limit_bytes": null,
+      "nano_cpus": null,
+      "oom_score_adj": 0,
+      "restart_policy": "no",
+      "ports": [
+        {
+          "host_ip": null,
+          "host_port": null,
+          "container_port": 80,
+          "proto": "tcp"
+        }
+      ],
+      "compose_project": "sshepherd-smoke",
+      "compose_service": "app"
+    },
+    {
+      "id": "e18b452df431",
       "name": "sshepherd-fixture-noisy",
       "image": "nginx:alpine",
       "state": "running",
@@ -104,31 +128,7 @@
       "compose_service": "noisy"
     },
     {
-      "id": "42b5f743444b",
-      "name": "sshepherd-fixture-app",
-      "image": "nginx:alpine",
-      "state": "running",
-      "health": null,
-      "restart_count": 0,
-      "oom_killed": false,
-      "exit_code": 0,
-      "mem_limit_bytes": null,
-      "nano_cpus": null,
-      "oom_score_adj": 0,
-      "restart_policy": "no",
-      "ports": [
-        {
-          "host_ip": null,
-          "host_port": null,
-          "container_port": 80,
-          "proto": "tcp"
-        }
-      ],
-      "compose_project": "sshepherd-smoke",
-      "compose_service": "app"
-    },
-    {
-      "id": "2844843fea0b",
+      "id": "0b98783b0aec",
       "name": "sshepherd-fixture-stderr-writer",
       "image": "nginx:alpine",
       "state": "running",
@@ -150,6 +150,30 @@
       ],
       "compose_project": "sshepherd-smoke",
       "compose_service": "stderr-writer"
+    },
+    {
+      "id": "29ff36aeef67",
+      "name": "sshepherd-fixture-sshd-pw",
+      "image": "sshepherd-smoke-sshd-pw",
+      "state": "running",
+      "health": null,
+      "restart_count": 0,
+      "oom_killed": false,
+      "exit_code": 0,
+      "mem_limit_bytes": null,
+      "nano_cpus": null,
+      "oom_score_adj": 0,
+      "restart_policy": "no",
+      "ports": [
+        {
+          "host_ip": "<host>",
+          "host_port": 33036,
+          "container_port": 22,
+          "proto": "tcp"
+        }
+      ],
+      "compose_project": "sshepherd-smoke",
+      "compose_service": "sshd-pw"
     }
   ],
   "error": null

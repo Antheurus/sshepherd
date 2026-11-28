@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T18:23:10.267Z",
+  "ran_at": "2026-11-28T09:34:00.490Z",
   "command": "db tables",
-  "duration_ms": 78,
+  "duration_ms": 1913,
   "scrubbed": 0,
   "data": [
     {

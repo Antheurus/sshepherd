@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-28T09:33:57.314Z",
+  "command": "git diff-stat",
+  "duration_ms": 64,
+  "scrubbed": 0,
+  "data": {
+    "files": [],
+    "files_changed": 0,
+    "insertions": 0,
+    "deletions": 0,
+    "untracked": 3,
+    "truncated": false
+  },
+  "error": null
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-28T09:33:56.756Z",
+  "command": "git head",
+  "duration_ms": 68,
+  "scrubbed": 0,
+  "data": {
+    "branch": "master",
+    "commit": "3655674a7360cdea81d64c218b9f2b0b8e6c73eb",
+    "subject": "fixture: first deploy",
+    "committed_at": "2026-11-27T11:28:01+00:00",
+    "author": "fixture",
+    "dirty": false,
+    "upstream": null,
+    "ahead": null,
+    "behind": null,
+    "remotes": [
+      {
+        "name": "origin",
+        "url": "https://example.invalid/team/myapp.git"
+      }
+    ]
+  },
+  "error": null
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-28T09:34:24.741Z",
+  "command": "git diff-stat",
+  "duration_ms": 39,
+  "scrubbed": 0,
+  "data": {
+    "files": [],
+    "files_changed": 0,
+    "insertions": 0,
+    "deletions": 0,
+    "untracked": 3,
+    "truncated": false
+  },
+  "error": null
+}

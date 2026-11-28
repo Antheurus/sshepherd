@@ -2,33 +2,33 @@
   "schema_version": 1,
   "ok": true,
   "alias": "",
-  "ran_at": "2026-11-26T18:23:26.352Z",
+  "ran_at": "2026-11-28T09:34:31.856Z",
   "command": "audit tail",
   "duration_ms": 1,
   "scrubbed": 0,
   "data": {
     "rows": [
       {
-        "ts": "2026-11-26T18:23:13.769Z",
+        "ts": "2026-11-28T09:34:07.536Z",
         "alias": "smoke-debian",
         "command": "deploy run",
         "recipe": "smoke-debian",
         "args_hash": "1bi243f",
         "args_sha256": "4cf95454353b05a00e8bcee6a55a04a00829229996f0f71ff600610e562d0a8a",
         "outcome": "ok",
-        "duration_ms": 19,
+        "duration_ms": 33,
         "remote_exit": 0,
         "bytes": 238
       },
       {
-        "ts": "2026-11-26T18:23:26.246Z",
+        "ts": "2026-11-28T09:34:31.635Z",
         "alias": "smoke-alpine",
         "command": "deploy run",
         "recipe": "smoke-alpine",
         "args_hash": "u2n63v",
         "args_sha256": "53bca95a6406f06774e566762e042da433972ea0fadd4a15dadfea157652123f",
         "outcome": "ok",
-        "duration_ms": 19,
+        "duration_ms": 46,
         "remote_exit": 0,
         "bytes": 238
       }

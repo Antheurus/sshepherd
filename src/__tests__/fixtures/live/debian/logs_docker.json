@@ -2,42 +2,43 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T18:23:07.288Z",
+  "ran_at": "2026-11-28T09:33:51.784Z",
   "command": "logs docker",
-  "duration_ms": 40,
-  "scrubbed": 0,
+  "duration_ms": 44,
+  "scrubbed": 5,
   "data": {
     "source": "docker:sshepherd-fixture-app",
     "lines_returned": 5,
     "truncated": true,
+    "kept": "newest",
     "lines": [
       {
-        "ts": "2026-11-26T18:23:00.492659895Z",
+        "ts": "2026-11-28T09:33:43.040826935Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 34"
+        "text": "<host> - - [28/Nov/2026:09:33:43 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:00.492660979Z",
+        "ts": "2026-11-28T09:33:45.196849204Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 35"
+        "text": "<host> - - [28/Nov/2026:09:33:45 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:00.492662062Z",
+        "ts": "2026-11-28T09:33:47.294848043Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 36"
+        "text": "<host> - - [28/Nov/2026:09:33:47 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:00.494770331Z",
+        "ts": "2026-11-28T09:33:49.501034711Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 37"
+        "text": "<host> - - [28/Nov/2026:09:33:49 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:00.496776266Z",
+        "ts": "2026-11-28T09:33:51.553632512Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 38"
+        "text": "<host> - - [28/Nov/2026:09:33:51 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       }
     ],
-    "next_since": "2026-11-26T18:23:00.496776266Z"
+    "next_since": "2026-11-28T09:33:51.553632513Z"
   },
   "error": null
 }

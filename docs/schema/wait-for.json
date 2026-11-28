@@ -9,7 +9,7 @@
     "mutating": false,
     "exposes": "metadata",
     "timeout_sec": 600,
-    "data_shape": "unrecorded",
+    "data_shape": "recorded",
     "args": [
       {
         "name": "until",
@@ -65,7 +65,33 @@
       "type": "integer",
       "description": "How many values the scrubber masked."
     },
-    "data": {},
+    "data": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "attempts": {
+              "type": "integer"
+            },
+            "elapsed_ms": {
+              "type": "integer"
+            },
+            "last_state": {
+              "type": "string"
+            },
+            "met": {
+              "type": "boolean"
+            },
+            "until": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
     "error": {
       "anyOf": [
         {

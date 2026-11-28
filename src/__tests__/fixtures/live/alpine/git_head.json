@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-28T09:34:24.430Z",
+  "command": "git head",
+  "duration_ms": 45,
+  "scrubbed": 0,
+  "data": {
+    "branch": "master",
+    "commit": "d9910403c31ad0c41dd1c91c7e848baa30805d43",
+    "subject": "fixture: first deploy",
+    "committed_at": "2026-11-27T11:13:33Z",
+    "author": "fixture",
+    "dirty": false,
+    "upstream": null,
+    "ahead": null,
+    "behind": null,
+    "remotes": [
+      {
+        "name": "origin",
+        "url": "https://example.invalid/team/myapp.git"
+      }
+    ]
+  },
+  "error": null
+}

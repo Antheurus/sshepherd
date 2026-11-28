@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-28T09:33:57.844Z",
+  "command": "http get",
+  "duration_ms": 119,
+  "scrubbed": 2,
+  "data": null,
+  "error": {
+    "code": "COMMAND_FAILED",
+    "message": "nothing accepted the connection at http://<host>:1/",
+    "hint": "See which ports listen with check ports, and whether the service runs with services ps.",
+    "retryable": false,
+    "next": "sshepherd check ports smoke-debian",
+    "remote_exit": 7,
+    "stderr_tail": "curl: (7) Failed to connect to <host> port 1 after 0 ms: Couldn't connect to server"
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-28T09:33:56.434Z",
+  "command": "wait for",
+  "duration_ms": 52,
+  "scrubbed": 0,
+  "data": {
+    "until": "healthy@container=sshepherd-fixture-app",
+    "met": true,
+    "attempts": 1,
+    "elapsed_ms": 20,
+    "last_state": "healthy"
+  },
+  "error": null
+}

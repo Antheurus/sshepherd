@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T18:23:20.273Z",
+  "ran_at": "2026-11-28T09:34:21.526Z",
   "command": "files cat",
-  "duration_ms": 22,
+  "duration_ms": 28,
   "scrubbed": 1,
   "data": {
     "found": true,

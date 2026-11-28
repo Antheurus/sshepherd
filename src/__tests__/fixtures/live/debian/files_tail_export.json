@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T18:23:08.179Z",
+  "ran_at": "2026-11-28T09:33:53.391Z",
   "command": "files tail",
-  "duration_ms": 19,
+  "duration_ms": 47,
   "scrubbed": 1,
   "data": {
     "lines": [

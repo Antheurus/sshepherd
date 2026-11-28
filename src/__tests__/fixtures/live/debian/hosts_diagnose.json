@@ -2,13 +2,19 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T18:23:06.832Z",
+  "ran_at": "2026-11-28T09:33:50.917Z",
   "command": "hosts test",
-  "duration_ms": 170,
+  "duration_ms": 185,
   "scrubbed": 0,
   "data": {
     "reachable": true,
     "stages": [
+      {
+        "stage": "master",
+        "verdict": "ok",
+        "ms": 20,
+        "detail": "the ControlMaster answers and carries a command"
+      },
       {
         "stage": "dns",
         "verdict": "skipped",
@@ -18,7 +24,7 @@
       {
         "stage": "tcp",
         "verdict": "ok",
-        "ms": 1,
+        "ms": 3,
         "detail": "the port accepted the connection"
       },
       {
@@ -30,13 +36,13 @@
       {
         "stage": "auth",
         "verdict": "ok",
-        "ms": 135,
+        "ms": 124,
         "detail": "the login was accepted"
       },
       {
         "stage": "echo",
         "verdict": "ok",
-        "ms": 135,
+        "ms": 124,
         "detail": "a remote command ran and answered"
       }
     ],

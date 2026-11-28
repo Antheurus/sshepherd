@@ -83,7 +83,7 @@
                 }
               },
               "health": {
-                "type": "null"
+                "type": "string"
               },
               "mounts": {
                 "type": "array"

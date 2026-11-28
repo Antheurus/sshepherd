@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-28T09:33:56.933Z",
+  "command": "git log",
+  "duration_ms": 32,
+  "scrubbed": 0,
+  "data": {
+    "commits": [
+      {
+        "commit": "3655674a7360cdea81d64c218b9f2b0b8e6c73eb",
+        "committed_at": "2026-11-27T11:28:01+00:00",
+        "author": "fixture",
+        "subject": "fixture: first deploy"
+      }
+    ],
+    "truncated": false
+  },
+  "error": null
+}

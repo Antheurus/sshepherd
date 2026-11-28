@@ -9,7 +9,7 @@
     "mutating": false,
     "exposes": "metadata",
     "timeout_sec": 25,
-    "data_shape": "unrecorded",
+    "data_shape": "recorded",
     "args": [
       {
         "name": "path",
@@ -55,7 +55,36 @@
       "type": "integer",
       "description": "How many values the scrubber masked."
     },
-    "data": {},
+    "data": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "deletions": {
+              "type": "integer"
+            },
+            "files": {
+              "type": "array"
+            },
+            "files_changed": {
+              "type": "integer"
+            },
+            "insertions": {
+              "type": "integer"
+            },
+            "truncated": {
+              "type": "boolean"
+            },
+            "untracked": {
+              "type": "integer"
+            }
+          }
+        }
+      ]
+    },
     "error": {
       "anyOf": [
         {

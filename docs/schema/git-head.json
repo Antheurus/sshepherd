@@ -9,7 +9,7 @@
     "mutating": false,
     "exposes": "content",
     "timeout_sec": 25,
-    "data_shape": "unrecorded",
+    "data_shape": "recorded",
     "args": [
       {
         "name": "path",
@@ -55,7 +55,59 @@
       "type": "integer",
       "description": "How many values the scrubber masked."
     },
-    "data": {},
+    "data": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "ahead": {
+              "type": "null"
+            },
+            "author": {
+              "type": "string"
+            },
+            "behind": {
+              "type": "null"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "commit": {
+              "type": "string"
+            },
+            "committed_at": {
+              "type": "string"
+            },
+            "dirty": {
+              "type": "boolean"
+            },
+            "remotes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "subject": {
+              "type": "string"
+            },
+            "upstream": {
+              "type": "null"
+            }
+          }
+        }
+      ]
+    },
     "error": {
       "anyOf": [
         {

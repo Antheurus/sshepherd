@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "alias": "smoke-alpine",
+  "ran_at": "2026-11-28T09:34:24.980Z",
+  "command": "http send",
+  "duration_ms": 1,
+  "scrubbed": 0,
+  "data": null,
+  "error": {
+    "code": "CONFIRMATION_REQUIRED",
+    "message": "Mutating op refused: pass --yes (or confirm interactively) to proceed",
+    "hint": "This op changes state; once a human has approved it, run the same command again with --yes.",
+    "retryable": false
+  }
+}

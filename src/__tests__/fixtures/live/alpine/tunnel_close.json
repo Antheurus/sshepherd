@@ -2,12 +2,12 @@
   "schema_version": 1,
   "ok": true,
   "alias": "",
-  "ran_at": "2026-11-26T18:23:28.985Z",
+  "ran_at": "2026-11-28T09:34:34.062Z",
   "command": "tunnel close",
   "duration_ms": 1,
   "scrubbed": 0,
   "data": {
-    "id": "t-295791de-b289-4f69-b61d-698fa59c66b1",
+    "id": "t-d80a83e7-9d64-4480-ae6b-2adc9d8f99b7",
     "closed": true
   },
   "error": null

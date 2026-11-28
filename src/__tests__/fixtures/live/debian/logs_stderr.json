@@ -2,22 +2,23 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-debian",
-  "ran_at": "2026-11-26T18:23:07.440Z",
+  "ran_at": "2026-11-28T09:33:52.106Z",
   "command": "logs docker",
-  "duration_ms": 43,
+  "duration_ms": 80,
   "scrubbed": 0,
   "data": {
     "source": "docker:sshepherd-fixture-stderr-writer",
     "lines_returned": 1,
     "truncated": false,
+    "kept": "oldest",
     "lines": [
       {
-        "ts": "2026-11-26T18:23:00.512045152Z",
+        "ts": "2026-11-28T09:33:30.146375723Z",
         "stream": "stdout",
         "text": "boom-on-stderr"
       }
     ],
-    "next_since": "2026-11-26T18:23:00.512045152Z"
+    "next_since": "2026-11-28T09:33:30.146375724Z"
   },
   "error": null
 }

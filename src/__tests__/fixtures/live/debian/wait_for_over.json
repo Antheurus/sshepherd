@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ok": false,
+  "alias": "smoke-debian",
+  "ran_at": "2026-11-28T09:33:56.559Z",
+  "command": "wait for",
+  "duration_ms": 0,
+  "scrubbed": 0,
+  "data": null,
+  "error": {
+    "code": "INVALID_ARGS",
+    "message": "--timeout must be a whole number of seconds from 1 to 3600",
+    "hint": "Fix the argument the message names; --help on the action lists every argument.",
+    "retryable": false,
+    "next": "sshepherd wait for --help"
+  }
+}

@@ -2,9 +2,9 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T18:23:18.824Z",
+  "ran_at": "2026-11-28T09:34:19.614Z",
   "command": "hosts test",
-  "duration_ms": 21,
+  "duration_ms": 28,
   "scrubbed": 0,
   "data": {
     "reachable": true

@@ -2,42 +2,43 @@
   "schema_version": 1,
   "ok": true,
   "alias": "smoke-alpine",
-  "ran_at": "2026-11-26T18:23:19.605Z",
+  "ran_at": "2026-11-28T09:34:20.739Z",
   "command": "logs docker",
-  "duration_ms": 27,
-  "scrubbed": 1,
+  "duration_ms": 43,
+  "scrubbed": 5,
   "data": {
     "source": "docker:sshepherd-fixture-app",
     "lines_returned": 5,
     "truncated": true,
+    "kept": "newest",
     "lines": [
       {
-        "ts": "2026-11-26T18:23:00.492660979Z",
+        "ts": "2026-11-28T09:34:09.359067988Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 35"
+        "text": "<ip-1> - - [28/Nov/2026:09:34:09 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"curl/8.7.1\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:00.492662062Z",
+        "ts": "2026-11-28T09:34:12.768555323Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 36"
+        "text": "<host> - - [28/Nov/2026:09:34:12 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:00.494770331Z",
+        "ts": "2026-11-28T09:34:15.073444958Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 37"
+        "text": "<host> - - [28/Nov/2026:09:34:15 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:00.496776266Z",
+        "ts": "2026-11-28T09:34:17.198864164Z",
         "stream": "stdout",
-        "text": "2026/11/26 18:23:00 [notice] 1#1: start worker process 38"
+        "text": "<host> - - [28/Nov/2026:09:34:17 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       },
       {
-        "ts": "2026-11-26T18:23:16.285797640Z",
+        "ts": "2026-11-28T09:34:19.265532067Z",
         "stream": "stdout",
-        "text": "<ip-1> - - [26/Nov/2026:18:23:16 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"curl/8.7.1\" \"-\""
+        "text": "<host> - - [28/Nov/2026:09:34:19 +0000] \"GET / HTTP/1.1\" 200 896 \"-\" \"Wget\" \"-\""
       }
     ],
-    "next_since": "2026-11-26T18:23:16.285797640Z"
+    "next_since": "2026-11-28T09:34:19.265532068Z"
   },
   "error": null
 }

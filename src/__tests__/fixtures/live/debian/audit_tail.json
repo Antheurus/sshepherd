@@ -2,21 +2,21 @@
   "schema_version": 1,
   "ok": true,
   "alias": "",
-  "ran_at": "2026-11-26T18:23:13.872Z",
+  "ran_at": "2026-11-28T09:34:07.671Z",
   "command": "audit tail",
-  "duration_ms": 1,
+  "duration_ms": 2,
   "scrubbed": 0,
   "data": {
     "rows": [
       {
-        "ts": "2026-11-26T18:23:13.769Z",
+        "ts": "2026-11-28T09:34:07.536Z",
         "alias": "smoke-debian",
         "command": "deploy run",
         "recipe": "smoke-debian",
         "args_hash": "1bi243f",
         "args_sha256": "4cf95454353b05a00e8bcee6a55a04a00829229996f0f71ff600610e562d0a8a",
         "outcome": "ok",
-        "duration_ms": 19,
+        "duration_ms": 33,
         "remote_exit": 0,
         "bytes": 238
       }

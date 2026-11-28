@@ -93,6 +93,9 @@
         {
           "type": "object",
           "properties": {
+            "kept": {
+              "type": "string"
+            },
             "lines": {
               "type": "array",
               "items": {
