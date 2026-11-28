@@ -105,7 +105,7 @@ as well as `perl -e ...`.
 | | `git` with `-c` or `--exec-path`/`--config-env` before the subcommand, `--upload-pack`/`--receive-pack`, or any `core.*` argument |
 | | `tar` with `--to-command`, `--use-compress-program`, `--checkpoint-action`, `--info-script`, `--new-volume-script`, `--rsh-command`, `--rmt-command` (any unambiguous abbreviation), or `I`/`F` in a short-option cluster (`-I`, `-xIf`, old-style `xIf`) |
 | | `rsync` with `-e`/`--rsh` or `--rsync-path`; `scp` with `-S`, `-o` or `-F` |
-| | GNU `sed` whose script holds the `e` command or an `s///e` flag, or whose script (or `-f` file) is a param; `--expression`/`--file` are matched in any abbreviation (`--expr`, `--e`, `--fi`) |
+| | GNU `sed` whose script holds the `e` command or an `s///e` flag, or whose script (or `-f` file) is a param; `--expression`/`--file` are matched in any abbreviation (`--expr`, `--e`, `--fi`). The script is found both ways sed can parse: GNU moving options past operands, and option parsing stopping at the first operand (under `POSIXLY_CORRECT`, from an `env` prefix or the host's login environment), so `["env", "POSIXLY_CORRECT=1", "sed", "-n", "1e id", "/etc/hostname", "-e", "p"]` is refused |
 | | `env -S`/`--split-string` |
 
 In a definition with no param, wrappers are followed to the program they start: `env` (options,
@@ -132,10 +132,9 @@ abbreviations). So a definition with a param, and without `allow_shell = true`, 
 1. **argv[0] is a data-only program** (by basename, version suffix dropped), with no wrapper before
    it. `nice`, `sudo`, `timeout`, `xargs`, `stdbuf`, `nohup`, `setsid`, `doas`, `chroot`, `ionice`,
    `flock`, `docker exec` and every program not in the table below need `allow_shell = true` as
-   soon as the definition has a param. The one prefix allowed is `env` followed only by literal
-   `NAME=value` items (`["env", "LC_ALL=C", "grep", "-r", "x", "{dir}"]`): env then reads no option
-   and starts the next item, which must itself be a data-only program. `env -i`, `env -u`, `env -a`
-   and a param after `env` are refused.
+   soon as the definition has a param. `env` is a wrapper like the others, `NAME=value` items
+   included: `env POSIXLY_CORRECT=1` changes how the next program parses its arguments, so
+   `["env", "LC_ALL=C", "grep", "-r", "x", "{dir}"]` needs `allow_shell = true` too.
 2. **Every literal option is spelled exactly as one the program has.** Each program below has a
    table of its short letters and full long names; a long option written as an abbreviation
    (`--expr`, `--fi`, `--show`), an unknown option, or a value glued onto a long option that takes
@@ -145,6 +144,13 @@ abbreviations). So a definition with a param, and without `allow_shell = true`, 
    is already refused, so a param is never itself an option. It may fill the value of an option
    that takes data (`tail -n {n}`, `du --max-depth {d}`, `find -name {pattern}`), never the value of
    one that reads code or a script: `sed -e`/`--expression`, `sed -f`/`--file`.
+4. **No option after the first operand.** GNU getopt reads options anywhere, but under
+   `POSIXLY_CORRECT` (set by an `env` prefix or by the host's own login environment) and in busybox
+   and BSD tools option parsing stops at the first operand, so `["sed", "-n", "{s}", "{f}", "-e",
+   "p"]` would hand `{s}` to sed as its script there. Every option, and `--`, comes before the first
+   operand (`["sed", "-n", "-e", "p", "{f}"]`, `["cat", "-n", "{f}"]`); for `docker` and
+   `systemctl`, before the first operand after the subcommand. `find` (its expression is not
+   options) and `php` (everything after the script is the script's) keep their own rules.
 
 | Data-only program | Options (exact spellings, `-x` short, `--name` long) and constraints |
 |---|---|
@@ -154,7 +160,7 @@ abbreviations). So a definition with a param, and without `allow_shell = true`, 
 | `tail` | `-f` `-F` `-q` `-v` `-z` `-c V` `-n V` `-s V`; `--retry` `--quiet` `--silent` `--verbose` `--zero-terminated` `--bytes V` `--lines V` `--max-unchanged-stats V` `--pid V` `--sleep-interval V` `--follow[=V]` |
 | `ls` | `-aAbBcCdDfFgGhHiklLmnNopqQrRsStuUvxXZ1` `-I V` `-T V` `-w V`; the GNU long names (`--all`, `--human-readable`, `--sort V`, `--color[=V]`, ...; see `DATA_PROGRAMS` in `src/ops/exec.ts`) |
 | `du` | `-0abcDHhklLmPSsx` `-B V` `-d V` `-t V` `-X V`; `--null` `--all` `--apparent-size` `--bytes` `--total` `--dereference-args` `--human-readable` `--inodes` `--count-links` `--dereference` `--no-dereference` `--separate-dirs` `--si` `--summarize` `--one-file-system` `--block-size V` `--max-depth V` `--files0-from V` `--threshold V` `--time-style V` `--exclude-from V` `--exclude V` `--time[=V]` |
-| `df` `stat` `wc` `zcat` `md5sum` `sha1sum` `sha256sum` `readlink` `realpath` `id` `hostname` `uname` `uptime` `free` `ps` `touch` `mkdir` `rmdir` `rm` `cp` `mv` `ln` `chmod` `chown` `date` `journalctl` | each its GNU coreutils / procps / systemd options, exact spellings only (the table per program is `DATA_PROGRAMS` in `src/ops/exec.ts`). Left out on purpose: `journalctl --vacuum-*`/`--rotate`/`--flush`/`-M`, mode-style `chmod -w` (write `chmod a-w`) |
+| `df` `stat` `wc` `zcat` `md5sum` `sha1sum` `sha256sum` `readlink` `realpath` `id` `uname` `uptime` `free` `ps` `touch` `mkdir` `rmdir` `rm` `cp` `mv` `ln` `chmod` `chown` `journalctl` | each its GNU coreutils / procps / systemd options, exact spellings only (the table per program is `DATA_PROGRAMS` in `src/ops/exec.ts`). Left out on purpose: `journalctl --vacuum-*`/`--rotate`/`--flush`/`-M`, mode-style `chmod -w` (write `chmod a-w`) |
 | `grep` `egrep` `fgrep` | `-EFGPiywxzsvcLloqbHhnTZUarR` `-e V` `-f V` `-m V` `-A V` `-B V` `-C V` `-d V` `-D V`, the GNU long names, `--color[=V]`; `-e`/`-f` are data here (a pattern) |
 | `echo` | `-n` `-e` `-E` |
 | `sed` | `-n` `-E` `-r` `-s` `-u` `-z` `-b` `-l V` `-i[SUFFIX]`; `--quiet` `--silent` `--debug` `--posix` `--regexp-extended` `--separate` `--sandbox` `--unbuffered` `--null-data` `--follow-symlinks` `--binary` `--line-length V` `--in-place[=SUFFIX]`; `-e`/`--expression` and `-f`/`--file` read code, so their value must be literal. The script (every `-e`, or the first operand when there is none) must be literal and must not run a command or touch a file: no `e`, `r`, `R`, `w`, `W`, `s///e`, `s///w` |
@@ -174,7 +180,16 @@ started, and any option of a data-only program passed. Now a definition with a p
 `nice`, `sudo`, `timeout`, `xargs`, `stdbuf`, `nohup`, `setsid`, `doas` or `chroot`, with a php
 option before the script, with a docker global option, with `systemctl --user` before the verb, or
 with an abbreviated or unlisted option needs `allow_shell = true` (or the value written into the
-definition). `env NAME=value <data-only program> ...` still runs.
+definition).
+
+**Behaviour change (fix J).** A definition with a param behind `env` now needs `allow_shell = true`,
+`NAME=value` items alone included (`["env", "LC_ALL=C", "cat", "{file}"]`). An option written after
+the first operand in a definition with a param is refused (`["sed", "{file}", "-e", "p"]`: write
+`["sed", "-e", "p", "{file}"]`). `date` and `hostname` left the data-only list, since given an
+operand each tries to set the clock or the host name: `["date", "{fmt}"]` and `["hostname", "{n}"]`
+need `allow_shell = true`, while `["date", "+%F"]` and `["hostname"]` with no param still run. A
+literal `sed` script that runs a command when sed stops parsing options at the first operand is
+refused as well.
 
 ## What every value passes first
 

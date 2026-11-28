@@ -211,13 +211,23 @@ function sedScriptRunsCode(script: string, fileCommands = false): boolean {
 
 /** Whether sed, followed by `rest`, runs code: a script that is a param (the caller would write
  *  the sed program), a literal one holding `e`, or a script file that is a param. The scripts are
- *  every `-e`/`--expression` argument, or the first operand when there is none. */
+ *  every `-e`/`--expression` argument, or the first operand when there is none, read both ways
+ *  sed parses: GNU getopt moving options past operands, and option parsing stopping at the first
+ *  operand (POSIXLY_CORRECT from an `env` prefix or the host's login environment, busybox, BSD). */
 function sedRunsCode(rest: readonly string[]): boolean {
+  return [false, true].some((stopAtOperand) => sedScriptsRunCode(rest, stopAtOperand));
+}
+
+function sedScriptsRunCode(rest: readonly string[], stopAtOperand: boolean): boolean {
   const scripts: string[] = [];
   const files: string[] = [];
   const operands: string[] = [];
   for (let index = 0; index < rest.length; index += 1) {
     const item = rest[index] ?? '';
+    if (stopAtOperand && operands.length > 0) {
+      operands.push(item);
+      continue;
+    }
     const short = /^-[A-Za-z]*?([ef])(.*)$/.exec(item);
     const long = item.startsWith('--') ? (item.slice(2).split('=')[0] ?? '') : '';
     const longInto =
@@ -511,10 +521,11 @@ const SYSTEMCTL_OPTIONS = options({
   longValues: 'lines output property type state job-mode',
 });
 
-/** The data-only programs (rule A7): a param may appear in argv only when argv[0] is one of these
- *  (or `env` with nothing but literal `NAME=value` items before one), each a program that reads
- *  its arguments as data and never starts a program one of them names. Every literal option is
- *  checked against the program's table by exact spelling. `subcommands`: the first item after the
+/** The data-only programs (rule A7): a param may appear in argv only when argv[0] is one of these,
+ *  each a program that reads its arguments as data and never starts a program one of them names.
+ *  `date` and `hostname` are not here: given one operand, each tries to set the clock or the host
+ *  name. Every literal option is checked against the program's table by exact spelling. No option
+ *  may follow the first operand (`paramProblem`). `subcommands`: the first item after the
  *  program is one of these, written literally, and the options after it are that subcommand's.
  *  `find`, `sed` and `php` are read by their own rules in `paramProblem`. `git` is not here: its
  *  aliases, `-c`, pager and textconv settings, and a repository's own config can run a program. */
@@ -612,25 +623,7 @@ const DATA_PROGRAMS: Record<
     }),
   },
   echo: { options: options({ flags: 'neE' }) },
-  date: {
-    options: options({
-      flags: 'Ru',
-      values: 'dfrs',
-      optional: 'I',
-      long: 'rfc-email utc universal debug',
-      longValues: 'date file reference set rfc-3339',
-      longOptional: 'iso-8601',
-    }),
-  },
   id: { options: options({ flags: 'aZgGnruz', long: 'context group groups name real user zero' }) },
-  hostname: {
-    options: options({
-      flags: 'aAbdfiIsy',
-      values: 'F',
-      long: 'alias all-fqdns boot domain fqdn long ip-address all-ip-addresses short yp nis',
-      longValues: 'file',
-    }),
-  },
   uname: {
     options: options({
       flags: 'asnrvmpio',
@@ -883,21 +876,36 @@ const FIND_FLAG_WORDS = new Set([
   ',',
 ]);
 
-/** Reads `items` the way getopt would with `table`: every option checked by exact spelling, the
- *  value of each value-taking one consumed. Returns the operands and each `code` option's value,
- *  or why the items are refused (an unknown or abbreviated option, a param filling a `code`
- *  option). */
+/** How getopt splits a program's items: `permute` is GNU's default, reading options anywhere;
+ *  `stop` ends option parsing at the first operand, as GNU does under POSIXLY_CORRECT and busybox
+ *  and BSD always do. */
+export type ParseMode = 'permute' | 'stop';
+
+export interface DataArgv {
+  problem: string | null;
+  operands: string[];
+  code: string[];
+}
+
+/** Reads `items` the way getopt would with `table` in `mode`: every option checked by exact
+ *  spelling, the value of each value-taking one consumed. Returns the operands and each `code`
+ *  option's value, or why the items are refused (an unknown or abbreviated option, a param filling
+ *  a `code` option). */
 function readOptions(
   program: string,
   items: readonly string[],
   table: OptionTable,
-): { problem: string | null; operands: string[]; code: string[] } {
+  mode: ParseMode,
+): DataArgv {
   const operands: string[] = [];
   const code: string[] = [];
   const refuse = (problem: string) => ({ problem, operands, code });
   let ended = false;
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index] ?? '';
+    if (mode === 'stop' && operands.length > 0) {
+      ended = true;
+    }
     if (ended || item === '-' || !item.startsWith('-')) {
       operands.push(item);
       continue;
@@ -985,30 +993,44 @@ function findProblem(rest: readonly string[]): string | null {
   return null;
 }
 
-/** Why a param in `argv` could become code, or `null` (rule A7). A param may appear only when
- *  argv[0] is on DATA_PROGRAMS, with no wrapper before it: anything else (`nice`, `sudo`,
- *  `timeout`, `xargs`, `ionice`, `flock`, `docker exec`, a site's own script) may start a program
- *  one of its arguments names, and no list of such programs is ever complete. The one prefix
- *  allowed is `env` followed only by literal `NAME=value` items: env reads no option then, and
- *  starts the next item, which must itself be a data-only program. */
-function paramProblem(argv: readonly string[]): string | null {
-  let at = 0;
-  if (programName(argv[0] ?? '') === 'env') {
-    at = 1;
-    while (at < argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[at] ?? '')) {
-      at += 1;
-    }
-    const next = argv[at] ?? '';
-    if (next === '' || next.startsWith('-') || SLOT.test(next)) {
-      return `puts ${next === '' ? 'nothing' : next} after env, where a param definition allows only NAME=value items and then a data-only program`;
-    }
-  }
-  const program = programName(argv[at] ?? '');
+/** How the getopt-parsed data-only program at argv[0] reads the rest of argv in `mode` (a
+ *  subcommand's items by that subcommand's table), or why argv[0] or its subcommand is not one.
+ *  `find` and `php` parse by their own grammar and are read in `paramProblem` instead. */
+export function readDataArgv(argv: readonly string[], mode: ParseMode): DataArgv {
+  const program = programName(argv[0] ?? '');
   const known = Object.hasOwn(DATA_PROGRAMS, program) ? DATA_PROGRAMS[program] : undefined;
   if (known === undefined) {
-    return `hands a param to ${program}, which is not a program sshepherd knows to take its arguments only as data (a param may follow only a data-only program as argv[0])`;
+    return {
+      problem: `hands a param to ${program}, which is not a program sshepherd knows to take its arguments only as data (a param may follow only a data-only program as argv[0], with no wrapper such as env before it)`,
+      operands: [],
+      code: [],
+    };
   }
-  const rest = argv.slice(at + 1);
+  const rest = argv.slice(1);
+  if (known.subcommands === undefined) {
+    return readOptions(program, rest, known.options, mode);
+  }
+  const sub = rest[0] ?? '';
+  const subTable = Object.hasOwn(known.subcommands, sub) ? known.subcommands[sub] : undefined;
+  if (subTable === undefined || SLOT.test(sub)) {
+    return {
+      problem: `hands a param to ${program} ${sub}, which is not one of its data-only subcommands (written right after ${program})`,
+      operands: [],
+      code: [],
+    };
+  }
+  return readOptions(program, rest.slice(1), subTable, mode);
+}
+
+/** Why a param in `argv` could become code, or `null` (rule A7). A param may appear only when
+ *  argv[0] is on DATA_PROGRAMS, with no wrapper before it: anything else (`env`, `nice`, `sudo`,
+ *  `timeout`, `xargs`, `ionice`, `flock`, `docker exec`, a site's own script) may start a program
+ *  one of its arguments names or change how the next program parses (`env POSIXLY_CORRECT=1`),
+ *  and no list of such programs is ever complete. No option may follow the first operand, so the
+ *  split comes out the same whether the program permutes options or stops at the first operand. */
+function paramProblem(argv: readonly string[]): string | null {
+  const program = programName(argv[0] ?? '');
+  const rest = argv.slice(1);
   if (program === 'find') {
     return findProblem(rest);
   }
@@ -1018,20 +1040,14 @@ function paramProblem(argv: readonly string[]): string | null {
       ? 'hands a param to php without a literal script as its first item (php reads its options before the script and runs the script it is handed)'
       : null;
   }
-  let table = known.options;
-  let items = rest;
-  if (known.subcommands !== undefined) {
-    const sub = rest[0] ?? '';
-    const subTable = Object.hasOwn(known.subcommands, sub) ? known.subcommands[sub] : undefined;
-    if (subTable === undefined || SLOT.test(sub)) {
-      return `hands a param to ${program} ${sub}, which is not one of its data-only subcommands (written right after ${program})`;
-    }
-    table = subTable;
-    items = rest.slice(1);
-  }
-  const read = readOptions(program, items, table);
+  const read = readDataArgv(argv, 'permute');
   if (read.problem !== null) {
     return read.problem;
+  }
+  const stopped = readDataArgv(argv, 'stop');
+  const moved = stopped.operands.find((item, index) => item !== read.operands[index]);
+  if (moved !== undefined) {
+    return `puts ${moved} after the first operand ${read.operands[0] ?? ''}: GNU getopt reads it as an option there, but under POSIXLY_CORRECT (an env prefix or the host's login environment) and in busybox and BSD tools option parsing stops at the first operand, so it would be an operand and the param's role could change (write every option before the first operand)`;
   }
   if (program === 'sed') {
     const scripts = read.code.length > 0 ? read.code : read.operands.slice(0, 1);

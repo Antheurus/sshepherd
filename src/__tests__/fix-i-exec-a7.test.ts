@@ -69,6 +69,11 @@ const REFUSED: [string, string, string[]][] = [
   ['xargs --eof=x', '"xargs", "--eof=x", "cat", "{p}"', ['p=/etc/hostname']],
   ['env -a', '"env", "-a", "x", "cat", "{p}"', ['p=/etc/hostname']],
   ['env -i', '"env", "-i", "cat", "{p}"', ['p=/etc/hostname']],
+  [
+    'env A=1 B=2 cat {p} (fix J: env is a wrapper)',
+    '"env", "A=1", "B=2", "cat", "{p}"',
+    ['p=/etc/hostname'],
+  ],
   ['env then a non-data program', '"env", "A=1", "flock", "x", "{p}"', ['p=/etc/hostname']],
   ['cat --show prefix', '"cat", "--show", "{p}"', ['p=/etc/hostname']],
   ['du --files0 prefix', '"du", "--files0", "{p}"', ['p=/etc/hostname']],
@@ -103,7 +108,6 @@ const ALLOWED: [string, string, string[]][] = [
   ['systemctl status --no-pager {p}', '"systemctl", "status", "--no-pager", "{p}"', ['p=cron']],
   ['php artisan {p}', '"php", "artisan", "{p}"', ['p=migrate:status']],
   ['php /srv/a.php {p}', '"php", "/srv/a.php", "{p}"', ['p=x']],
-  ['env A=1 B=2 cat {p}', '"env", "A=1", "B=2", "cat", "{p}"', ['p=/etc/hostname']],
   ['journalctl -u {p} -n 50', '"journalctl", "-u", "{p}", "-n", "50", "--no-pager"', ['p=cron']],
 ];
 

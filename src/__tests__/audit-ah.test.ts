@@ -236,10 +236,10 @@ const PROBES: Probe[] = [
     refuse: true,
   },
   {
-    label: 'env A=1 cat {file}',
+    label: 'env A=1 cat {file} (fix J: env is a wrapper)',
     argv: '"env", "A=1", "cat", "{file}"',
     values: ['file=/etc/hostname'],
-    refuse: false,
+    refuse: true,
   },
   {
     label: 'sudo -u {prog} cat',
