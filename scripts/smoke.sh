@@ -560,10 +560,17 @@ run_matrix() {
   assert_json "[$variant] db migrations: the seeded prisma and rails histories" db_migrations \
     "d['ok'] is True and [t['framework'] for t in d['data']['tables']] == ['prisma', 'rails'] and d['data']['tables'][0]['migrations'][0]['name'] == '20261102103000_add_users_nickname'"
   "$BIN" setup db-target ro-role "$alias" --print-sql >"$OUT/ro_role.sql"
-  if grep -qx 'GRANT pg_read_all_data TO sshepherd_ro;' "$OUT/ro_role.sql"; then
-    pass "[$variant] setup db-target ro-role --print-sql prints the read-only role SQL"
+  if grep -qx 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO sshepherd_ro;' "$OUT/ro_role.sql" \
+    && ! grep -qx 'GRANT pg_read_all_data TO sshepherd_ro;' "$OUT/ro_role.sql"; then
+    pass "[$variant] setup db-target ro-role --print-sql prints tables-only read SQL by default"
   else
-    fail "[$variant] setup db-target ro-role --print-sql did not print the GRANT line"
+    fail "[$variant] setup db-target ro-role --print-sql default is not the tables-only GRANT"
+  fi
+  "$BIN" setup db-target ro-role "$alias" --print-sql --all-data >"$OUT/ro_role_all.sql"
+  if grep -qx 'GRANT pg_read_all_data TO sshepherd_ro;' "$OUT/ro_role_all.sql"; then
+    pass "[$variant] setup db-target ro-role --print-sql --all-data grants pg_read_all_data"
+  else
+    fail "[$variant] setup db-target ro-role --print-sql --all-data did not print the pg_read_all_data GRANT"
   fi
 
   run_cli_any db_query_error db query "$alias" "SELECT nonexistent"
