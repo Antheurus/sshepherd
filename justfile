@@ -28,6 +28,10 @@ rollback:
 check-skill: install
     bun test src/__tests__/skill-doc.test.ts
 
+# Raw ssh vs sshepherd calls per intent bucket from the local Claude Code transcripts (counts only, never a command or host), classified by ~/.claude/hooks/ssh-secret-guard.py. --out writes the JSON report outside this repo.
+ssh-usage *args:
+    python3 scripts/ssh-usage.py {{args}}
+
 # Bring the smoke fixture (debian + alpine sshd, postgres, nginx) up under compose project sshepherd-smoke (SSHEPHERD_SMOKE_PROJECT names another, on ephemeral ports). Refuses when that project is already running.
 smoke-up:
     bash scripts/smoke.sh up
